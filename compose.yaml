@@ -2,7 +2,7 @@ name: i5cloud
 
 services:
   i5cloud:
-    image: ${I5CLOUD_IMAGE:-vampirerune/i5cloud:latest}
+    image: ${I5CLOUD_IMAGE:-vampirerune/device-management-platform:latest}
     container_name: i5cloud
     restart: unless-stopped
     ports:

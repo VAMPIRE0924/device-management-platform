@@ -2,12 +2,12 @@
 
 I5CLOUD 是面向客户内网设备的远程管理平台。平台接入重构版 NPS 节点，以项目绑定既有 Client，并通过同 ID 的 SOCKS 通道完成设备发现、Web 管理入口和 WebSSH 访问。
 
-[Docker Hub](https://hub.docker.com/r/vampirerune/i5cloud) · [部署文档](./docs/部署运维/Docker部署.md) · [产品资料](./docs/README.md) · [验收标准](./docs/验收标准/README.md)
+[Docker Hub](https://hub.docker.com/r/vampirerune/device-management-platform) · [部署文档](./docs/部署运维/Docker部署.md) · [产品资料](./docs/README.md) · [验收标准](./docs/验收标准/README.md)
 
 ## 当前版本
 
 - 正式版本：`v1.0.0`
-- Docker 镜像：`vampirerune/i5cloud:v1.0.0`
+- Docker 镜像：`vampirerune/device-management-platform:v1.0.0`
 - 运行形态：React SPA 嵌入 Go 单二进制，SQLite 持久化，单容器部署
 - 支持架构：`linux/amd64`、`linux/arm64`
 
@@ -27,7 +27,7 @@ I5CLOUD 是面向客户内网设备的远程管理平台。平台接入重构版
 要求：Docker Engine 24+ 和 Docker Compose v2。
 
 ```bash
-git clone https://github.com/VAMPIRE0924/-.git i5cloud
+git clone https://github.com/VAMPIRE0924/device-management-platform.git i5cloud
 cd i5cloud
 cp .env.example .env
 cp conf/i5cloud.conf.example conf/i5cloud.conf

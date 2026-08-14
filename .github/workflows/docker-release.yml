@@ -27,7 +27,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: vampirerune/i5cloud
+          images: vampirerune/device-management-platform
           tags: |
             type=semver,value=${{ inputs.version }},pattern={{version}}
             type=semver,value=${{ inputs.version }},pattern={{major}}.{{minor}}

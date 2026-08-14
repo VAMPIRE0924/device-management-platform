@@ -3,7 +3,7 @@ set -eu
 
 project_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 run_id="$(date +%s)-$$"
-image="i5cloud/remote-management:container-acceptance"
+image="i5cloud/device-management-platform:container-acceptance"
 primary="i5cloud-acceptance-$run_id"
 restored="i5cloud-restored-$run_id"
 primary_volume="i5cloud-acceptance-data-$run_id"

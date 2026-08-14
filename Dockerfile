@@ -28,7 +28,7 @@ LABEL org.opencontainers.image.title="I5CLOUD Remote Management Platform" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.source="https://github.com/VAMPIRE0924/-" \
+      org.opencontainers.image.source="https://github.com/VAMPIRE0924/device-management-platform" \
       org.opencontainers.image.licenses="NOASSERTION"
 RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -S -g 10001 i5cloud && \

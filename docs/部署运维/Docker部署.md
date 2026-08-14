@@ -1,6 +1,6 @@
 # Docker 正式部署
 
-本文适用于 `vampirerune/i5cloud:v1.0.0`。生产形态为单容器、单实例 SQLite；不支持多个应用实例同时写同一数据卷。
+本文适用于 `vampirerune/device-management-platform:v1.0.0`。生产形态为单容器、单实例 SQLite；不支持多个应用实例同时写同一数据卷。
 
 ## 1. 前置条件
 
@@ -17,7 +17,7 @@ Web 会话必须使用泛域名。每个会话会生成独立子域名，从而�
 ## 2. 准备目录
 
 ```bash
-git clone https://github.com/VAMPIRE0924/-.git i5cloud
+git clone https://github.com/VAMPIRE0924/device-management-platform.git i5cloud
 cd i5cloud
 cp .env.example .env
 cp conf/i5cloud.conf.example conf/i5cloud.conf
@@ -26,7 +26,7 @@ cp conf/i5cloud.conf.example conf/i5cloud.conf
 `.env` 建议保持：
 
 ```dotenv
-I5CLOUD_IMAGE=vampirerune/i5cloud:v1.0.0
+I5CLOUD_IMAGE=vampirerune/device-management-platform:v1.0.0
 I5CLOUD_BIND_ADDRESS=127.0.0.1
 I5CLOUD_HOST_PORT=8088
 TZ=Asia/Shanghai
@@ -191,7 +191,7 @@ SMTP 端口决定连接方式：
 然后修改 `.env` 中的固定版本：
 
 ```bash
-I5CLOUD_IMAGE=vampirerune/i5cloud:v1.0.0
+I5CLOUD_IMAGE=vampirerune/device-management-platform:v1.0.0
 ```
 
 执行：
@@ -219,7 +219,7 @@ docker run --rm \
   -v "$PWD/secrets/i5cloud_api_token:/run/secrets/i5cloud_api_token:ro" \
   -v "$PWD/secrets/i5cloud_setup_token:/run/secrets/i5cloud_setup_token:ro" \
   -e I5CLOUD_CONFIG_FILE=/etc/i5cloud/i5cloud.conf \
-  vampirerune/i5cloud:v1.0.0 \
+  vampirerune/device-management-platform:v1.0.0 \
   restore /backup/i5cloud-backup.db
 docker compose up -d
 ```
