@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:22-alpine AS web
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
 RUN npm run build:spa
 
-FROM golang:1.26.6-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine AS build
 ARG VERSION=dev
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src/backend
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
@@ -17,7 +19,7 @@ COPY backend/ ./
 RUN find internal/ui/dist -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 COPY --from=web /src/frontend/dist-spa/ ./internal/ui/dist/
 RUN CGO_ENABLED=0 go test ./... && \
-    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/i5cloud ./cmd/i5cloud
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/i5cloud ./cmd/i5cloud
 
 FROM alpine:3.22
 ARG VERSION=dev
