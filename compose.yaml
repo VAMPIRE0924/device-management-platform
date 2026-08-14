@@ -1,0 +1,38 @@
+name: i5cloud
+
+services:
+  i5cloud:
+    image: ${I5CLOUD_IMAGE:-vampirerune/i5cloud:latest}
+    container_name: i5cloud
+    restart: unless-stopped
+    ports:
+      - "${I5CLOUD_BIND_ADDRESS:-127.0.0.1}:${I5CLOUD_HOST_PORT:-8088}:8088"
+    volumes:
+      - i5cloud-data:/data
+      - ./conf/i5cloud.conf:/etc/i5cloud/i5cloud.conf:ro
+      - ./secrets/nodes:/run/secrets/i5cloud-nodes:ro
+    secrets:
+      - i5cloud_api_token
+      - i5cloud_setup_token
+    environment:
+      I5CLOUD_CONFIG_FILE: /etc/i5cloud/i5cloud.conf
+      TZ: ${TZ:-Asia/Shanghai}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/i5cloud", "healthcheck"]
+      interval: 20s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  i5cloud-data:
+
+secrets:
+  i5cloud_api_token:
+    file: ./secrets/i5cloud_api_token
+  i5cloud_setup_token:
+    file: ./secrets/i5cloud_setup_token

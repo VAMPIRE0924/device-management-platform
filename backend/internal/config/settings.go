@@ -1,0 +1,382 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// PanelSettings is the non-secret configuration surface editable by a system
+// administrator. SMTPPassword is accepted on write but is never populated on read.
+type PanelSettings struct {
+	MFAEnabled             bool     `json:"mfaEnabled"`
+	MFAMethods             []string `json:"mfaMethods"`
+	EmailCodeTTL           string   `json:"emailCodeTTL"`
+	MFAKeyFile             string   `json:"mfaKeyFile"`
+	SMTPHost               string   `json:"smtpHost"`
+	SMTPPort               int      `json:"smtpPort"`
+	SMTPUsername           string   `json:"smtpUsername"`
+	SMTPPassword           string   `json:"smtpPassword,omitempty"`
+	SMTPPasswordConfigured bool     `json:"smtpPasswordConfigured"`
+	ClearSMTPPassword      bool     `json:"clearSMTPPassword,omitempty"`
+	SMTPConfigured         bool     `json:"smtpConfigured"`
+	SMTPFrom               string   `json:"smtpFrom"`
+	TLSCertFile            string   `json:"tlsCertFile"`
+	TLSKeyFile             string   `json:"tlsKeyFile"`
+	TLSConfigured          bool     `json:"tlsConfigured"`
+	PanelDomain            string   `json:"panelDomain"`
+	AccessDomain           string   `json:"accessDomain"`
+	RestartRequired        bool     `json:"restartRequired"`
+	LockedFields           []string `json:"lockedFields"`
+	Source                 string   `json:"source"`
+}
+
+type SettingsManager struct {
+	mu     sync.Mutex
+	active Config
+}
+
+func NewSettingsManager(active Config) *SettingsManager {
+	return &SettingsManager{active: active}
+}
+
+func (m *SettingsManager) Current() PanelSettings {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	desired := m.active
+	if values, err := readConfigFile(m.active.OverrideFile); err == nil && len(values) > 0 {
+		desired = applyEditableValues(desired, values)
+	}
+	settings := panelSettingsFromConfig(desired)
+	settings.RestartRequired = !sameEditableConfig(m.active, desired)
+	settings.LockedFields = environmentLockedFields()
+	settings.Source = "web_override"
+	return settings
+}
+
+func (m *SettingsManager) Save(input PanelSettings) (PanelSettings, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if fieldLocked("smtpPassword") && (strings.TrimSpace(input.SMTPPassword) != "" || input.ClearSMTPPassword) {
+		return PanelSettings{}, fmt.Errorf("smtpPassword is controlled by an environment variable")
+	}
+	input.MFAMethods = normalizedMethods(input.MFAMethods)
+	input.SMTPHost = strings.TrimSpace(input.SMTPHost)
+	input.SMTPUsername = strings.TrimSpace(input.SMTPUsername)
+	input.SMTPFrom = strings.TrimSpace(input.SMTPFrom)
+	input.TLSCertFile = strings.TrimSpace(input.TLSCertFile)
+	input.TLSKeyFile = strings.TrimSpace(input.TLSKeyFile)
+	input.PanelDomain = strings.ToLower(strings.Trim(strings.TrimSpace(input.PanelDomain), "."))
+	input.AccessDomain = strings.ToLower(strings.Trim(strings.TrimSpace(input.AccessDomain), "."))
+	if input.MFAKeyFile != "" && strings.TrimSpace(input.MFAKeyFile) != m.active.MFAKeyFile {
+		return PanelSettings{}, fmt.Errorf("mfa_key_file is read-only in the web interface")
+	}
+	for name, value := range map[string]string{
+		"emailCodeTTL": input.EmailCodeTTL, "smtpHost": input.SMTPHost, "smtpUsername": input.SMTPUsername,
+		"smtpFrom": input.SMTPFrom, "tlsCertFile": input.TLSCertFile,
+		"tlsKeyFile": input.TLSKeyFile, "panelDomain": input.PanelDomain, "accessDomain": input.AccessDomain,
+	} {
+		if strings.ContainsAny(value, "\r\n") {
+			return PanelSettings{}, fmt.Errorf("%s cannot contain line breaks", name)
+		}
+	}
+
+	candidate := m.active
+	candidate.MFAEnabled = input.MFAEnabled
+	candidate.MFAMethods = input.MFAMethods
+	parsedTTL, err := time.ParseDuration(strings.TrimSpace(input.EmailCodeTTL))
+	if err != nil {
+		return PanelSettings{}, fmt.Errorf("mfa_email_code_ttl must be a duration such as 10m")
+	}
+	candidate.EmailCodeTTL = parsedTTL
+	candidate.SMTPHost = input.SMTPHost
+	candidate.SMTPPort = input.SMTPPort
+	candidate.SMTPUsername = input.SMTPUsername
+	candidate.SMTPFrom = input.SMTPFrom
+	candidate.SMTPTLSMode = smtpTLSModeForPort(input.SMTPPort)
+	candidate.TLSCertFile = input.TLSCertFile
+	candidate.TLSKeyFile = input.TLSKeyFile
+	candidate.PanelDomain = input.PanelDomain
+	candidate.AccessDomain = input.AccessDomain
+	if candidate.AccessDomain != "" {
+		if isLocalAccessDomain(candidate.AccessDomain) {
+			candidate.AccessScheme = "http"
+		} else {
+			candidate.AccessScheme = "https"
+		}
+	}
+	if strings.TrimSpace(input.SMTPPassword) != "" {
+		candidate.SMTPPassword = input.SMTPPassword
+	}
+	if input.ClearSMTPPassword && strings.TrimSpace(input.SMTPPassword) != "" {
+		return PanelSettings{}, fmt.Errorf("smtpPassword and clearSMTPPassword cannot be used together")
+	}
+	if input.ClearSMTPPassword {
+		candidate.SMTPPassword = ""
+	}
+	if err := candidate.validate(); err != nil {
+		return PanelSettings{}, err
+	}
+	if err := rejectLockedChanges(m.active, candidate); err != nil {
+		return PanelSettings{}, err
+	}
+
+	passwordFile := ""
+	if input.ClearSMTPPassword {
+		passwordFile = ""
+	} else if strings.TrimSpace(input.SMTPPassword) != "" {
+		passwordFile = filepath.Join(m.active.DataDirectory, "i5cloud.smtp-password")
+		if err := writePrivateFile(passwordFile, []byte(input.SMTPPassword+"\n")); err != nil {
+			return PanelSettings{}, fmt.Errorf("write SMTP password: %w", err)
+		}
+	} else if candidate.SMTPPassword != "" {
+		passwordFile = configuredSMTPPasswordFile(m.active)
+		if passwordFile == "" && strings.TrimSpace(os.Getenv("I5CLOUD_SMTP_PASSWORD")) == "" {
+			passwordFile = filepath.Join(m.active.DataDirectory, "i5cloud.smtp-password")
+			if err := writePrivateFile(passwordFile, []byte(candidate.SMTPPassword+"\n")); err != nil {
+				return PanelSettings{}, fmt.Errorf("protect existing SMTP password: %w", err)
+			}
+		}
+	}
+	content := renderOverride(candidate, passwordFile)
+	if err := writePrivateFile(m.active.OverrideFile, []byte(content)); err != nil {
+		return PanelSettings{}, fmt.Errorf("write settings override: %w", err)
+	}
+	if input.ClearSMTPPassword {
+		managedPasswordFile := filepath.Join(m.active.DataDirectory, "i5cloud.smtp-password")
+		if err := os.Remove(managedPasswordFile); err != nil && !os.IsNotExist(err) {
+			return PanelSettings{}, fmt.Errorf("remove managed SMTP password: %w", err)
+		}
+	}
+	settings := panelSettingsFromConfig(candidate)
+	settings.RestartRequired = !sameEditableConfig(m.active, candidate)
+	settings.LockedFields = environmentLockedFields()
+	settings.Source = "web_override"
+	return settings, nil
+}
+
+func panelSettingsFromConfig(cfg Config) PanelSettings {
+	return PanelSettings{
+		MFAEnabled: cfg.MFAEnabled, MFAMethods: append([]string{}, cfg.MFAMethods...), EmailCodeTTL: formatDurationMinutes(cfg.EmailCodeTTL),
+		MFAKeyFile: cfg.MFAKeyFile, SMTPHost: cfg.SMTPHost, SMTPPort: cfg.SMTPPort, SMTPUsername: cfg.SMTPUsername,
+		SMTPPasswordConfigured: cfg.SMTPPassword != "", SMTPConfigured: cfg.SMTPHost != "" && cfg.SMTPFrom != "", SMTPFrom: cfg.SMTPFrom,
+		TLSCertFile: cfg.TLSCertFile, TLSKeyFile: cfg.TLSKeyFile, TLSConfigured: cfg.TLSCertFile != "" && cfg.TLSKeyFile != "", PanelDomain: cfg.PanelDomain, AccessDomain: cfg.AccessDomain,
+	}
+}
+
+func formatDurationMinutes(value time.Duration) string {
+	return strconv.FormatInt(int64(value/time.Minute), 10) + "m"
+}
+
+func applyEditableValues(cfg Config, values map[string]string) Config {
+	if value, ok := values["mfa_enabled"]; ok {
+		cfg.MFAEnabled, _ = strconv.ParseBool(value)
+	}
+	if value, ok := values["mfa_methods"]; ok {
+		cfg.MFAMethods = splitList(value)
+	}
+	if value, ok := values["mfa_email_code_ttl"]; ok {
+		if parsed, err := time.ParseDuration(value); err == nil {
+			cfg.EmailCodeTTL = parsed
+		}
+	}
+	if value, ok := values["smtp_host"]; ok {
+		cfg.SMTPHost = value
+	}
+	if value, ok := values["smtp_port"]; ok {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.SMTPPort = parsed
+		}
+	}
+	if value, ok := values["smtp_username"]; ok {
+		cfg.SMTPUsername = value
+	}
+	if value, ok := values["smtp_from"]; ok {
+		cfg.SMTPFrom = value
+	}
+	cfg.SMTPTLSMode = smtpTLSModeForPort(cfg.SMTPPort)
+	if value, ok := values["tls_cert_file"]; ok {
+		cfg.TLSCertFile = value
+	}
+	if value, ok := values["tls_key_file"]; ok {
+		cfg.TLSKeyFile = value
+	}
+	if value, ok := values["panel_domain"]; ok {
+		cfg.PanelDomain = value
+	}
+	if value, ok := values["access_domain"]; ok {
+		cfg.AccessDomain = value
+	}
+	if value, ok := values["access_scheme"]; ok {
+		cfg.AccessScheme = value
+	}
+	if value, ok := values["smtp_password_file"]; ok && strings.TrimSpace(value) != "" {
+		if content, err := os.ReadFile(strings.TrimSpace(value)); err == nil {
+			cfg.SMTPPassword = strings.TrimSpace(string(content))
+		}
+	}
+	return cfg
+}
+
+func renderOverride(cfg Config, smtpPasswordFile string) string {
+	lines := []string{
+		"# 由 I5CLOUD 系统设置生成。可由部署配置或环境变量覆盖。",
+		"mfa_enabled = " + strconv.FormatBool(cfg.MFAEnabled),
+		"mfa_methods = " + strings.Join(cfg.MFAMethods, ","),
+		"mfa_email_code_ttl = " + cfg.EmailCodeTTL.String(),
+		"smtp_host = " + cfg.SMTPHost,
+		"smtp_port = " + strconv.Itoa(cfg.SMTPPort),
+		"smtp_username = " + cfg.SMTPUsername,
+		"smtp_password = ",
+		"smtp_from = " + cfg.SMTPFrom,
+		"tls_cert_file = " + cfg.TLSCertFile,
+		"tls_key_file = " + cfg.TLSKeyFile,
+		"panel_domain = " + cfg.PanelDomain,
+		"access_domain = " + cfg.AccessDomain,
+		"access_scheme = " + cfg.AccessScheme,
+	}
+	if smtpPasswordFile != "" {
+		lines = append(lines, "smtp_password_file = "+smtpPasswordFile)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func writePrivateFile(path string, content []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".i5cloud-settings-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(content); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
+}
+
+func configuredSMTPPasswordFile(cfg Config) string {
+	if path := strings.TrimSpace(os.Getenv("I5CLOUD_SMTP_PASSWORD_FILE")); path != "" {
+		return path
+	}
+	if values, err := readConfigFile(cfg.OverrideFile); err == nil {
+		if path := strings.TrimSpace(values["smtp_password_file"]); path != "" {
+			return path
+		}
+	}
+	if values, err := readConfigFile(cfg.ConfigFile); err == nil {
+		return strings.TrimSpace(values["smtp_password_file"])
+	}
+	return ""
+}
+
+func normalizedMethods(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func normalizedList(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func sameEditableConfig(left, right Config) bool {
+	return left.MFAEnabled == right.MFAEnabled && methodsKey(left.MFAMethods) == methodsKey(right.MFAMethods) &&
+		left.EmailCodeTTL == right.EmailCodeTTL && left.SMTPHost == right.SMTPHost && left.SMTPPort == right.SMTPPort &&
+		left.SMTPUsername == right.SMTPUsername && left.SMTPPassword == right.SMTPPassword && left.SMTPFrom == right.SMTPFrom &&
+		left.TLSCertFile == right.TLSCertFile && left.TLSKeyFile == right.TLSKeyFile && left.PanelDomain == right.PanelDomain &&
+		left.AccessDomain == right.AccessDomain && left.AccessScheme == right.AccessScheme
+}
+
+var editableEnvironment = map[string]string{
+	"mfaEnabled": "I5CLOUD_MFA_ENABLED", "mfaMethods": "I5CLOUD_MFA_METHODS", "emailCodeTTL": "I5CLOUD_MFA_EMAIL_CODE_TTL",
+	"smtpHost": "I5CLOUD_SMTP_HOST", "smtpPort": "I5CLOUD_SMTP_PORT", "smtpUsername": "I5CLOUD_SMTP_USERNAME",
+	"smtpPassword": "I5CLOUD_SMTP_PASSWORD", "smtpFrom": "I5CLOUD_SMTP_FROM",
+	"tlsCertFile": "I5CLOUD_TLS_CERT_FILE", "tlsKeyFile": "I5CLOUD_TLS_KEY_FILE", "panelDomain": "I5CLOUD_PANEL_DOMAIN", "accessDomain": "I5CLOUD_ACCESS_DOMAIN",
+}
+
+func environmentLockedFields() []string {
+	locked := []string{}
+	for field, envName := range editableEnvironment {
+		if strings.TrimSpace(os.Getenv(envName)) != "" {
+			locked = append(locked, field)
+		}
+	}
+	if strings.TrimSpace(os.Getenv("I5CLOUD_SMTP_PASSWORD_FILE")) != "" {
+		locked = append(locked, "smtpPassword")
+	}
+	sort.Strings(locked)
+	return locked
+}
+
+func fieldLocked(field string) bool {
+	for _, locked := range environmentLockedFields() {
+		if locked == field {
+			return true
+		}
+	}
+	return false
+}
+
+func rejectLockedChanges(active, candidate Config) error {
+	locked := map[string]bool{}
+	for _, field := range environmentLockedFields() {
+		locked[field] = true
+	}
+	checks := map[string]bool{
+		"mfaEnabled": active.MFAEnabled != candidate.MFAEnabled, "mfaMethods": methodsKey(active.MFAMethods) != methodsKey(candidate.MFAMethods),
+		"emailCodeTTL": active.EmailCodeTTL != candidate.EmailCodeTTL, "smtpHost": active.SMTPHost != candidate.SMTPHost,
+		"smtpPort": active.SMTPPort != candidate.SMTPPort, "smtpUsername": active.SMTPUsername != candidate.SMTPUsername,
+		"smtpFrom":    active.SMTPFrom != candidate.SMTPFrom,
+		"tlsCertFile": active.TLSCertFile != candidate.TLSCertFile, "tlsKeyFile": active.TLSKeyFile != candidate.TLSKeyFile,
+		"panelDomain": active.PanelDomain != candidate.PanelDomain, "accessDomain": active.AccessDomain != candidate.AccessDomain,
+	}
+	for field, changed := range checks {
+		if locked[field] && changed {
+			return fmt.Errorf("%s is controlled by an environment variable", field)
+		}
+	}
+	return nil
+}
+
+func methodsKey(methods []string) string {
+	copyOfMethods := append([]string{}, methods...)
+	sort.Strings(copyOfMethods)
+	return strings.Join(copyOfMethods, ",")
+}

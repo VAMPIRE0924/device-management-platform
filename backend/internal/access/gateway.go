@@ -1,0 +1,405 @@
+package access
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"i5cloud/internal/nodeadapter"
+	"i5cloud/internal/store"
+)
+
+type sessionResolver interface {
+	ResolveAccessToken(context.Context, string) (store.AccessSession, store.EndpointRoute, error)
+}
+
+type routeResolver interface {
+	SOCKSRoute(context.Context, string, int) (nodeadapter.SOCKSRoute, error)
+}
+
+type sessionSubdomainContextKey struct{}
+
+// WithSessionSubdomainAccess marks a request that the control-plane router has
+// already matched against the configured wildcard access domain. A context
+// value is deliberately used instead of a request header: callers must not be
+// able to disable path-prefix isolation by forging an internal routing header.
+func WithSessionSubdomainAccess(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), sessionSubdomainContextKey{}, true))
+}
+
+func usesSessionSubdomain(r *http.Request) bool {
+	value, _ := r.Context().Value(sessionSubdomainContextKey{}).(bool)
+	return value
+}
+
+type WebGateway struct {
+	sessions sessionResolver
+	routes   routeResolver
+	timeout  time.Duration
+}
+
+func NewWebGateway(sessions sessionResolver, routes routeResolver) *WebGateway {
+	return &WebGateway{sessions: sessions, routes: routes, timeout: 20 * time.Second}
+}
+
+func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	if len(token) < 32 || len(token) > 128 || strings.ContainsAny(token, "/\\ ") {
+		gatewayError(w, http.StatusNotFound, "访问会话不存在或已失效")
+		return
+	}
+	digest := sha256.Sum256([]byte(token))
+	session, route, err := g.sessions.ResolveAccessToken(r.Context(), hex.EncodeToString(digest[:]))
+	if errors.Is(err, store.ErrNotFound) {
+		gatewayError(w, http.StatusGone, "访问会话不存在或已失效")
+		return
+	}
+	if err != nil {
+		gatewayError(w, http.StatusBadGateway, "无法校验访问会话")
+		return
+	}
+	if session.Mode != "web" || route.AccessType != "web_proxy" || (route.Protocol != "http" && route.Protocol != "https") {
+		gatewayError(w, http.StatusForbidden, "该会话不是 Web 访问会话")
+		return
+	}
+	if session.SourceIP != "" && session.SourceIP != directSourceIP(r) {
+		gatewayError(w, http.StatusForbidden, "访问会话与当前来源地址不匹配")
+		return
+	}
+	socksRoute, err := g.routes.SOCKSRoute(r.Context(), route.NodeID, route.ClientID)
+	if err != nil {
+		gatewayError(w, http.StatusBadGateway, "无法获取项目通道路由")
+		return
+	}
+	g.proxy(w, r, token, route, socksRoute)
+}
+
+func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token string, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) {
+	basePrefix := "/access/web/" + token
+	if usesSessionSubdomain(r) {
+		basePrefix = ""
+	}
+	stickyHTTPS := false
+	if cookie, err := r.Cookie(upstreamSchemeCookie); err == nil && cookie.Value == "https" {
+		stickyHTTPS = true
+	}
+	upstreamScheme, upstreamPort, upstreamPath, responsePrefix := gatewayUpstream(route, r.PathValue("path"), basePrefix, stickyHTTPS)
+	targetAuthority := net.JoinHostPort(route.Host, strconv.Itoa(upstreamPort))
+	transport := &http.Transport{
+		DialContext:           (SOCKSDialer{ProxyAddress: socksRoute.Address, Username: socksRoute.Username, Password: socksRoute.Password, Timeout: g.timeout}).DialContext,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          32,
+		IdleConnTimeout:       45 * time.Second,
+		TLSHandshakeTimeout:   12 * time.Second,
+		ResponseHeaderTimeout: g.timeout,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: firstNonEmpty(route.TLSServerName, route.Host),
+			// Customer-device administration pages commonly use private CAs or
+			// self-signed certificates. The project SOCKS route still constrains
+			// the destination; browser users never connect to the device directly.
+			InsecureSkipVerify: upstreamScheme == "https",
+		},
+	}
+	proxy := &httputil.ReverseProxy{
+		Transport: transport,
+		Director: func(request *http.Request) {
+			stripControlPlaneHeaders(request.Header)
+			// Path-prefix access needs textual response rewriting. Removing the
+			// browser's Accept-Encoding lets net/http transparently decompress the
+			// upstream body before ModifyResponse sees it.
+			if responsePrefix != "" {
+				request.Header.Del("Accept-Encoding")
+			}
+			request.URL.Scheme = upstreamScheme
+			request.URL.Host = targetAuthority
+			request.URL.Path = upstreamPath
+			request.URL.RawPath = ""
+			request.Host = targetAuthority
+			rewriteBrowserOrigin(request.Header, upstreamScheme+"://"+targetAuthority)
+		},
+		ModifyResponse: func(response *http.Response) error {
+			if route.Protocol == "http" && upstreamScheme == "https" {
+				response.Header.Add("Set-Cookie", (&http.Cookie{Name: upstreamSchemeCookie, Value: "https", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 300}).String())
+			}
+			rewriteLocation(response.Header, upstreamScheme, route.Host, upstreamPort, basePrefix, responsePrefix)
+			rewriteCookies(response.Header, responsePrefix)
+			if err := rewriteTextResponse(response, responsePrefix); err != nil {
+				return err
+			}
+			response.Header.Set("Cache-Control", "no-store")
+			return nil
+		},
+		ErrorHandler: func(writer http.ResponseWriter, _ *http.Request, err error) {
+			gatewayError(writer, http.StatusBadGateway, fmt.Sprintf("内网 Web 服务暂时无法访问：%s", safeProxyError(err)))
+		},
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+const httpsUpgradePath = ".i5cloud-upstream/https"
+const upstreamSchemeCookie = "i5cloud_upstream_scheme"
+
+// gatewayUpstream keeps same-device HTTP -> HTTPS upgrades inside the access
+// session. The marker is intentionally limited to HTTPS on port 443, so it
+// cannot be used to widen a session into an arbitrary-port proxy.
+func gatewayUpstream(route store.EndpointRoute, pathValue, basePrefix string, stickyHTTPS bool) (scheme string, port int, path, responsePrefix string) {
+	scheme, port = route.Protocol, route.TargetPort
+	trimmed := strings.TrimPrefix(pathValue, "/")
+	responsePrefix = basePrefix
+	markedHTTPS := route.Protocol == "http" && (trimmed == httpsUpgradePath || strings.HasPrefix(trimmed, httpsUpgradePath+"/"))
+	if route.Protocol == "http" && (markedHTTPS || stickyHTTPS) {
+		scheme, port = "https", 443
+		if markedHTTPS {
+			trimmed = strings.TrimPrefix(strings.TrimPrefix(trimmed, httpsUpgradePath), "/")
+		}
+		if basePrefix != "" {
+			responsePrefix = basePrefix + "/" + httpsUpgradePath
+		}
+	}
+	path = "/" + trimmed
+	return
+}
+
+const maxRewrittenResponseBytes = 16 << 20
+
+// rewriteTextResponse is the compatibility layer used when a device UI is
+// mounted below /access/web/{token}. Many embedded UIs (including LuCI) emit
+// origin-root URLs such as /luci-static/... from HTML, JavaScript and CSS. Left
+// untouched those requests escape the access session and hit the control plane.
+// Production deployments should still prefer the configured wildcard access
+// domain, where each session owns an origin and no body rewriting is required.
+func rewriteTextResponse(response *http.Response, prefix string) error {
+	if prefix == "" || response.Body == nil || !isRewritableContentType(response.Header.Get("Content-Type")) {
+		return nil
+	}
+	if encoding := strings.TrimSpace(response.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxRewrittenResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("read upstream text response: %w", err)
+	}
+	if len(body) > maxRewrittenResponseBytes {
+		response.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), response.Body))
+		return nil
+	}
+	_ = response.Body.Close()
+	rewritten := prefixRootURLs(body, prefix)
+	response.Body = io.NopCloser(bytes.NewReader(rewritten))
+	response.ContentLength = int64(len(rewritten))
+	response.Header.Set("Content-Length", strconv.Itoa(len(rewritten)))
+	response.Header.Del("ETag")
+	response.Header.Del("Content-MD5")
+	return nil
+}
+
+func isRewritableContentType(contentType string) bool {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
+	return mediaType == "text/html" || mediaType == "application/xhtml+xml" || mediaType == "text/css" ||
+		strings.Contains(mediaType, "javascript") || strings.Contains(mediaType, "json")
+}
+
+// prefixRootURLs deliberately targets only quoted root paths and CSS url(/...)
+// forms. It leaves protocol-relative URLs (//cdn.example/...) and ordinary text
+// untouched, while also handling JSON's optional escaped slash form (\"\\/api\").
+func prefixRootURLs(input []byte, prefix string) []byte {
+	if len(input) == 0 || prefix == "" {
+		return input
+	}
+	prefixBytes := []byte(prefix)
+	output := make([]byte, 0, len(input)+len(prefixBytes)*8)
+	for index := 0; index < len(input); index++ {
+		current := input[index]
+		output = append(output, current)
+		if current == '\'' || current == '"' || current == '`' {
+			// Quotes can legally occur inside JavaScript regular-expression
+			// literals, for example /'/g. A quote immediately following the
+			// opening slash is not a string boundary and must remain untouched.
+			if index > 0 && input[index-1] == '/' {
+				continue
+			}
+			if index+2 < len(input) && input[index+1] == '/' && isURLPathStart(input[index+2]) {
+				output = append(output, prefixBytes...)
+			} else if index+3 < len(input) && input[index+1] == '\\' && input[index+2] == '/' && isURLPathStart(input[index+3]) {
+				output = append(output, prefixBytes...)
+			}
+			continue
+		}
+		if current == '(' && index >= 3 && index+2 < len(input) && input[index+1] == '/' && isURLPathStart(input[index+2]) {
+			if strings.EqualFold(string(input[index-3:index]), "url") {
+				output = append(output, prefixBytes...)
+			}
+		}
+	}
+	return output
+}
+
+func isURLPathStart(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '_' || value == '-' || value == '.' || value == '~'
+}
+
+// stripControlPlaneHeaders prevents platform credentials and caller-supplied
+// forwarding metadata from crossing the trust boundary into a customer device.
+// Device cookies issued by the proxied application are preserved.
+func stripControlPlaneHeaders(header http.Header) {
+	cookieRequest := &http.Request{Header: http.Header{"Cookie": append([]string(nil), header.Values("Cookie")...)}}
+	header.Del("Cookie")
+	deviceCookies := make([]string, 0)
+	for _, cookie := range cookieRequest.Cookies() {
+		if cookie.Name == "i5cloud_session" || cookie.Name == "i5cloud_csrf" || cookie.Name == upstreamSchemeCookie {
+			continue
+		}
+		deviceCookies = append(deviceCookies, cookie.String())
+	}
+	if len(deviceCookies) > 0 {
+		header.Set("Cookie", strings.Join(deviceCookies, "; "))
+	}
+	for _, name := range []string{
+		"Authorization", "Proxy-Authorization", "X-CSRF-Token", "X-Real-IP",
+		"X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded", "X-I5CLOUD-Access-Subdomain",
+	} {
+		header.Del(name)
+	}
+	// A nil value tells httputil.ReverseProxy not to append the caller IP.
+	header["X-Forwarded-For"] = nil
+}
+
+func rewriteBrowserOrigin(header http.Header, targetOrigin string) {
+	parts := strings.SplitN(targetOrigin, "://", 2)
+	if len(parts) != 2 {
+		return
+	}
+	if header.Get("Origin") != "" {
+		header.Set("Origin", targetOrigin)
+	}
+	if referer := header.Get("Referer"); referer != "" {
+		if parsed, err := url.Parse(referer); err == nil {
+			parsed.Scheme = parts[0]
+			parsed.Host = parts[1]
+			header.Set("Referer", parsed.String())
+		}
+	}
+}
+
+func rewriteLocation(header http.Header, scheme, targetHost string, targetPort int, basePrefix, responsePrefix string) {
+	location := header.Get("Location")
+	if location == "" {
+		return
+	}
+	parsed, err := url.Parse(location)
+	if err != nil {
+		return
+	}
+	prefix := responsePrefix
+	if parsed.IsAbs() {
+		if !strings.EqualFold(parsed.Hostname(), targetHost) {
+			return
+		}
+		locationPort := defaultURLPort(parsed.Scheme, parsed.Port())
+		if strings.EqualFold(parsed.Scheme, scheme) && locationPort == targetPort {
+			// Same upstream origin; keep the current session prefix.
+		} else if scheme == "http" && strings.EqualFold(parsed.Scheme, "https") && (locationPort == 443 || locationPort == targetPort) {
+			// Embedded devices often redirect http://host[:80] to https://host,
+			// and some incorrectly retain :80. Use the registered HTTPS default
+			// without letting the browser escape to the private address.
+			prefix = basePrefix + "/" + httpsUpgradePath
+		} else {
+			return
+		}
+	}
+	path := parsed.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	rewritten := prefix + path
+	if parsed.RawQuery != "" {
+		rewritten += "?" + parsed.RawQuery
+	}
+	if parsed.Fragment != "" {
+		rewritten += "#" + parsed.Fragment
+	}
+	header.Set("Location", rewritten)
+}
+
+func defaultURLPort(scheme, explicit string) int {
+	if explicit != "" {
+		port, err := strconv.Atoi(explicit)
+		if err == nil {
+			return port
+		}
+		return 0
+	}
+	if strings.EqualFold(scheme, "https") {
+		return 443
+	}
+	if strings.EqualFold(scheme, "http") {
+		return 80
+	}
+	return 0
+}
+
+func rewriteCookies(header http.Header, prefix string) {
+	response := &http.Response{Header: header}
+	cookies := response.Cookies()
+	if len(cookies) == 0 {
+		return
+	}
+	header.Del("Set-Cookie")
+	for _, cookie := range cookies {
+		cookie.Domain = ""
+		if cookie.Path == "" || cookie.Path == "/" {
+			cookie.Path = prefix + "/"
+		} else {
+			cookie.Path = prefix + "/" + strings.TrimPrefix(cookie.Path, "/")
+		}
+		header.Add("Set-Cookie", cookie.String())
+	}
+}
+
+func directSourceIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func safeProxyError(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	message := err.Error()
+	if len(message) > 160 {
+		message = message[:160]
+	}
+	return message
+}
+
+func gatewayError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(message))
+}

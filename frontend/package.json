@@ -1,0 +1,44 @@
+{
+  "name": "i5cloud-remote-management-platform",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "vite --config vite.spa.config.ts",
+    "build": "vite build --config vite.spa.config.ts",
+    "build:spa": "npm run build",
+    "preview": "vite preview --config vite.spa.config.ts",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "lint": "eslint .",
+    "typecheck:spa": "tsc --noEmit -p tsconfig.spa.json"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.2",
+    "eslint": "9.39.4",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.4",
+    "globals": "17.11.0",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.67.0",
+    "vite": "8.2.1"
+  },
+  "overrides": {
+    "nanoid": "3.3.18",
+    "postcss": "8.5.25"
+  },
+  "type": "module"
+}
