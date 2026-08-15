@@ -40,7 +40,7 @@ docker compose ps
 ## 镜像
 
 ```bash
-docker pull vampirerune/device-management-platform:v1.0.2
+docker pull vampirerune/device-management-platform:v1.0.3
 ```
 
 已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，不要长期依赖 `latest`。
@@ -57,10 +57,10 @@ docker pull vampirerune/device-management-platform:v1.0.2
 
 ```bash
 docker build \
-  --build-arg VERSION=v1.0.2 \
+  --build-arg VERSION=v1.0.3 \
   --build-arg VCS_REF="$(git rev-parse HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -t device-management-platform:v1.0.2 .
+  -t device-management-platform:v1.0.3 .
 ```
 
 仓库未声明开源许可证。未经许可，不授予复制、修改或再分发权利。

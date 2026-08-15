@@ -21,7 +21,7 @@ COPY --from=web /src/frontend/dist-spa/ ./internal/ui/dist/
 RUN CGO_ENABLED=0 go test ./... && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/device-management-platform ./cmd/server
 
-FROM alpine:3.22
+FROM public.ecr.aws/docker/library/alpine:3.24.1
 ARG VERSION=dev
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
