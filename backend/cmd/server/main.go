@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -139,6 +142,11 @@ func run() error {
 		Mode:              cfg.Mode,
 		Version:           version,
 	})
+	runtimeTLSCertificate, err := loadRuntimeTLSCertificate()
+	if err != nil {
+		return err
+	}
+	tlsConfigured := cfg.TLSCertFile != "" || runtimeTLSCertificate != nil
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddress,
 		Handler:           handler,
@@ -148,15 +156,22 @@ func run() error {
 		IdleTimeout:       90 * time.Second,
 	}
 	servers := []*http.Server{httpServer}
-	if cfg.TLSCertFile != "" {
-		servers = append(servers, &http.Server{
+	if tlsConfigured {
+		httpsServer := &http.Server{
 			Addr:              cfg.HTTPSListenAddress,
 			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
 			WriteTimeout:      30 * time.Second,
 			IdleTimeout:       90 * time.Second,
-		})
+		}
+		if runtimeTLSCertificate != nil {
+			httpsServer.TLSConfig = &tls.Config{
+				MinVersion:   tls.VersionTLS12,
+				Certificates: []tls.Certificate{*runtimeTLSCertificate},
+			}
+		}
+		servers = append(servers, httpsServer)
 	}
 
 	shutdownContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -182,10 +197,14 @@ func run() error {
 	errCh := make(chan error, len(servers))
 	slog.Info("device management platform HTTP listening", "address", cfg.ListenAddress, "mode", cfg.Mode, "version", version)
 	go func() { errCh <- httpServer.ListenAndServe() }()
-	if cfg.TLSCertFile != "" {
+	if tlsConfigured {
 		httpsServer := servers[1]
 		slog.Info("device management platform HTTPS listening", "address", cfg.HTTPSListenAddress, "mode", cfg.Mode, "version", version)
-		go func() { errCh <- httpsServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile) }()
+		certFile, keyFile := cfg.TLSCertFile, cfg.TLSKeyFile
+		if runtimeTLSCertificate != nil {
+			certFile, keyFile = "", ""
+		}
+		go func() { errCh <- httpsServer.ListenAndServeTLS(certFile, keyFile) }()
 	}
 	err = <-errCh
 	if errors.Is(err, http.ErrServerClosed) {
@@ -194,6 +213,47 @@ func run() error {
 	stop()
 	shutdownServers()
 	return err
+}
+
+func loadRuntimeTLSCertificate() (*tls.Certificate, error) {
+	certFD, certConfigured := os.LookupEnv("DMP_RUNTIME_TLS_CERT_FD")
+	keyFD, keyConfigured := os.LookupEnv("DMP_RUNTIME_TLS_KEY_FD")
+	if certConfigured != keyConfigured {
+		return nil, fmt.Errorf("runtime TLS certificate and key descriptors must be configured together")
+	}
+	if !certConfigured {
+		return nil, nil
+	}
+	certPEM, err := readRuntimeTLSDescriptor(certFD, "certificate")
+	if err != nil {
+		return nil, err
+	}
+	keyPEM, err := readRuntimeTLSDescriptor(keyFD, "private key")
+	if err != nil {
+		return nil, err
+	}
+	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("load mounted TLS certificate: %w", err)
+	}
+	return &certificate, nil
+}
+
+func readRuntimeTLSDescriptor(rawFD, label string) ([]byte, error) {
+	fd, err := strconv.ParseUint(rawFD, 10, 31)
+	if err != nil || fd < 3 {
+		return nil, fmt.Errorf("invalid runtime TLS %s descriptor", label)
+	}
+	file := os.NewFile(uintptr(fd), "runtime TLS "+label)
+	if file == nil {
+		return nil, fmt.Errorf("open runtime TLS %s descriptor", label)
+	}
+	defer file.Close()
+	contents, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("read runtime TLS %s: %w", label, err)
+	}
+	return contents, nil
 }
 
 func checkHealth(cfg config.Config) error {

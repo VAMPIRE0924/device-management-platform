@@ -8,19 +8,22 @@ primary="device-management-platform-acceptance-$run_id"
 restored="platform-restored-$run_id"
 primary_volume="device-management-platform-acceptance-data-$run_id"
 restored_volume="platform-restored-data-$run_id"
+certificate_volume="platform-certificate-data-$run_id"
 primary_port="${DMP_CONTAINER_ACCEPTANCE_PORT:-18090}"
+https_port="${DMP_CONTAINER_HTTPS_PORT:-18490}"
 restored_port="${DMP_CONTAINER_RESTORE_PORT:-18091}"
 artifact_dir=$(mktemp -d /tmp/device-management-platform-container-acceptance.XXXXXX)
 
 cleanup() {
   docker rm -f "$primary" "$restored" >/dev/null 2>&1 || true
-  docker volume rm "$primary_volume" "$restored_volume" >/dev/null 2>&1 || true
+  docker volume rm "$primary_volume" "$restored_volume" "$certificate_volume" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
 command -v docker >/dev/null
 command -v curl >/dev/null
 command -v sqlite3 >/dev/null
+command -v openssl >/dev/null
 docker info >/dev/null
 
 docker build --build-arg VERSION=container-acceptance -t "$image" "$project_dir"
@@ -30,6 +33,14 @@ else
   printf 'Docker Scout unavailable; image CVE scan skipped\n' >&2
 fi
 docker volume create "$primary_volume" >/dev/null
+docker volume create "$certificate_volume" >/dev/null
+mkdir -p "$artifact_dir/certificate-source"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=localhost' \
+  -keyout "$artifact_dir/certificate-source/privkey.pem" -out "$artifact_dir/certificate-source/fullchain.pem" >/dev/null 2>&1
+docker run --rm --entrypoint sh -v "$certificate_volume:/cert" -v "$artifact_dir/certificate-source:/source:ro" "$image" -c \
+  'cp /source/fullchain.pem /cert/fullchain.pem && cp /source/privkey.pem /cert/privkey.pem && chown root:root /cert /cert/*.pem && chmod 0700 /cert && chmod 0600 /cert/*.pem'
+certificate_digest=$(docker run --rm --entrypoint sh -v "$certificate_volume:/cert:ro" "$image" -c \
+  'sha256sum /cert/fullchain.pem /cert/privkey.pem')
 docker run -d --name "$primary" --restart no --security-opt no-new-privileges:true \
   -p "127.0.0.1:$primary_port:80" -v "$primary_volume:/data" "$image" >/dev/null
 
@@ -68,7 +79,7 @@ curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/meta" | gre
 
 settings_response="$artifact_dir/settings.json"
 curl -fsS -X PUT -H "Authorization: Bearer $api_token" -H 'Content-Type: application/json' \
-  -d '{"mfaEnabled":false,"mfaMethods":["totp"],"emailCodeTTL":"10m","mfaKeyFile":"/data/mfa.key","smtpHost":"","smtpPort":587,"smtpUsername":"","smtpPassword":"container-settings-test-secret","smtpFrom":"","tlsCertFile":"","tlsKeyFile":"","httpPort":80,"httpsPort":443,"accessDomain":"container-remote.example.test"}' \
+  -d '{"mfaEnabled":false,"mfaMethods":["totp"],"emailCodeTTL":"10m","mfaKeyFile":"/data/mfa.key","smtpHost":"","smtpPort":587,"smtpUsername":"","smtpPassword":"container-settings-test-secret","smtpFrom":"","tlsCertFile":"/cert/fullchain.pem","tlsKeyFile":"/cert/privkey.pem","httpPort":80,"httpsPort":443,"accessDomain":"container-remote.example.test"}' \
   "$primary_url/api/v1/settings/security" -o "$settings_response"
 grep -q '"restartRequired":true' "$settings_response"
 if grep -q 'container-settings-test-secret' "$settings_response"; then
@@ -84,13 +95,23 @@ curl -fsS -H "Authorization: Bearer $api_token" -H 'Content-Type: application/js
 docker stop -t 15 "$primary" >/dev/null
 docker rm "$primary" >/dev/null
 docker run -d --name "$primary" --restart no --security-opt no-new-privileges:true \
-  -p "127.0.0.1:$primary_port:80" -v "$primary_volume:/data" "$image" >/dev/null
+  -p "127.0.0.1:$primary_port:80" -p "127.0.0.1:$https_port:443" \
+  -v "$primary_volume:/data" -v "$certificate_volume:/cert:ro" "$image" >/dev/null
 wait_ready "$primary_url"
+curl -kfsS "https://127.0.0.1:$https_port/health/ready" | grep -q '"status":"ready"'
+test "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/cert"}}{{.RW}}{{end}}{{end}}' "$primary")" = "false"
+docker exec "$primary" sh -c 'su-exec platform test ! -r /cert/fullchain.pem && test ! -e /data/runtime-tls && test ! -e /run/device-management-platform/tls'
+test "$(docker run --rm --entrypoint sh -v "$certificate_volume:/cert:ro" "$image" -c 'sha256sum /cert/fullchain.pem /cert/privkey.pem')" = "$certificate_digest"
 test "$(docker exec "$primary" sh -c 'cat /data/api.token')" = "$api_token"
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/nodes" | grep -q '容器持久化验收节点'
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessDomain":"container-remote.example.test"'
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"restartRequired":false'
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"smtpPasswordConfigured":true'
+https_headers="$artifact_dir/https-login-headers.txt"
+curl -kfsS -D "$https_headers" -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"container-admin","password":"container-admin-password"}' \
+  "https://127.0.0.1:$https_port/api/v1/auth/login" >/dev/null
+test "$(grep -ic '^Set-Cookie:.*; Secure' "$https_headers")" = "2"
 
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/data/backup" -o "$artifact_dir/backup.db"
 test "$(sqlite3 "$artifact_dir/backup.db" 'pragma integrity_check;')" = "ok"

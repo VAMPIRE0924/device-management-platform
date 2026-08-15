@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"strconv"
 	"testing"
 
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/config"
@@ -26,5 +28,33 @@ func TestHealthcheckUsesAlwaysAvailableHTTPListener(t *testing.T) {
 	cfg := config.Config{ListenAddress: parsed.Host, TLSCertFile: "configured"}
 	if err := checkHealth(cfg); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReadRuntimeTLSDescriptorReadsInheritedFileDirectly(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "runtime-tls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("certificate material"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	contents, err := readRuntimeTLSDescriptor(strconv.Itoa(int(file.Fd())), "certificate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "certificate material" {
+		t.Fatalf("unexpected descriptor contents %q", contents)
+	}
+}
+
+func TestLoadRuntimeTLSCertificateRequiresDescriptorPair(t *testing.T) {
+	t.Setenv("DMP_RUNTIME_TLS_CERT_FD", "3")
+	if _, err := loadRuntimeTLSCertificate(); err == nil {
+		t.Fatal("expected incomplete runtime TLS descriptor configuration to fail")
 	}
 }

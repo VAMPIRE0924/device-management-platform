@@ -1,13 +1,13 @@
 # Docker 正式部署
 
-本文适用于 `vampirerune/device-management-platform:v1.0.4`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
+本文适用于 `vampirerune/device-management-platform:v1.0.5`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
 
 ## 最简 Compose
 
 ```yaml
 services:
   platform:
-    image: vampirerune/device-management-platform:v1.0.4
+    image: vampirerune/device-management-platform:v1.0.5
     container_name: device-management-platform
     restart: unless-stopped
     volumes:
@@ -46,7 +46,7 @@ docker compose logs --tail=100 platform
 - 面板地址，例如 `admin.example.com`；
 - 反代地址，例如 `*.admin.example.com`，界面中的 `*.` 为固定前缀。
 
-证书文件需要通过额外 volume 挂载到容器内，然后在系统设置中填写容器内路径。保存端口或证书设置后重启容器：
+证书文件需要通过额外 volume 只读挂载到容器内，然后在系统设置中填写容器内路径。平台可直接使用群晖 root-only 证书挂载，无需放宽宿主机权限。保存端口或证书设置后重启容器：
 
 ```bash
 docker compose restart platform
@@ -74,7 +74,7 @@ docker compose up -d
 docker compose ps
 ```
 
-`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.4` 这类完整版本号。
+`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.5` 这类完整版本号。
 
 ## 常见问题
 
