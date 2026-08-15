@@ -11,9 +11,6 @@ services:
       - platform-data:/data
       - ./conf/device-management-platform.conf:/etc/device-management-platform/platform.conf:ro
       - ./secrets/nodes:/run/secrets/platform-nodes:ro
-    secrets:
-      - platform_api_token
-      - platform_setup_token
     environment:
       DMP_CONFIG_FILE: /etc/device-management-platform/platform.conf
       TZ: ${TZ:-Asia/Shanghai}
@@ -30,9 +27,3 @@ services:
 
 volumes:
   platform-data:
-
-secrets:
-  platform_api_token:
-    file: ./secrets/api_token
-  platform_setup_token:
-    file: ./secrets/setup_token

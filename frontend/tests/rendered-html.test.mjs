@@ -47,6 +47,14 @@ test("keeps formal login, MFA and editable deployment settings", async () => {
   assert.doesNotMatch(page, /不可在线降低的边界|连接安全|本机 Relay（无 TLS）|可信反向代理 CIDR|生产环境|开发环境|测试环境/);
 });
 
+test("initializes the first administrator without deployment tokens", async () => {
+  const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
+  contains(page, ["创建首位系统管理员", "显示名称", "初始管理员密码（至少 12 位）"]);
+  contains(api, ["/api/v1/setup"]);
+  assert.doesNotMatch(page, /初始化令牌|setupToken/);
+  assert.doesNotMatch(api, /X-Setup-Token|setupToken/);
+});
+
 test("opens opaque Web and SSH sessions without exposing routes", async () => {
   const page = await readFile(pageURL, "utf8");
   contains(page, ['window.open("about:blank", "_blank")', "opened.opener = null", 'api.createAccessSession(endpoint.endpointId, "web")', '"ssh"', "opened.location.replace(session.launchUrl)", "浏览器阻止了新标签页"]);

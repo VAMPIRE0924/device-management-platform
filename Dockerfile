@@ -43,9 +43,7 @@ ENV DMP_MODE=pro \
     DMP_CONFIG_FILE=/etc/device-management-platform/platform.conf \
     DMP_LISTEN_ADDR=0.0.0.0:8088 \
     DMP_DATA_DIR=/data \
-    DMP_DB_PATH=/data/platform.db \
-    DMP_API_TOKEN_FILE=/run/secrets/platform_api_token \
-    DMP_SETUP_TOKEN_FILE=/run/secrets/platform_setup_token
+    DMP_DB_PATH=/data/platform.db
 EXPOSE 8088
 VOLUME ["/data"]
 HEALTHCHECK --interval=20s --timeout=3s --start-period=10s --retries=3 \

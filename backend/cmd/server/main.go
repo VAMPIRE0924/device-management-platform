@@ -134,7 +134,6 @@ func run() error {
 		Settings:          config.NewSettingsManager(cfg),
 		NodeCredentials:   nodeCredentialVault,
 		APIToken:          cfg.APIToken,
-		SetupToken:        cfg.SetupToken,
 		AccessDomain:      cfg.AccessDomain,
 		AccessScheme:      cfg.AccessScheme,
 		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,

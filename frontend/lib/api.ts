@@ -292,8 +292,8 @@ export type APIDiscoveryResult = {
 
 export const api = {
   async setupStatus() { return request<APISetupStatus>("/api/v1/setup/status"); },
-  async setup(username: string, displayName: string, password: string, setupToken: string) {
-    return request<APIUser>("/api/v1/setup", { method: "POST", headers: { "X-Setup-Token": setupToken }, body: JSON.stringify({ username, displayName, password }) });
+  async setup(username: string, displayName: string, password: string) {
+    return request<APIUser>("/api/v1/setup", { method: "POST", body: JSON.stringify({ username, displayName, password }) });
   },
   async me() { return request<APIUser>("/api/v1/auth/me"); },
   async login(username: string, password: string) {

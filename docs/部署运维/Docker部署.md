@@ -1,6 +1,6 @@
 # Docker 正式部署
 
-本文适用于 `vampirerune/device-management-platform:v1.0.0`。生产形态为单容器、单实例 SQLite；不支持多个应用实例同时写同一数据卷。
+本文适用于 `vampirerune/device-management-platform:v1.0.1`。生产形态为单容器、单实例 SQLite；不支持多个应用实例同时写同一数据卷。
 
 ## 1. 前置条件
 
@@ -26,26 +26,13 @@ cp conf/device-management-platform.conf.example conf/device-management-platform.
 `.env` 建议保持：
 
 ```dotenv
-DMP_IMAGE=vampirerune/device-management-platform:v1.0.0
+DMP_IMAGE=vampirerune/device-management-platform:v1.0.1
 DMP_BIND_ADDRESS=127.0.0.1
 DMP_HOST_PORT=8088
 TZ=Asia/Shanghai
 ```
 
-生成平台 Secret：
-
-```bash
-umask 077
-openssl rand -hex 32 > secrets/api_token
-openssl rand -hex 24 > secrets/setup_token
-mkdir -p secrets/nodes
-chmod 600 secrets/api_token secrets/setup_token
-```
-
-- `api_token` 用于管理 API，不用于网页登录；
-- `setup_token` 只用于首次创建系统管理员；
-- 两者必须不同，不能写入 `.env`、Compose 或命令行参数；
-- 真实 Secret、数据库、覆盖配置和本地证书均已被 Git 忽略。
+平台不需要手工生成部署令牌。生产容器首次启动时会自动生成内部管理 API 令牌，并以 `0600` 权限保存在 `/data/api.token`；后续重启和升级会继续使用同一令牌。
 
 ## 3. 配置平台
 
@@ -58,19 +45,15 @@ listen_addr = 0.0.0.0:8088
 data_dir = /data
 database_path = /data/platform.db
 settings_override_file = /data/settings.override.conf
-api_token_file = /run/secrets/platform_api_token
-setup_token_file = /run/secrets/platform_setup_token
-
 mfa_enabled = false
 mfa_methods = totp,email
 mfa_key_file = /data/mfa.key
 mfa_email_code_ttl = 10m
 
-panel_domain = admin.example.com
-access_domain = admin.example.com
-access_scheme = https
 cookie_secure = true
 ```
+
+容器启动后，再在系统设置中填写面板域名和 Web 反代域名，无需把域名写入 Docker Compose。
 
 系统设置中的“反代地址”会显示为 `*.admin.example.com`，配置文件只填写基础域名，不写 `*.`。
 
@@ -147,7 +130,7 @@ docker compose ps
 docker compose logs --tail=100 platform
 ```
 
-容器状态应变为 `healthy`。随后访问 `https://admin.example.com`，输入 `secrets/setup_token` 的内容创建首个系统管理员。完成初始化后再次调用初始化接口会被拒绝。
+容器状态应变为 `healthy`。随后访问面板，直接设置首个系统管理员的显示名称、登录账号和密码。完成初始化后再次调用初始化接口会被拒绝。
 
 基础检查：
 
@@ -191,7 +174,7 @@ SMTP 端口决定连接方式：
 然后修改 `.env` 中的固定版本：
 
 ```bash
-DMP_IMAGE=vampirerune/device-management-platform:v1.0.0
+DMP_IMAGE=vampirerune/device-management-platform:v1.0.1
 ```
 
 执行：
@@ -216,15 +199,13 @@ docker run --rm \
   -v device-management-platform_platform-data:/data \
   -v "$PWD/backup:/backup:ro" \
   -v "$PWD/conf/device-management-platform.conf:/etc/device-management-platform/platform.conf:ro" \
-  -v "$PWD/secrets/api_token:/run/secrets/platform_api_token:ro" \
-  -v "$PWD/secrets/setup_token:/run/secrets/platform_setup_token:ro" \
   -e DMP_CONFIG_FILE=/etc/device-management-platform/platform.conf \
-  vampirerune/device-management-platform:v1.0.0 \
+  vampirerune/device-management-platform:v1.0.1 \
   restore /backup/device-management-platform-backup.db
 docker compose up -d
 ```
 
-数据库、`/data/credentials.key`、`/data/mfa.key`、外部 Secret 和配置必须来自同一备份批次。缺少节点凭据主密钥时，数据库中的节点和 SSH 密文无法解密。
+数据库、`/data/api.token`、`/data/credentials.key`、`/data/mfa.key`、外部 Secret 和配置必须来自同一备份批次。缺少节点凭据主密钥时，数据库中的节点和 SSH 密文无法解密。
 
 ## 10. 卸载
 

@@ -1,12 +1,12 @@
-# 正式部署模板。复制为 device-management-platform.conf 后填写域名；不要写入密码或私钥。
+# 正式部署模板。复制为 device-management-platform.conf；不要写入密码或私钥。
 app_name = 设备管理平台
 run_mode = pro
 listen_addr = 0.0.0.0:8088
 data_dir = /data
 database_path = /data/platform.db
 settings_override_file = /data/settings.override.conf
-api_token_file = /run/secrets/platform_api_token
-setup_token_file = /run/secrets/platform_setup_token
+
+# 管理 API 令牌首次启动时自动生成并保存在 /data/api.token。
 
 # 完成 SMTP 配置和恢复演练后再开启。
 mfa_enabled = false
@@ -24,10 +24,7 @@ mfa_email_code_ttl = 10m
 # tls_cert_file = /run/secrets/platform_tls_cert
 # tls_key_file = /run/secrets/platform_tls_key
 
-# 仅填写域名，不含协议、路径或 *. 前缀。
-panel_domain = admin.example.com
-access_domain = admin.example.com
-access_scheme = https
+# 部署完成后可在系统设置中配置面板域名和 Web 反代域名。
 
 # 只填写真实反向代理的容器或主机网段；直连部署可留空。
 # trusted_proxy_cidrs = 172.20.0.0/24

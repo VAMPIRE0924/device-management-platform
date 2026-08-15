@@ -10,10 +10,6 @@ primary_volume="device-management-platform-acceptance-data-$run_id"
 restored_volume="platform-restored-data-$run_id"
 primary_port="${DMP_CONTAINER_ACCEPTANCE_PORT:-18090}"
 restored_port="${DMP_CONTAINER_RESTORE_PORT:-18091}"
-api_token="container-acceptance-api-token-0123456789abcdef"
-setup_token="container-acceptance-setup-token-0123456789"
-restored_api_token="container-restored-api-token-0123456789abcdef"
-restored_setup_token="container-restored-setup-token-0123456789"
 artifact_dir=$(mktemp -d /tmp/device-management-platform-container-acceptance.XXXXXX)
 
 cleanup() {
@@ -35,8 +31,7 @@ else
 fi
 docker volume create "$primary_volume" >/dev/null
 docker run -d --name "$primary" --restart no --cap-drop ALL --security-opt no-new-privileges:true \
-  -p "127.0.0.1:$primary_port:8088" -v "$primary_volume:/data" \
-  -e DMP_API_TOKEN="$api_token" -e DMP_SETUP_TOKEN="$setup_token" "$image" >/dev/null
+  -p "127.0.0.1:$primary_port:8088" -v "$primary_volume:/data" "$image" >/dev/null
 
 wait_ready() {
   endpoint=$1
@@ -50,8 +45,16 @@ wait_ready() {
 
 primary_url="http://127.0.0.1:$primary_port"
 wait_ready "$primary_url"
+api_token=$(docker exec "$primary" sh -c 'cat /data/api.token')
+test "${#api_token}" = "64"
+docker exec "$primary" sh -c 'test "$(stat -c %a /data/api.token)" = "600"'
 test "$(docker inspect "$primary" --format '{{.Config.User}}')" = "platform:platform"
 docker exec "$primary" sh -c 'test "$(id -u)" = "10001" && test -w /data && test ! -w /usr/local/bin'
+curl -fsS "$primary_url/api/v1/setup/status" | grep -q '"initialized":false'
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"container-admin","displayName":"容器管理员","password":"container-admin-password"}' \
+  "$primary_url/api/v1/setup" | grep -q '"username":"container-admin"'
+curl -fsS "$primary_url/api/v1/setup/status" | grep -q '"initialized":true'
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/meta" | grep -q '"schemaVersion":21'
 
 settings_response="$artifact_dir/settings.json"
@@ -72,9 +75,9 @@ curl -fsS -H "Authorization: Bearer $api_token" -H 'Content-Type: application/js
 docker stop -t 15 "$primary" >/dev/null
 docker rm "$primary" >/dev/null
 docker run -d --name "$primary" --restart no --cap-drop ALL --security-opt no-new-privileges:true \
-  -p "127.0.0.1:$primary_port:8088" -v "$primary_volume:/data" \
-  -e DMP_API_TOKEN="$api_token" -e DMP_SETUP_TOKEN="$setup_token" "$image" >/dev/null
+  -p "127.0.0.1:$primary_port:8088" -v "$primary_volume:/data" "$image" >/dev/null
 wait_ready "$primary_url"
+test "$(docker exec "$primary" sh -c 'cat /data/api.token')" = "$api_token"
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/nodes" | grep -q '容器持久化验收节点'
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessDomain":"container-remote.example.test"'
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"restartRequired":false'
@@ -85,13 +88,13 @@ test "$(sqlite3 "$artifact_dir/backup.db" 'pragma integrity_check;')" = "ok"
 test "$(sqlite3 "$artifact_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "21"
 docker volume create "$restored_volume" >/dev/null
 docker run --rm -v "$restored_volume:/data" -v "$artifact_dir:/backup:ro" \
-  -e DMP_API_TOKEN="$restored_api_token" -e DMP_SETUP_TOKEN="$restored_setup_token" \
   "$image" restore /backup/backup.db >/dev/null
 docker run -d --name "$restored" --restart no --cap-drop ALL --security-opt no-new-privileges:true \
-  -p "127.0.0.1:$restored_port:8088" -v "$restored_volume:/data" \
-  -e DMP_API_TOKEN="$restored_api_token" -e DMP_SETUP_TOKEN="$restored_setup_token" "$image" >/dev/null
+  -p "127.0.0.1:$restored_port:8088" -v "$restored_volume:/data" "$image" >/dev/null
 restored_url="http://127.0.0.1:$restored_port"
 wait_ready "$restored_url"
+restored_api_token=$(docker exec "$restored" sh -c 'cat /data/api.token')
+test "${#restored_api_token}" = "64"
 curl -fsS -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/nodes" | grep -q '容器持久化验收节点'
 curl -fsS -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/meta" | grep -q '"schemaVersion":21'
 

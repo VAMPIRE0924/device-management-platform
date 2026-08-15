@@ -6,8 +6,6 @@ binary="$project_dir/backend/bin/device-management-platform"
 acceptance_dir=$(mktemp -d /tmp/device-management-platform-acceptance.XXXXXX)
 acceptance_port="${DMP_ACCEPTANCE_PORT:-18089}"
 acceptance_url="http://127.0.0.1:$acceptance_port"
-api_token="local-acceptance-api-token-0123456789abcdef"
-setup_token="local-acceptance-setup-token-0123456789"
 server_pid=""
 
 stop_server() {
@@ -23,11 +21,10 @@ command -v curl >/dev/null
 command -v sqlite3 >/dev/null
 
 DMP_MODE=pro \
+DMP_CONFIG_FILE="$acceptance_dir/missing.conf" \
 DMP_LISTEN_ADDR="127.0.0.1:$acceptance_port" \
 DMP_DATA_DIR="$acceptance_dir" \
 DMP_DB_PATH="$acceptance_dir/platform.db" \
-DMP_API_TOKEN="$api_token" \
-DMP_SETUP_TOKEN="$setup_token" \
 DMP_COOKIE_SECURE=false \
 "$binary" serve >"$acceptance_dir/server.log" 2>&1 &
 server_pid=$!
@@ -42,6 +39,8 @@ until curl -fsS "$acceptance_url/health/ready" >/dev/null 2>&1; do
   sleep 0.1
 done
 
+api_token=$(cat "$acceptance_dir/api.token")
+test "${#api_token}" = "64"
 curl -fsS "$acceptance_url/health/live" >/dev/null
 curl -fsS "$acceptance_url/health/ready" >/dev/null
 meta=$(curl -fsS -H "Authorization: Bearer $api_token" "$acceptance_url/api/v1/meta")

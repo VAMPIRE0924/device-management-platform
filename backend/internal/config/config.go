@@ -2,6 +2,8 @@ package config
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/mail"
@@ -21,7 +23,6 @@ type Config struct {
 	DataDirectory     string
 	DatabasePath      string
 	APIToken          string
-	SetupToken        string
 	MFAEnabled        bool
 	MFAMethods        []string
 	MFAKeyFile        string
@@ -70,13 +71,16 @@ func Load() (Config, error) {
 	}
 	dataDirectory = value("DMP_DATA_DIR", "data_dir", dataDirectory)
 	databasePath := value("DMP_DB_PATH", "database_path", filepath.Join(dataDirectory, "platform.db"))
+	mode := strings.ToLower(value("DMP_MODE", "run_mode", "dev"))
 	apiToken, err := loadConfiguredSecret("DMP_API_TOKEN", "DMP_API_TOKEN_FILE", values["api_token"], values["api_token_file"])
 	if err != nil {
 		return Config{}, err
 	}
-	setupToken, err := loadConfiguredSecret("DMP_SETUP_TOKEN", "DMP_SETUP_TOKEN_FILE", values["setup_token"], values["setup_token_file"])
-	if err != nil {
-		return Config{}, err
+	if mode == "pro" && apiToken == "" {
+		apiToken, err = loadOrCreateAPIToken(filepath.Join(dataDirectory, "api.token"))
+		if err != nil {
+			return Config{}, err
+		}
 	}
 	smtpPassword, err := loadConfiguredSecret("DMP_SMTP_PASSWORD", "DMP_SMTP_PASSWORD_FILE", values["smtp_password"], values["smtp_password_file"])
 	if err != nil {
@@ -101,12 +105,11 @@ func Load() (Config, error) {
 	cfg := Config{
 		ConfigFile:        configPath,
 		OverrideFile:      overridePath,
-		Mode:              strings.ToLower(value("DMP_MODE", "run_mode", "dev")),
+		Mode:              mode,
 		ListenAddress:     value("DMP_LISTEN_ADDR", "listen_addr", "127.0.0.1:8088"),
 		DataDirectory:     dataDirectory,
 		DatabasePath:      databasePath,
 		APIToken:          apiToken,
-		SetupToken:        setupToken,
 		MFAEnabled:        mfaEnabled,
 		MFAMethods:        splitList(value("DMP_MFA_METHODS", "mfa_methods", "totp")),
 		MFAKeyFile:        value("DMP_MFA_KEY_FILE", "mfa_key_file", filepath.Join(filepath.Dir(databasePath), "mfa.key")),
@@ -150,12 +153,6 @@ func (cfg Config) validate() error {
 	}
 	if cfg.Mode == "pro" && len(cfg.APIToken) < 32 {
 		return fmt.Errorf("api_token must contain at least 32 characters in pro mode")
-	}
-	if cfg.Mode == "pro" && len(cfg.SetupToken) < 24 {
-		return fmt.Errorf("setup_token must contain at least 24 characters in pro mode")
-	}
-	if cfg.Mode == "pro" && cfg.APIToken == cfg.SetupToken {
-		return fmt.Errorf("api_token and setup_token must be different in pro mode")
 	}
 	if cfg.AccessScheme != "http" && cfg.AccessScheme != "https" {
 		return fmt.Errorf("access_scheme must be http or https")
@@ -290,6 +287,54 @@ func loadConfiguredSecret(valueName, fileName, configuredValue, configuredFile s
 		return "", fmt.Errorf("%s points to an empty secret", fileName)
 	}
 	return secret, nil
+}
+
+func loadOrCreateAPIToken(path string) (string, error) {
+	if content, err := os.ReadFile(path); err == nil {
+		token := strings.TrimSpace(string(content))
+		if len(token) < 32 {
+			return "", fmt.Errorf("generated API token file %s is invalid", path)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			return "", fmt.Errorf("secure generated API token file: %w", err)
+		}
+		return token, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("read generated API token: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return "", fmt.Errorf("create data directory for generated API token: %w", err)
+	}
+	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("generate API token: %w", err)
+	}
+	token := hex.EncodeToString(random)
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".api-token-*")
+	if err != nil {
+		return "", fmt.Errorf("create generated API token file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return "", fmt.Errorf("secure generated API token file: %w", err)
+	}
+	if _, err := temporary.WriteString(token + "\n"); err != nil {
+		temporary.Close()
+		return "", fmt.Errorf("write generated API token: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return "", fmt.Errorf("sync generated API token: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return "", fmt.Errorf("close generated API token: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return "", fmt.Errorf("install generated API token: %w", err)
+	}
+	return token, nil
 }
 
 func parseBool(value, name string) (bool, error) {

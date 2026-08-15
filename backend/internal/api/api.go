@@ -125,7 +125,6 @@ type Dependencies struct {
 	SSHGateway        http.Handler
 	UI                http.Handler
 	APIToken          string
-	SetupToken        string
 	AccessDomain      string
 	AccessScheme      string
 	TrustedProxyCIDRs []string
@@ -161,7 +160,6 @@ type server struct {
 	sessionRevoker    accessSessionRevoker
 	ui                http.Handler
 	apiToken          string
-	setupToken        string
 	accessDomain      string
 	accessScheme      string
 	mode              string
@@ -201,7 +199,7 @@ type apiError struct {
 }
 
 func New(deps Dependencies) http.Handler {
-	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, setupToken: deps.SetupToken, accessDomain: strings.ToLower(deps.AccessDomain), accessScheme: deps.AccessScheme, mode: deps.Mode, version: deps.Version, cookieSecure: deps.CookieSecure, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials}
+	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, accessDomain: strings.ToLower(deps.AccessDomain), accessScheme: deps.AccessScheme, mode: deps.Mode, version: deps.Version, cookieSecure: deps.CookieSecure, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials}
 	if s.emailCodeTTL == 0 {
 		s.emailCodeTTL = 10 * time.Minute
 	}
@@ -2065,13 +2063,6 @@ type setupRequest struct {
 }
 
 func (s *server) setup(w http.ResponseWriter, r *http.Request) {
-	if s.setupToken != "" {
-		provided := r.Header.Get("X-Setup-Token")
-		if len(provided) != len(s.setupToken) || subtle.ConstantTimeCompare([]byte(provided), []byte(s.setupToken)) != 1 {
-			writeError(w, r, http.StatusForbidden, "invalid_setup_token", "初始化令牌无效", nil)
-			return
-		}
-	}
 	var input setupRequest
 	if !decodeJSON(w, r, &input) {
 		return

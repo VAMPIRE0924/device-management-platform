@@ -25,12 +25,6 @@ cd device-management-platform
 
 cp .env.example .env
 cp conf/device-management-platform.conf.example conf/device-management-platform.conf
-
-umask 077
-openssl rand -hex 32 > secrets/api_token
-openssl rand -hex 24 > secrets/setup_token
-
-# 修改 conf/device-management-platform.conf 中的域名配置
 docker compose pull
 docker compose up -d
 docker compose ps
@@ -41,12 +35,12 @@ docker compose ps
 - `admin.example.com`
 - `*.admin.example.com`
 
-首次打开面板时，使用 `secrets/setup_token` 的内容创建系统管理员。完整配置见 [Docker 部署说明](./docs/部署运维/Docker部署.md)。
+首次打开面板时直接创建系统管理员，无需部署令牌。平台内部 API 令牌由容器自动生成并持久化到 `/data/api.token`。完整配置见 [Docker 部署说明](./docs/部署运维/Docker部署.md)。
 
 ## 镜像
 
 ```bash
-docker pull vampirerune/device-management-platform:v1.0.0
+docker pull vampirerune/device-management-platform:v1.0.1
 ```
 
 已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，不要长期依赖 `latest`。
@@ -54,7 +48,7 @@ docker pull vampirerune/device-management-platform:v1.0.0
 ## 数据与安全
 
 - `/data` 使用 Docker volume 持久化；SQLite 只允许单实例写入。
-- API 令牌、初始化令牌、节点凭据、SMTP 密码、证书私钥和 SSH 私钥不会提交到 Git。
+- 内部 API 令牌、节点凭据、SMTP 密码、证书私钥和 SSH 私钥不会提交到 Git。
 - 节点和 SSH 密码写入数据库前使用数据目录中的独立主密钥加密。
 - 数据库、主密钥、配置与外部 Secret 必须按同一批次备份和恢复。
 - 正式环境必须启用 HTTPS、安全 Cookie，并正确限制可信反向代理来源。
@@ -63,10 +57,10 @@ docker pull vampirerune/device-management-platform:v1.0.0
 
 ```bash
 docker build \
-  --build-arg VERSION=v1.0.0 \
+  --build-arg VERSION=v1.0.1 \
   --build-arg VCS_REF="$(git rev-parse HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -t device-management-platform:v1.0.0 .
+  -t device-management-platform:v1.0.1 .
 ```
 
 仓库未声明开源许可证。未经许可，不授予复制、修改或再分发权利。

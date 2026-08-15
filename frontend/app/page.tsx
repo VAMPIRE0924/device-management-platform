@@ -831,7 +831,6 @@ function LoginScreen({
                 username,
                 String(form.get("displayName") || ""),
                 password,
-                String(form.get("setupToken") || ""),
               );
             await beginChallenge(await api.login(username, password));
           } catch (cause) {
@@ -855,16 +854,6 @@ function LoginScreen({
                 autoComplete="name"
                 required
                 placeholder="例如：系统管理员"
-              />
-            </label>
-            <label>
-              初始化令牌
-              <input
-                name="setupToken"
-                type="password"
-                autoComplete="off"
-                required
-                placeholder="由部署管理员提供的一次性令牌"
               />
             </label>
           </>

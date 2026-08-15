@@ -25,7 +25,6 @@ func TestReadsTokenFromSecretFile(t *testing.T) {
 	t.Setenv("DMP_MODE", "pro")
 	t.Setenv("DMP_API_TOKEN", "")
 	t.Setenv("DMP_API_TOKEN_FILE", path)
-	t.Setenv("DMP_SETUP_TOKEN", "setup-token-0123456789abcdef")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -35,12 +34,33 @@ func TestReadsTokenFromSecretFile(t *testing.T) {
 	}
 }
 
-func TestProductionRequiresSetupToken(t *testing.T) {
+func TestProductionGeneratesAndPersistsAPIToken(t *testing.T) {
+	dir := t.TempDir()
 	t.Setenv("DMP_MODE", "pro")
-	t.Setenv("DMP_API_TOKEN", "0123456789abcdef0123456789abcdef")
-	t.Setenv("DMP_SETUP_TOKEN", "short")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected production setup token validation error")
+	t.Setenv("DMP_DATA_DIR", dir)
+	t.Setenv("DMP_DB_PATH", filepath.Join(dir, "platform.db"))
+	t.Setenv("DMP_API_TOKEN", "")
+	t.Setenv("DMP_API_TOKEN_FILE", "")
+	first, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.APIToken) != 64 {
+		t.Fatalf("generated API token length = %d, want 64", len(first.APIToken))
+	}
+	second, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.APIToken != first.APIToken {
+		t.Fatal("generated API token did not persist across reload")
+	}
+	info, err := os.Stat(filepath.Join(dir, "api.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("generated API token mode = %o, want 600", info.Mode().Perm())
 	}
 }
 
@@ -51,19 +71,9 @@ func TestRejectsInvalidTrustedProxyCIDR(t *testing.T) {
 	}
 }
 
-func TestProductionRequiresDistinctTokens(t *testing.T) {
-	t.Setenv("DMP_MODE", "pro")
-	t.Setenv("DMP_API_TOKEN", "same-token-0123456789abcdef01234567")
-	t.Setenv("DMP_SETUP_TOKEN", "same-token-0123456789abcdef01234567")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected distinct production token validation error")
-	}
-}
-
 func TestProductionRejectsInsecureCookieOnPublicListener(t *testing.T) {
 	t.Setenv("DMP_MODE", "pro")
 	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
-	t.Setenv("DMP_SETUP_TOKEN", "setup-token-0123456789abcdef")
 	t.Setenv("DMP_COOKIE_SECURE", "false")
 	t.Setenv("DMP_LISTEN_ADDR", "0.0.0.0:8088")
 	if _, err := Load(); err == nil {
@@ -74,7 +84,6 @@ func TestProductionRejectsInsecureCookieOnPublicListener(t *testing.T) {
 func TestProductionAllowsInsecureCookieForLoopbackAcceptance(t *testing.T) {
 	t.Setenv("DMP_MODE", "pro")
 	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
-	t.Setenv("DMP_SETUP_TOKEN", "setup-token-0123456789abcdef")
 	t.Setenv("DMP_COOKIE_SECURE", "false")
 	t.Setenv("DMP_LISTEN_ADDR", "127.0.0.1:8088")
 	if _, err := Load(); err != nil {
@@ -85,7 +94,6 @@ func TestProductionAllowsInsecureCookieForLoopbackAcceptance(t *testing.T) {
 func TestProductionAccessDomainRequiresHTTPS(t *testing.T) {
 	t.Setenv("DMP_MODE", "pro")
 	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
-	t.Setenv("DMP_SETUP_TOKEN", "setup-token-0123456789abcdef")
 	t.Setenv("DMP_ACCESS_DOMAIN", "remote.example.com")
 	t.Setenv("DMP_ACCESS_SCHEME", "http")
 	if _, err := Load(); err == nil {
@@ -96,7 +104,6 @@ func TestProductionAccessDomainRequiresHTTPS(t *testing.T) {
 func TestProductionLocalWildcardDomainAllowsHTTPAcceptance(t *testing.T) {
 	t.Setenv("DMP_MODE", "pro")
 	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
-	t.Setenv("DMP_SETUP_TOKEN", "setup-token-0123456789abcdef")
 	t.Setenv("DMP_ACCESS_DOMAIN", "admin.platform.localhost")
 	t.Setenv("DMP_ACCESS_SCHEME", "http")
 	if _, err := Load(); err != nil {
@@ -116,7 +123,6 @@ run_mode = pro
 listen_addr = 127.0.0.1:18088
 database_path = ` + filepath.Join(dir, "panel.db") + `
 api_token = api-token-0123456789abcdef0123456789
-setup_token = setup-token-0123456789abcdef
 mfa_enabled = true
 mfa_methods = totp,email
 mfa_key_file = ` + filepath.Join(dir, "mfa.key") + `
