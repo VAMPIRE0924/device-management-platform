@@ -25,8 +25,8 @@ for (const document of ["Docker部署.md", "构建部署与备份.md", "登录�
 const rootFiles = fs.readdirSync(docs, { withFileTypes: true })
   .filter((entry) => entry.isFile())
   .map((entry) => entry.name)
-  .filter((name) => name !== "README.md");
-if (rootFiles.length) errors.push(`docs 根目录只允许 README.md，发现：${rootFiles.join(", ")}`);
+  .filter((name) => !["README.md", "安全边界.md"].includes(name));
+if (rootFiles.length) errors.push(`docs 根目录发现未归类资料：${rootFiles.join(", ")}`);
 
 function markdownFiles(directory) {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

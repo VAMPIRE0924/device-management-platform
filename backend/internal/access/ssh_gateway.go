@@ -142,7 +142,7 @@ func (g *SSHGateway) serveTerminalPage(w http.ResponseWriter, r *http.Request) {
 		gatewayError(w, http.StatusNotFound, "访问会话不存在")
 		return
 	}
-	sessionRecord, route, ok := resolveAuthorizedAccess(w, r, g.sessions, token, g.idleTTL, "/access/ssh/"+token)
+	sessionRecord, route, ok := resolveAuthorizedAccessWithURLGrant(w, r, g.sessions, token, g.idleTTL, "/access/ssh/"+token)
 	if !ok {
 		return
 	}
@@ -167,7 +167,7 @@ func (g *SSHGateway) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 		gatewayError(w, http.StatusNotFound, "访问会话不存在")
 		return
 	}
-	sessionRecord, route, ok := resolveAuthorizedAccess(w, r, g.sessions, token, g.idleTTL, "/access/ssh/"+token)
+	sessionRecord, route, ok := resolveAuthorizedAccessWithURLGrant(w, r, g.sessions, token, g.idleTTL, "/access/ssh/"+token)
 	if !ok {
 		return
 	}

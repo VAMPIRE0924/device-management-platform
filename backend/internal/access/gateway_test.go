@@ -35,6 +35,51 @@ func authorizeGatewayRequest(request *http.Request) {
 	request.AddCookie(&http.Cookie{Name: accessGrantCookie, Value: strings.Repeat("g", 43)})
 }
 
+func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
+	token := strings.Repeat("a", 48)
+	grant := strings.Repeat("b", 48)
+	gateway := NewWebGateway(
+		fakeSessionResolver{session: store.AccessSession{ExpiresAt: time.Now().Add(time.Hour)}},
+		fakeRouteResolver{},
+	)
+	mux := http.NewServeMux()
+	mux.Handle("/access/web/{token}/{path...}", gateway)
+
+	bootstrapRequest := httptest.NewRequest(http.MethodGet, "https://access.example/access/web/"+token+"/", nil)
+	bootstrapResponse := httptest.NewRecorder()
+	mux.ServeHTTP(bootstrapResponse, bootstrapRequest)
+	if bootstrapResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("bootstrap status = %d: %s", bootstrapResponse.Code, bootstrapResponse.Body.String())
+	}
+	body := bootstrapResponse.Body.String()
+	if !strings.Contains(body, "location.hash") || !strings.Contains(body, ".dmp/session") || strings.Contains(body, "?grant=") {
+		t.Fatalf("bootstrap does not use fragment-to-POST exchange: %s", body)
+	}
+
+	exchangeRequest := httptest.NewRequest(http.MethodPost, "https://access.example/access/web/"+token+"/.dmp/session", strings.NewReader(`{"grant":"`+grant+`"}`))
+	exchangeRequest.Header.Set("Origin", "https://access.example")
+	exchangeResponse := httptest.NewRecorder()
+	mux.ServeHTTP(exchangeResponse, exchangeRequest)
+	if exchangeResponse.Code != http.StatusNoContent {
+		t.Fatalf("exchange status = %d: %s", exchangeResponse.Code, exchangeResponse.Body.String())
+	}
+	cookies := exchangeResponse.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != accessGrantCookie || cookies[0].Value != grant || !cookies[0].HttpOnly || !cookies[0].Secure {
+		t.Fatalf("exchange cookie = %#v", cookies)
+	}
+	if cookies[0].Path != "/access/web/"+token+"/" {
+		t.Fatalf("exchange cookie path = %q", cookies[0].Path)
+	}
+
+	foreignOriginRequest := httptest.NewRequest(http.MethodPost, "https://access.example/access/web/"+token+"/.dmp/session", strings.NewReader(`{"grant":"`+grant+`"}`))
+	foreignOriginRequest.Header.Set("Origin", "https://attacker.example")
+	foreignOriginResponse := httptest.NewRecorder()
+	mux.ServeHTTP(foreignOriginResponse, foreignOriginRequest)
+	if foreignOriginResponse.Code != http.StatusForbidden {
+		t.Fatalf("foreign origin exchange status = %d", foreignOriginResponse.Code)
+	}
+}
+
 type fakeRouteResolver struct {
 	route nodeadapter.SOCKSRoute
 }

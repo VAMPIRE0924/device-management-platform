@@ -49,25 +49,9 @@ func (s *Store) CreateAccessSession(ctx context.Context, input CreateAccessSessi
 		return AccessSession{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO access_sessions(id,user_id,auth_session_id,project_id,endpoint_id,token_hash,grant_hash,mode,source_ip,status,expires_at,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(token_hash) DO UPDATE SET
-  user_id=excluded.user_id,
-  auth_session_id=excluded.auth_session_id,
-  project_id=excluded.project_id,
-  endpoint_id=excluded.endpoint_id,
-  grant_hash=excluded.grant_hash,
-  grant_exchanged_at=NULL,
-  mode=excluded.mode,
-  source_ip=excluded.source_ip,
-  status='active',
-  expires_at=excluded.expires_at,
-  started_at=excluded.started_at,
-  ended_at=NULL`,
+	_, err = tx.ExecContext(ctx, `INSERT INTO access_sessions(id,user_id,auth_session_id,project_id,endpoint_id,token_hash,grant_hash,mode,source_ip,status,expires_at,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		sessionID, input.UserID, input.AuthSessionID, input.ProjectID, input.EndpointID, input.TokenHash, input.GrantHash, input.Mode, input.SourceIP, "active", input.ExpiresAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
-		return AccessSession{}, err
-	}
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM access_sessions WHERE token_hash = ?`, input.TokenHash).Scan(&sessionID); err != nil {
 		return AccessSession{}, err
 	}
 	audit.ResourceID = sessionID
@@ -80,7 +64,7 @@ ON CONFLICT(token_hash) DO UPDATE SET
 	return AccessSession{ID: sessionID, UserID: input.UserID, AuthSessionID: input.AuthSessionID, ProjectID: input.ProjectID, EndpointID: input.EndpointID, Mode: input.Mode, SourceIP: input.SourceIP, Status: "active", ExpiresAt: input.ExpiresAt.UTC(), StartedAt: now}, nil
 }
 
-// ExchangeAccessGrant consumes the one-time URL grant before issuing the
+// ExchangeAccessGrant consumes the one-time browser grant before issuing the
 // host-scoped access cookie. A random access hostname is therefore routing
 // information only and never sufficient authorization by itself.
 func (s *Store) ExchangeAccessGrant(ctx context.Context, tokenHash, grantHash string, idleCutoff time.Time) (AccessSession, EndpointRoute, error) {

@@ -525,8 +525,12 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if launchURL.Scheme != "https" || !strings.HasSuffix(launchURL.Hostname(), ".remote.example.test") || launchURL.Query().Get("grant") == "" {
+	if launchURL.Scheme != "https" || !strings.HasSuffix(launchURL.Hostname(), ".remote.example.test") || !strings.HasPrefix(launchURL.Fragment, "grant=") || launchURL.RawQuery != "" {
 		t.Fatalf("unexpected access-domain URL: %s", session.LaunchURL)
+	}
+	grant := strings.TrimPrefix(launchURL.Fragment, "grant=")
+	if decoded, decodeErr := hex.DecodeString(grant); decodeErr != nil || len(decoded) != 24 {
+		t.Fatalf("launch fragment does not contain a valid one-time grant: %q", launchURL.Fragment)
 	}
 	remaining := time.Until(session.ExpiresAt)
 	if remaining < 55*time.Minute || remaining > 61*time.Minute {
@@ -539,11 +543,27 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	if unauthorizedResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("random access subdomain without grant = %d, want 401", unauthorizedResponse.Code)
 	}
-	exchangeRequest := httptest.NewRequest(http.MethodGet, session.LaunchURL, nil)
+	legacyQueryRequest := httptest.NewRequest(http.MethodGet, "https://"+launchURL.Host+"/?grant="+grant, nil)
+	legacyQueryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(legacyQueryResponse, legacyQueryRequest)
+	if legacyQueryResponse.Code != http.StatusUnauthorized || len(legacyQueryResponse.Result().Cookies()) != 0 {
+		t.Fatalf("legacy Web query grant unexpectedly authorized access: status=%d cookies=%d", legacyQueryResponse.Code, len(legacyQueryResponse.Result().Cookies()))
+	}
+	exchangeRequest := httptest.NewRequest(http.MethodPost, "https://"+launchURL.Host+"/.dmp/session", strings.NewReader(`{"grant":"`+grant+`"}`))
+	exchangeRequest.Header.Set("Content-Type", "application/json")
+	exchangeRequest.Header.Set("Origin", "https://"+launchURL.Host)
 	exchangeResponse := httptest.NewRecorder()
 	handler.ServeHTTP(exchangeResponse, exchangeRequest)
-	if exchangeResponse.Code != http.StatusSeeOther || len(exchangeResponse.Result().Cookies()) != 1 {
+	if exchangeResponse.Code != http.StatusNoContent || len(exchangeResponse.Result().Cookies()) != 1 {
 		t.Fatalf("grant exchange = %d cookies=%d: %s", exchangeResponse.Code, len(exchangeResponse.Result().Cookies()), exchangeResponse.Body.String())
+	}
+	replayRequest := httptest.NewRequest(http.MethodPost, "https://"+launchURL.Host+"/.dmp/session", strings.NewReader(`{"grant":"`+grant+`"}`))
+	replayRequest.Header.Set("Content-Type", "application/json")
+	replayRequest.Header.Set("Origin", "https://"+launchURL.Host)
+	replayResponse := httptest.NewRecorder()
+	handler.ServeHTTP(replayResponse, replayRequest)
+	if replayResponse.Code != http.StatusGone || len(replayResponse.Result().Cookies()) != 0 {
+		t.Fatalf("one-time Web grant was replayable: status=%d cookies=%d", replayResponse.Code, len(replayResponse.Result().Cookies()))
 	}
 	proxyRequest := httptest.NewRequest(http.MethodGet, "https://"+token+".remote.example.test/", nil)
 	proxyRequest.AddCookie(exchangeResponse.Result().Cookies()[0])
@@ -569,10 +589,10 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reopenedURL.Hostname() != launchURL.Hostname() {
-		t.Fatalf("same login and endpoint changed access host: first=%s reopened=%s", launchURL.Hostname(), reopenedURL.Hostname())
+	if reopenedURL.Hostname() == launchURL.Hostname() {
+		t.Fatalf("reopened access reused the previous routing host: %s", launchURL.Hostname())
 	}
-	if reopenedURL.Query().Get("grant") == launchURL.Query().Get("grant") {
+	if reopenedURL.Fragment == launchURL.Fragment {
 		t.Fatal("reopened access reused the one-time grant")
 	}
 }
@@ -620,29 +640,6 @@ func TestDevelopmentAccessDomainLaunchPreservesLocalPort(t *testing.T) {
 	independentWant := "https://" + strings.Repeat("f", 48) + ".console.example.test:5443/"
 	if independentURL != independentWant {
 		t.Fatalf("independent access port URL = %q, want %q", independentURL, independentWant)
-	}
-}
-
-func TestStableAccessTokenIsScopedToLoginAndEndpoint(t *testing.T) {
-	first, firstHash := stableAccessToken("server-secret", "login-a", "endpoint-a", "web")
-	reopened, reopenedHash := stableAccessToken("server-secret", "login-a", "endpoint-a", "web")
-	if first != reopened || firstHash != reopenedHash {
-		t.Fatal("same login and endpoint must keep a stable access hostname")
-	}
-	for _, changed := range []struct {
-		login, endpoint, mode string
-	}{
-		{login: "login-b", endpoint: "endpoint-a", mode: "web"},
-		{login: "login-a", endpoint: "endpoint-b", mode: "web"},
-		{login: "login-a", endpoint: "endpoint-a", mode: "ssh"},
-	} {
-		token, _ := stableAccessToken("server-secret", changed.login, changed.endpoint, changed.mode)
-		if token == first {
-			t.Fatalf("access hostname was not isolated for %#v", changed)
-		}
-	}
-	if decoded, err := hex.DecodeString(first); err != nil || len(decoded) != 24 {
-		t.Fatalf("stable token is not a valid DNS access label: %q", first)
 	}
 }
 

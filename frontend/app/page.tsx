@@ -5863,7 +5863,7 @@ function SettingsView({
                     placeholder="admin.example.com"
                   />
                 </div>
-                <small>同一登录会话内，同一设备入口复用同一子域名</small>
+                <small>每次打开都使用独立的随机子域名</small>
               </label>
               <label className="full">
                 反代端口

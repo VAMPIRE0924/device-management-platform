@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,7 +67,18 @@ func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		gatewayError(w, http.StatusNotFound, "访问会话不存在或已失效")
 		return
 	}
-	session, route, ok := resolveAuthorizedAccess(w, r, g.sessions, token, g.idleTTL, webAccessCookiePath(r, token))
+	pathValue := strings.TrimPrefix(r.PathValue("path"), "/")
+	if pathValue == webGrantExchangePath {
+		g.exchangeGrant(w, r, token, webAccessCookiePath(r, token))
+		return
+	}
+	if pathValue == "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		if _, err := r.Cookie(accessGrantCookie); err != nil {
+			serveGrantBootstrap(w, r)
+			return
+		}
+	}
+	session, route, ok := resolveAuthorizedAccess(w, r, g.sessions, token, g.idleTTL)
 	if !ok {
 		return
 	}
@@ -87,6 +99,59 @@ func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 const accessGrantCookie = "dmp_access_grant"
+const webGrantExchangePath = ".dmp/session"
+
+type webGrantRequest struct {
+	Grant string `json:"grant"`
+}
+
+func (g *WebGateway) exchangeGrant(w http.ResponseWriter, r *http.Request, token, cookiePath string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		gatewayError(w, http.StatusMethodNotAllowed, "访问授权交换仅支持 POST")
+		return
+	}
+	expectedOrigin := "http://" + r.Host
+	if accessRequestUsesHTTPS(r) {
+		expectedOrigin = "https://" + r.Host
+	}
+	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Origin")), expectedOrigin) {
+		gatewayError(w, http.StatusForbidden, "访问授权来源无效")
+		return
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	decoder.DisallowUnknownFields()
+	var input webGrantRequest
+	if err := decoder.Decode(&input); err != nil || !validAccessToken(strings.TrimSpace(input.Grant)) {
+		gatewayError(w, http.StatusBadRequest, "访问授权格式无效")
+		return
+	}
+	grant := strings.TrimSpace(input.Grant)
+	tokenDigest := sha256.Sum256([]byte(token))
+	grantDigest := sha256.Sum256([]byte(grant))
+	idleCutoff := time.Now().UTC().Add(-g.idleTTL)
+	session, _, err := g.sessions.ExchangeAccessGrant(r.Context(), hex.EncodeToString(tokenDigest[:]), hex.EncodeToString(grantDigest[:]), idleCutoff)
+	if err != nil {
+		gatewayError(w, http.StatusGone, "访问授权不存在、已使用或登录已超时")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: accessGrantCookie, Value: grant, Path: cookiePath, HttpOnly: true, Secure: accessRequestUsesHTTPS(r), SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func serveGrantBootstrap(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+	w.WriteHeader(http.StatusUnauthorized)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>正在建立安全访问</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{max-width:32rem;padding:2rem;text-align:center}</style><main><p id="status">需要从平台内重新发起访问</p></main><script>(()=>{const match=/^#grant=([0-9a-f]{48})$/.exec(location.hash);if(!match)return;const status=document.getElementById('status');status.textContent='正在建立安全访问…';const endpoint=location.pathname.replace(/\/?$/,'/')+'.dmp/session';fetch(endpoint,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({grant:match[1]})}).then(response=>{if(!response.ok)throw new Error('exchange failed');history.replaceState(null,'',location.pathname+location.search);location.reload()}).catch(()=>{history.replaceState(null,'',location.pathname+location.search);status.textContent='访问授权已失效，请返回平台重新打开'})})();</script></html>`)
+}
 
 func webAccessCookiePath(r *http.Request, token string) string {
 	if usesSessionSubdomain(r) {
@@ -95,11 +160,11 @@ func webAccessCookiePath(r *http.Request, token string) string {
 	return "/access/web/" + token + "/"
 }
 
-func resolveAuthorizedAccess(w http.ResponseWriter, r *http.Request, sessions sessionResolver, token string, idleTTL time.Duration, cookiePath string) (store.AccessSession, store.EndpointRoute, bool) {
-	tokenDigest := sha256.Sum256([]byte(token))
-	tokenHash := hex.EncodeToString(tokenDigest[:])
-	idleCutoff := time.Now().UTC().Add(-idleTTL)
+func resolveAuthorizedAccessWithURLGrant(w http.ResponseWriter, r *http.Request, sessions sessionResolver, token string, idleTTL time.Duration, cookiePath string) (store.AccessSession, store.EndpointRoute, bool) {
 	if grant := strings.TrimSpace(r.URL.Query().Get("grant")); validAccessToken(grant) {
+		tokenDigest := sha256.Sum256([]byte(token))
+		tokenHash := hex.EncodeToString(tokenDigest[:])
+		idleCutoff := time.Now().UTC().Add(-idleTTL)
 		grantDigest := sha256.Sum256([]byte(grant))
 		session, _, err := sessions.ExchangeAccessGrant(r.Context(), tokenHash, hex.EncodeToString(grantDigest[:]), idleCutoff)
 		if err != nil {
@@ -115,6 +180,13 @@ func resolveAuthorizedAccess(w http.ResponseWriter, r *http.Request, sessions se
 		http.Redirect(w, r, cleanURL.String(), http.StatusSeeOther)
 		return store.AccessSession{}, store.EndpointRoute{}, false
 	}
+	return resolveAuthorizedAccess(w, r, sessions, token, idleTTL)
+}
+
+func resolveAuthorizedAccess(w http.ResponseWriter, r *http.Request, sessions sessionResolver, token string, idleTTL time.Duration) (store.AccessSession, store.EndpointRoute, bool) {
+	tokenDigest := sha256.Sum256([]byte(token))
+	tokenHash := hex.EncodeToString(tokenDigest[:])
+	idleCutoff := time.Now().UTC().Add(-idleTTL)
 	cookie, err := r.Cookie(accessGrantCookie)
 	if err != nil || !validAccessToken(cookie.Value) {
 		gatewayError(w, http.StatusUnauthorized, "需要从平台内重新发起访问")

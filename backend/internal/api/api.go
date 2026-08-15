@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -1468,11 +1467,15 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadGateway, "managed_tunnel_unavailable", "远程访问前无法启动托管通道", nil)
 		return
 	}
-	// Keep the routing hostname stable while the same authenticated platform
-	// session opens the same endpoint. Authorization is still provided by a
-	// fresh one-time grant and the host-scoped access cookie; the hostname alone
-	// never authorizes access. A new platform login produces a different host.
-	token, tokenHash := stableAccessToken(s.apiToken, current.AuthSessionID, route.EndpointID, input.Mode)
+	// Every access attempt gets its own unguessable routing hostname. Reusing a
+	// generated hostname across launches gives external reputation systems a
+	// long-lived URL for short-lived customer login pages and also makes one
+	// browser launch overwrite another session in storage.
+	token, tokenHash, err := newAccessToken()
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "token_generation_failed", "无法创建安全访问令牌", nil)
+		return
+	}
 	grant, grantHash, err := newAccessToken()
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "grant_generation_failed", "无法创建一次性访问授权", nil)
@@ -1507,8 +1510,13 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Mode == "ssh" {
 		launchURL = "/access/ssh/" + token
+		launchURL += "?grant=" + url.QueryEscape(grant)
+	} else {
+		// The fragment never leaves the browser in the HTTP request, access log or
+		// Referer header. The Web gateway exchanges it with a same-origin POST and
+		// stores the result in an HttpOnly, host-scoped cookie.
+		launchURL += "#grant=" + grant
 	}
-	launchURL += "?grant=" + url.QueryEscape(grant)
 	writeJSON(w, http.StatusCreated, map[string]any{"sessionId": session.ID, "launchUrl": launchURL, "expiresAt": session.ExpiresAt})
 }
 
@@ -1941,24 +1949,6 @@ func newAccessToken() (string, string, error) {
 	token := hex.EncodeToString(raw)
 	digest := sha256.Sum256([]byte(token))
 	return token, hex.EncodeToString(digest[:]), nil
-}
-
-func stableAccessToken(secret, authSessionID, endpointID, mode string) (string, string) {
-	key := []byte(secret)
-	if len(key) == 0 {
-		// Development mode can run without a bootstrap API token. The random auth
-		// session identifier remains an appropriate per-login derivation key.
-		key = []byte(authSessionID)
-	}
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte("web-access-host\x00"))
-	_, _ = mac.Write([]byte(authSessionID))
-	_, _ = mac.Write([]byte{'\x00'})
-	_, _ = mac.Write([]byte(endpointID))
-	_, _ = mac.Write([]byte{'\x00'})
-	_, _ = mac.Write([]byte(mode))
-	token := hex.EncodeToString(mac.Sum(nil)[:24])
-	return token, digestString(token)
 }
 
 func newOpaqueSecret(bytesCount int) (string, error) {

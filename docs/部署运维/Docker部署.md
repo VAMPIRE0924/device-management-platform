@@ -1,13 +1,13 @@
 # Docker 正式部署
 
-本文适用于 `vampirerune/device-management-platform:v1.0.7`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
+本文适用于 `vampirerune/device-management-platform:v1.0.8`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
 
 ## 最简 Compose
 
 ```yaml
 services:
   platform:
-    image: vampirerune/device-management-platform:v1.0.7
+    image: vampirerune/device-management-platform:v1.0.8
     container_name: device-management-platform
     restart: unless-stopped
     volumes:
@@ -75,7 +75,7 @@ docker compose up -d
 docker compose ps
 ```
 
-`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.7` 这类完整版本号。
+`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.8` 这类完整版本号。
 
 ## 常见问题
 
@@ -96,6 +96,6 @@ v1.0.4 起，登录 Cookie 会按实际访问协议自动设置：HTTP 不带 `S
 
 ### 为什么反代地址偶尔被 Chrome 标记为“危险网站”
 
-这是 Chrome Safe Browsing 的站点信誉/内容判定页面，不是证书错误页面。动态子域名代理的是路由器、NAS 等登录后台，登录表单与新建子域名可能触发异步判定，因此警告不一定每次出现。平台在同一平台登录会话内为同一设备入口复用同一子域名，每次打开仍会签发新的一次性授权；退出登录、会话超时或切换用户后会更换子域名。平台无法也不会绕过浏览器安全拦截。
+这是 Chrome Safe Browsing 的站点信誉/内容判定页面，不是证书错误页面。真实浏览器对照中，同一被标记访问主机的根地址可以打开，但其查询地址和设备后台路径会被判定为钓鱼；另一个同时创建的访问主机没有触发警告。因此不能把问题归因于证书或全部泛域名，也不能仅凭现象断言具体上游存在安全风险。
 
-应先确认泛域名证书、DNS 与域名信誉正常，并向 Google Safe Browsing 申请复核误报。平台侧已经强制一次性授权、有效登录会话、项目与设备隔离、目标地址白名单化以及 Cookie/Host/重定向隔离；随机子域名本身不能作为访问凭证。
+v1.0.8 起，每次 Web 访问使用独立短期主机；一次性授权保存在 URL 片段中并通过同源 POST 交换，不进入 HTTP 请求地址、访问日志或 Referer，交换完成后仅使用 Host-only 的 HttpOnly Cookie。平台无法也不会绕过浏览器安全拦截；若新版本仍对某个短期访问地址稳定复现警告，应确认泛域名证书与 DNS 正常，并通过 Google Safe Browsing 复核误报。
