@@ -3,10 +3,17 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base32"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -134,7 +141,12 @@ func testServerWithAccessDomain(t *testing.T, accessDomain string) http.Handler 
 
 func testMFA(t *testing.T) *auth.MFA {
 	t.Helper()
-	service, err := auth.NewMFAForKey([]byte("0123456789abcdef0123456789abcdef"))
+	keyPath := filepath.Join(t.TempDir(), "mfa.key")
+	key := []byte("0123456789abcdef0123456789abcdef")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(key)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := auth.LoadOrCreateMFA(keyPath, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +188,22 @@ func completeTestMFA(t *testing.T, handler http.Handler, login *httptest.Respons
 	if err := json.Unmarshal(started.Body.Bytes(), &enrollment); err != nil || enrollment.Enrollment.ManualKey == "" {
 		t.Fatalf("invalid MFA enrollment: %s", started.Body.String())
 	}
-	return request(t, handler, http.MethodPost, "/api/v1/auth/mfa/complete", map[string]any{"challengeToken": challenge.ChallengeToken, "code": auth.CurrentTOTP(enrollment.Enrollment.ManualKey, time.Now())}, false)
+	return request(t, handler, http.MethodPost, "/api/v1/auth/mfa/complete", map[string]any{"challengeToken": challenge.ChallengeToken, "code": currentTestTOTP(enrollment.Enrollment.ManualKey, time.Now())}, false)
+}
+
+func currentTestTOTP(secret string, now time.Time) string {
+	decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(strings.TrimSpace(secret)))
+	if err != nil {
+		return ""
+	}
+	buffer := make([]byte, 8)
+	binary.BigEndian.PutUint64(buffer, uint64(now.UTC().Unix()/30))
+	mac := hmac.New(sha1.New, decoded)
+	_, _ = mac.Write(buffer)
+	digest := mac.Sum(nil)
+	offset := digest[len(digest)-1] & 0x0f
+	value := (uint32(digest[offset])&0x7f)<<24 | uint32(digest[offset+1])<<16 | uint32(digest[offset+2])<<8 | uint32(digest[offset+3])
+	return fmt.Sprintf("%06d", value%1_000_000)
 }
 
 func request(t *testing.T, handler http.Handler, method, path string, body any, authenticated bool) *httptest.ResponseRecorder {
@@ -234,15 +261,15 @@ func TestSystemAdminCanPersistSecuritySettingsWithoutSecretDisclosure(t *testing
 	}
 	cfg := config.Config{
 		ConfigFile: filepath.Join(dir, "platform.conf"), OverrideFile: filepath.Join(dir, "settings.override.conf"), Mode: "dev",
-		ListenAddress: "127.0.0.1:18088", DataDirectory: dir, DatabasePath: filepath.Join(dir, "api.db"),
+		ListenAddress: "127.0.0.1:18080", DataDirectory: dir, DatabasePath: filepath.Join(dir, "api.db"),
 		MFAEnabled: false, MFAMethods: []string{"totp"}, MFAKeyFile: filepath.Join(dir, "mfa.key"), EmailCodeTTL: 10 * time.Minute,
-		SMTPPort: 587, SMTPTLSMode: "starttls", AccessScheme: "https", CookieSecure: false,
+		SMTPPort: 587, SMTPTLSMode: "starttls", AccessScheme: "https",
 	}
 	handler := New(Dependencies{Store: db, Nodes: &fakeNodeControl{}, APIToken: "test-token", Mode: "dev", Version: "test", Settings: config.NewSettingsManager(cfg)})
 	response := request(t, handler, http.MethodPut, "/api/v1/settings/security", map[string]any{
 		"mfaEnabled": true, "mfaMethods": []string{"totp", "email"}, "emailCodeTTL": "10m", "mfaKeyFile": cfg.MFAKeyFile,
 		"smtpHost": "smtp.example.test", "smtpPort": 587, "smtpUsername": "notifier@example.test", "smtpPassword": "smtp-api-test-secret",
-		"smtpFrom": "设备管理平台 <notifier@example.test>", "tlsCertFile": "", "tlsKeyFile": "", "accessDomain": "remote.example.test",
+		"smtpFrom": "设备管理平台 <notifier@example.test>", "tlsCertFile": "", "tlsKeyFile": "", "httpPort": 80, "httpsPort": 443, "accessDomain": "remote.example.test",
 	}, true)
 	if response.Code != http.StatusOK {
 		t.Fatalf("save settings = %d: %s", response.Code, response.Body.String())
@@ -278,6 +305,39 @@ func TestTrustedProxySourceOnlyAcceptsConfiguredPeer(t *testing.T) {
 	handler.ServeHTTP(httptest.NewRecorder(), untrustedRequest)
 	if source != "192.0.2.9" {
 		t.Fatalf("untrusted proxy spoof was accepted: %q", source)
+	}
+}
+
+func TestSessionCookieSecurityFollowsRequestProtocol(t *testing.T) {
+	s := &server{}
+	expiresAt := time.Now().Add(time.Hour)
+
+	httpRequest := httptest.NewRequest(http.MethodPost, "http://platform.test/api/v1/auth/login", nil)
+	httpResponse := httptest.NewRecorder()
+	s.setAuthCookies(httpResponse, httpRequest, "token", "csrf", expiresAt)
+	for _, cookie := range httpResponse.Result().Cookies() {
+		if cookie.Secure {
+			t.Fatalf("plain HTTP cookie %s unexpectedly marked Secure", cookie.Name)
+		}
+	}
+
+	httpsRequest := httptest.NewRequest(http.MethodPost, "https://platform.test/api/v1/auth/login", nil)
+	httpsResponse := httptest.NewRecorder()
+	s.setAuthCookies(httpsResponse, httpsRequest, "token", "csrf", expiresAt)
+	for _, cookie := range httpsResponse.Result().Cookies() {
+		if !cookie.Secure {
+			t.Fatalf("HTTPS cookie %s must be marked Secure", cookie.Name)
+		}
+	}
+
+	proxyRequest := httptest.NewRequest(http.MethodPost, "http://platform.test/api/v1/auth/login", nil)
+	proxyRequest.Header.Set("X-Forwarded-Proto", "https")
+	proxyResponse := httptest.NewRecorder()
+	s.setAuthCookies(proxyResponse, proxyRequest, "token", "csrf", expiresAt)
+	for _, cookie := range proxyResponse.Result().Cookies() {
+		if !cookie.Secure {
+			t.Fatalf("trusted HTTPS proxy cookie %s must be marked Secure", cookie.Name)
+		}
 	}
 }
 

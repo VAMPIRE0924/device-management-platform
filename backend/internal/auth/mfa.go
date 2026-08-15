@@ -82,13 +82,6 @@ func LoadOrCreateMFA(path string, production bool) (*MFA, error) {
 	return &MFA{key: key}, nil
 }
 
-func NewMFAForKey(key []byte) (*MFA, error) {
-	if len(key) != 32 {
-		return nil, errors.New("MFA key must contain 32 bytes")
-	}
-	return &MFA{key: append([]byte(nil), key...)}, nil
-}
-
 func (m *MFA) NewEnrollment(username string) (Enrollment, error) {
 	secretBytes := make([]byte, 20)
 	if _, err := rand.Read(secretBytes); err != nil {
@@ -168,10 +161,6 @@ func (m *MFA) ValidateTOTP(secret, code string, now time.Time) (int64, bool) {
 		}
 	}
 	return 0, false
-}
-
-func CurrentTOTP(secret string, now time.Time) string {
-	return totpCode(secret, now.UTC().Unix()/totpPeriod)
 }
 
 func totpCode(secret string, counter int64) string {

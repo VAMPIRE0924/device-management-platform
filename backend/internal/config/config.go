@@ -16,30 +16,30 @@ import (
 )
 
 type Config struct {
-	ConfigFile        string
-	OverrideFile      string
-	Mode              string
-	ListenAddress     string
-	DataDirectory     string
-	DatabasePath      string
-	APIToken          string
-	MFAEnabled        bool
-	MFAMethods        []string
-	MFAKeyFile        string
-	EmailCodeTTL      time.Duration
-	SMTPHost          string
-	SMTPPort          int
-	SMTPUsername      string
-	SMTPPassword      string
-	SMTPFrom          string
-	SMTPTLSMode       string
-	TLSCertFile       string
-	TLSKeyFile        string
-	PanelDomain       string
-	AccessDomain      string
-	AccessScheme      string
-	TrustedProxyCIDRs []string
-	CookieSecure      bool
+	ConfigFile         string
+	OverrideFile       string
+	Mode               string
+	ListenAddress      string
+	HTTPSListenAddress string
+	DataDirectory      string
+	DatabasePath       string
+	APIToken           string
+	MFAEnabled         bool
+	MFAMethods         []string
+	MFAKeyFile         string
+	EmailCodeTTL       time.Duration
+	SMTPHost           string
+	SMTPPort           int
+	SMTPUsername       string
+	SMTPPassword       string
+	SMTPFrom           string
+	SMTPTLSMode        string
+	TLSCertFile        string
+	TLSKeyFile         string
+	PanelDomain        string
+	AccessDomain       string
+	AccessScheme       string
+	TrustedProxyCIDRs  []string
 }
 
 func Load() (Config, error) {
@@ -90,10 +90,6 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	cookieSecure, err := parseBool(value("DMP_COOKIE_SECURE", "cookie_secure", ""), "cookie_secure")
-	if err != nil {
-		return Config{}, err
-	}
 	smtpPort, err := parsePort(value("DMP_SMTP_PORT", "smtp_port", "587"), "smtp_port")
 	if err != nil {
 		return Config{}, err
@@ -103,34 +99,30 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("mfa_email_code_ttl must be between 1m and 30m")
 	}
 	cfg := Config{
-		ConfigFile:        configPath,
-		OverrideFile:      overridePath,
-		Mode:              mode,
-		ListenAddress:     value("DMP_LISTEN_ADDR", "listen_addr", "127.0.0.1:8088"),
-		DataDirectory:     dataDirectory,
-		DatabasePath:      databasePath,
-		APIToken:          apiToken,
-		MFAEnabled:        mfaEnabled,
-		MFAMethods:        splitList(value("DMP_MFA_METHODS", "mfa_methods", "totp")),
-		MFAKeyFile:        value("DMP_MFA_KEY_FILE", "mfa_key_file", filepath.Join(filepath.Dir(databasePath), "mfa.key")),
-		EmailCodeTTL:      emailCodeTTL,
-		SMTPHost:          value("DMP_SMTP_HOST", "smtp_host", ""),
-		SMTPPort:          smtpPort,
-		SMTPUsername:      value("DMP_SMTP_USERNAME", "smtp_username", ""),
-		SMTPPassword:      smtpPassword,
-		SMTPFrom:          value("DMP_SMTP_FROM", "smtp_from", ""),
-		SMTPTLSMode:       smtpTLSModeForPort(smtpPort),
-		TLSCertFile:       value("DMP_TLS_CERT_FILE", "tls_cert_file", ""),
-		TLSKeyFile:        value("DMP_TLS_KEY_FILE", "tls_key_file", ""),
-		PanelDomain:       strings.ToLower(strings.Trim(value("DMP_PANEL_DOMAIN", "panel_domain", ""), ".")),
-		AccessDomain:      strings.ToLower(strings.Trim(value("DMP_ACCESS_DOMAIN", "access_domain", ""), ".")),
-		AccessScheme:      strings.ToLower(value("DMP_ACCESS_SCHEME", "access_scheme", "https")),
-		TrustedProxyCIDRs: splitList(value("DMP_TRUSTED_PROXY_CIDRS", "trusted_proxy_cidrs", "")),
-	}
-	if strings.TrimSpace(os.Getenv("DMP_COOKIE_SECURE")) == "" && strings.TrimSpace(values["cookie_secure"]) == "" {
-		cfg.CookieSecure = cfg.Mode == "pro"
-	} else {
-		cfg.CookieSecure = cookieSecure
+		ConfigFile:         configPath,
+		OverrideFile:       overridePath,
+		Mode:               mode,
+		ListenAddress:      value("DMP_LISTEN_ADDR", "listen_addr", "0.0.0.0:80"),
+		HTTPSListenAddress: value("DMP_HTTPS_LISTEN_ADDR", "https_listen_addr", "0.0.0.0:443"),
+		DataDirectory:      dataDirectory,
+		DatabasePath:       databasePath,
+		APIToken:           apiToken,
+		MFAEnabled:         mfaEnabled,
+		MFAMethods:         splitList(value("DMP_MFA_METHODS", "mfa_methods", "totp")),
+		MFAKeyFile:         value("DMP_MFA_KEY_FILE", "mfa_key_file", filepath.Join(filepath.Dir(databasePath), "mfa.key")),
+		EmailCodeTTL:       emailCodeTTL,
+		SMTPHost:           value("DMP_SMTP_HOST", "smtp_host", ""),
+		SMTPPort:           smtpPort,
+		SMTPUsername:       value("DMP_SMTP_USERNAME", "smtp_username", ""),
+		SMTPPassword:       smtpPassword,
+		SMTPFrom:           value("DMP_SMTP_FROM", "smtp_from", ""),
+		SMTPTLSMode:        smtpTLSModeForPort(smtpPort),
+		TLSCertFile:        value("DMP_TLS_CERT_FILE", "tls_cert_file", ""),
+		TLSKeyFile:         value("DMP_TLS_KEY_FILE", "tls_key_file", ""),
+		PanelDomain:        strings.ToLower(strings.Trim(value("DMP_PANEL_DOMAIN", "panel_domain", ""), ".")),
+		AccessDomain:       strings.ToLower(strings.Trim(value("DMP_ACCESS_DOMAIN", "access_domain", ""), ".")),
+		AccessScheme:       strings.ToLower(value("DMP_ACCESS_SCHEME", "access_scheme", "https")),
+		TrustedProxyCIDRs:  splitList(value("DMP_TRUSTED_PROXY_CIDRS", "trusted_proxy_cidrs", "")),
 	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
@@ -168,8 +160,25 @@ func (cfg Config) validate() error {
 			return fmt.Errorf("trusted_proxy_cidrs contains invalid CIDR %q", cidr)
 		}
 	}
-	if strings.TrimSpace(cfg.ListenAddress) == "" || strings.TrimSpace(cfg.DatabasePath) == "" || strings.TrimSpace(cfg.MFAKeyFile) == "" {
-		return fmt.Errorf("listen_addr, database_path and mfa_key_file cannot be empty")
+	if strings.TrimSpace(cfg.ListenAddress) == "" || strings.TrimSpace(cfg.HTTPSListenAddress) == "" || strings.TrimSpace(cfg.DatabasePath) == "" || strings.TrimSpace(cfg.MFAKeyFile) == "" {
+		return fmt.Errorf("listen_addr, https_listen_addr, database_path and mfa_key_file cannot be empty")
+	}
+	_, httpPort, err := net.SplitHostPort(cfg.ListenAddress)
+	if err != nil {
+		return fmt.Errorf("listen_addr must contain a valid host and port: %w", err)
+	}
+	if _, err := parsePort(httpPort, "listen_addr"); err != nil {
+		return err
+	}
+	_, httpsPort, err := net.SplitHostPort(cfg.HTTPSListenAddress)
+	if err != nil {
+		return fmt.Errorf("https_listen_addr must contain a valid host and port: %w", err)
+	}
+	if _, err := parsePort(httpsPort, "https_listen_addr"); err != nil {
+		return err
+	}
+	if httpPort == httpsPort {
+		return fmt.Errorf("listen_addr and https_listen_addr must use different ports")
 	}
 	if (cfg.TLSCertFile == "") != (cfg.TLSKeyFile == "") {
 		return fmt.Errorf("tls_cert_file and tls_key_file must be configured together")
@@ -196,9 +205,6 @@ func (cfg Config) validate() error {
 	localWildcardDomain := isLocalAccessDomain(cfg.AccessDomain)
 	if cfg.Mode == "pro" && cfg.AccessDomain != "" && cfg.AccessScheme != "https" && !localWildcardDomain {
 		return fmt.Errorf("access_scheme must be https when access_domain is configured in pro mode")
-	}
-	if cfg.Mode == "pro" && !cfg.CookieSecure && !listenIsLoopback(cfg.ListenAddress) {
-		return fmt.Errorf("cookie_secure may be false in pro mode only on a loopback listener")
 	}
 	return nil
 }
@@ -237,18 +243,6 @@ func readConfigFile(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
 	return values, nil
-}
-
-func listenIsLoopback(address string) bool {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	parsed, err := netip.ParseAddr(host)
-	return err == nil && parsed.IsLoopback()
 }
 
 func smtpTLSModeForPort(port int) string {

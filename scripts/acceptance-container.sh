@@ -30,8 +30,8 @@ else
   printf 'Docker Scout unavailable; image CVE scan skipped\n' >&2
 fi
 docker volume create "$primary_volume" >/dev/null
-docker run -d --name "$primary" --restart no --cap-drop ALL --security-opt no-new-privileges:true \
-  -p "127.0.0.1:$primary_port:8088" -v "$primary_volume:/data" "$image" >/dev/null
+docker run -d --name "$primary" --restart no --security-opt no-new-privileges:true \
+  -p "127.0.0.1:$primary_port:80" -v "$primary_volume:/data" "$image" >/dev/null
 
 wait_ready() {
   endpoint=$1
@@ -48,18 +48,27 @@ wait_ready "$primary_url"
 api_token=$(docker exec "$primary" sh -c 'cat /data/api.token')
 test "${#api_token}" = "64"
 docker exec "$primary" sh -c 'test "$(stat -c %a /data/api.token)" = "600"'
-test "$(docker inspect "$primary" --format '{{.Config.User}}')" = "platform:platform"
-docker exec "$primary" sh -c 'test "$(id -u)" = "10001" && test -w /data && test ! -w /usr/local/bin'
+docker exec "$primary" sh -c 'grep -q "^Uid:[[:space:]]*10001" /proc/1/status && su-exec platform test -w /data && su-exec platform test ! -w /usr/local/bin'
 curl -fsS "$primary_url/api/v1/setup/status" | grep -q '"initialized":false'
 curl -fsS -X POST -H 'Content-Type: application/json' \
   -d '{"username":"container-admin","displayName":"容器管理员","password":"container-admin-password"}' \
   "$primary_url/api/v1/setup" | grep -q '"username":"container-admin"'
 curl -fsS "$primary_url/api/v1/setup/status" | grep -q '"initialized":true'
+login_headers="$artifact_dir/login-headers.txt"
+login_cookies="$artifact_dir/login-cookies.txt"
+curl -fsS -D "$login_headers" -c "$login_cookies" -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"container-admin","password":"container-admin-password"}' \
+  "$primary_url/api/v1/auth/login" | grep -q '"username":"container-admin"'
+if grep -i '^Set-Cookie:.*; Secure' "$login_headers" >/dev/null; then
+  printf 'plain HTTP login incorrectly issued Secure cookies\n' >&2
+  exit 1
+fi
+curl -fsS -b "$login_cookies" "$primary_url/api/v1/auth/me" | grep -q '"username":"container-admin"'
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/meta" | grep -q '"schemaVersion":21'
 
 settings_response="$artifact_dir/settings.json"
 curl -fsS -X PUT -H "Authorization: Bearer $api_token" -H 'Content-Type: application/json' \
-  -d '{"mfaEnabled":false,"mfaMethods":["totp"],"emailCodeTTL":"10m","mfaKeyFile":"/data/mfa.key","smtpHost":"","smtpPort":587,"smtpUsername":"","smtpPassword":"container-settings-test-secret","smtpFrom":"","tlsCertFile":"","tlsKeyFile":"","accessDomain":"container-remote.example.test"}' \
+  -d '{"mfaEnabled":false,"mfaMethods":["totp"],"emailCodeTTL":"10m","mfaKeyFile":"/data/mfa.key","smtpHost":"","smtpPort":587,"smtpUsername":"","smtpPassword":"container-settings-test-secret","smtpFrom":"","tlsCertFile":"","tlsKeyFile":"","httpPort":80,"httpsPort":443,"accessDomain":"container-remote.example.test"}' \
   "$primary_url/api/v1/settings/security" -o "$settings_response"
 grep -q '"restartRequired":true' "$settings_response"
 if grep -q 'container-settings-test-secret' "$settings_response"; then
@@ -74,8 +83,8 @@ curl -fsS -H "Authorization: Bearer $api_token" -H 'Content-Type: application/js
 
 docker stop -t 15 "$primary" >/dev/null
 docker rm "$primary" >/dev/null
-docker run -d --name "$primary" --restart no --cap-drop ALL --security-opt no-new-privileges:true \
-  -p "127.0.0.1:$primary_port:8088" -v "$primary_volume:/data" "$image" >/dev/null
+docker run -d --name "$primary" --restart no --security-opt no-new-privileges:true \
+  -p "127.0.0.1:$primary_port:80" -v "$primary_volume:/data" "$image" >/dev/null
 wait_ready "$primary_url"
 test "$(docker exec "$primary" sh -c 'cat /data/api.token')" = "$api_token"
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/nodes" | grep -q '容器持久化验收节点'
@@ -89,8 +98,8 @@ test "$(sqlite3 "$artifact_dir/backup.db" 'select version from schema_migrations
 docker volume create "$restored_volume" >/dev/null
 docker run --rm -v "$restored_volume:/data" -v "$artifact_dir:/backup:ro" \
   "$image" restore /backup/backup.db >/dev/null
-docker run -d --name "$restored" --restart no --cap-drop ALL --security-opt no-new-privileges:true \
-  -p "127.0.0.1:$restored_port:8088" -v "$restored_volume:/data" "$image" >/dev/null
+docker run -d --name "$restored" --restart no --security-opt no-new-privileges:true \
+  -p "127.0.0.1:$restored_port:80" -v "$restored_volume:/data" "$image" >/dev/null
 restored_url="http://127.0.0.1:$restored_port"
 wait_ready "$restored_url"
 restored_api_token=$(docker exec "$restored" sh -c 'cat /data/api.token')

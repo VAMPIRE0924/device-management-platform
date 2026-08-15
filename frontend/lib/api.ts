@@ -95,6 +95,8 @@ export type APISecuritySettings = {
   tlsConfigured: boolean;
   tlsCertFile: string;
   tlsKeyFile: string;
+  httpPort: number;
+  httpsPort: number;
   emailCodeTTL: string;
   mfaKeyFile: string;
   panelDomain: string;

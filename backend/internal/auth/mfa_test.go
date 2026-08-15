@@ -10,10 +10,7 @@ import (
 )
 
 func TestMFAEnrollmentEncryptionAndCodes(t *testing.T) {
-	service, err := NewMFAForKey([]byte("0123456789abcdef0123456789abcdef"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	service := &MFA{key: []byte("0123456789abcdef0123456789abcdef")}
 	enrollment, err := service.NewEnrollment("admin")
 	if err != nil {
 		t.Fatal(err)

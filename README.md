@@ -23,14 +23,14 @@
 git clone https://github.com/VAMPIRE0924/device-management-platform.git
 cd device-management-platform
 
-cp .env.example .env
-cp conf/device-management-platform.conf.example conf/device-management-platform.conf
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
 
-默认仅监听 `127.0.0.1:8088`。正式部署应通过 HTTPS 反向代理公开，并同时配置面板域名和对应泛域名，例如：
+Compose 不设置宿主机 `ports` 映射。容器默认监听 HTTP 80；在系统设置中配置证书后，同时监听 HTTPS 443。请为容器网络配置可达路由，然后直接访问容器 IP。HTTP 与 HTTPS 端口也可以在系统设置中修改，重启容器后生效。
+
+正式部署应配置面板域名和对应泛域名，例如：
 
 - `admin.example.com`
 - `*.admin.example.com`
@@ -40,7 +40,7 @@ docker compose ps
 ## 镜像
 
 ```bash
-docker pull vampirerune/device-management-platform:v1.0.3
+docker pull vampirerune/device-management-platform:v1.0.4
 ```
 
 已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，不要长期依赖 `latest`。
@@ -57,10 +57,10 @@ docker pull vampirerune/device-management-platform:v1.0.3
 
 ```bash
 docker build \
-  --build-arg VERSION=v1.0.3 \
+  --build-arg VERSION=v1.0.4 \
   --build-arg VCS_REF="$(git rev-parse HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -t device-management-platform:v1.0.3 .
+  -t device-management-platform:v1.0.4 .
 ```
 
 仓库未声明开源许可证。未经许可，不授予复制、修改或再分发权利。

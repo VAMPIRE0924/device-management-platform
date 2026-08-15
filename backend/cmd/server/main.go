@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -124,7 +124,6 @@ func run() error {
 		Discovery:         discoveryManager,
 		SSHGateway:        sshGateway,
 		UI:                ui.Handler(),
-		CookieSecure:      cfg.CookieSecure,
 		MFA:               mfaService,
 		MFAEnabled:        cfg.MFAEnabled,
 		MFAMethods:        cfg.MFAMethods,
@@ -140,7 +139,7 @@ func run() error {
 		Mode:              cfg.Mode,
 		Version:           version,
 	})
-	server := &http.Server{
+	httpServer := &http.Server{
 		Addr:              cfg.ListenAddress,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -148,28 +147,52 @@ func run() error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       90 * time.Second,
 	}
+	servers := []*http.Server{httpServer}
+	if cfg.TLSCertFile != "" {
+		servers = append(servers, &http.Server{
+			Addr:              cfg.HTTPSListenAddress,
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       90 * time.Second,
+		})
+	}
 
 	shutdownContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go lifecycleManager.Run(shutdownContext)
+	var shutdownOnce sync.Once
+	shutdownServers := func() {
+		shutdownOnce.Do(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			for _, server := range servers {
+				if err := server.Shutdown(ctx); err != nil {
+					slog.Error("graceful shutdown failed", "address", server.Addr, "error", err)
+				}
+			}
+		})
+	}
 	go func() {
 		<-shutdownContext.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
-			slog.Error("graceful shutdown failed", "error", err)
-		}
+		shutdownServers()
 	}()
 
-	slog.Info("device management platform API listening", "address", cfg.ListenAddress, "mode", cfg.Mode, "version", version)
+	errCh := make(chan error, len(servers))
+	slog.Info("device management platform HTTP listening", "address", cfg.ListenAddress, "mode", cfg.Mode, "version", version)
+	go func() { errCh <- httpServer.ListenAndServe() }()
 	if cfg.TLSCertFile != "" {
-		err = server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
-	} else {
-		err = server.ListenAndServe()
+		httpsServer := servers[1]
+		slog.Info("device management platform HTTPS listening", "address", cfg.HTTPSListenAddress, "mode", cfg.Mode, "version", version)
+		go func() { errCh <- httpsServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile) }()
 	}
+	err = <-errCh
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
+	stop()
+	shutdownServers()
 	return err
 }
 
@@ -178,16 +201,8 @@ func checkHealth(cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("parse listen address for healthcheck: %w", err)
 	}
-	scheme := "http"
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if cfg.TLSCertFile != "" {
-		scheme = "https"
-		// The probe connects only to this container's loopback listener. Certificate
-		// trust and hostname are validated on real client-facing connections.
-		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec
-	}
-	client := &http.Client{Timeout: 3 * time.Second, Transport: transport}
-	response, err := client.Get(scheme + "://" + net.JoinHostPort("127.0.0.1", port) + "/health/ready")
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Get("http://" + net.JoinHostPort("127.0.0.1", port) + "/health/ready")
 	if err != nil {
 		return fmt.Errorf("health probe failed: %w", err)
 	}

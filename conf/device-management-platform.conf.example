@@ -1,7 +1,8 @@
 # 正式部署模板。复制为 device-management-platform.conf；不要写入密码或私钥。
 app_name = 设备管理平台
 run_mode = pro
-listen_addr = 0.0.0.0:8088
+listen_addr = 0.0.0.0:80
+https_listen_addr = 0.0.0.0:443
 data_dir = /data
 database_path = /data/platform.db
 settings_override_file = /data/settings.override.conf
@@ -20,7 +21,7 @@ mfa_email_code_ttl = 10m
 # smtp_password_file = /run/secrets/platform_smtp_password
 # smtp_from = 设备管理平台 <notifier@example.com>
 
-# 推荐由外部反向代理终止 TLS；若平台直接终止 TLS，再配置以下路径。
+# 未配置证书时仅监听 HTTP 端口；配置以下证书路径后同时监听 HTTPS 端口。
 # tls_cert_file = /run/secrets/platform_tls_cert
 # tls_key_file = /run/secrets/platform_tls_key
 
@@ -28,4 +29,3 @@ mfa_email_code_ttl = 10m
 
 # 只填写真实反向代理的容器或主机网段；直连部署可留空。
 # trusted_proxy_cidrs = 172.20.0.0/24
-cookie_secure = true

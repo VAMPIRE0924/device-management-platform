@@ -5,14 +5,9 @@ services:
     image: ${DMP_IMAGE:-vampirerune/device-management-platform:latest}
     container_name: device-management-platform
     restart: unless-stopped
-    ports:
-      - "${DMP_BIND_ADDRESS:-127.0.0.1}:${DMP_HOST_PORT:-8088}:8088"
     volumes:
       - platform-data:/data
-      - ./conf/device-management-platform.conf:/etc/device-management-platform/platform.conf:ro
-      - ./secrets/nodes:/run/secrets/platform-nodes:ro
     environment:
-      DMP_CONFIG_FILE: /etc/device-management-platform/platform.conf
       TZ: ${TZ:-Asia/Shanghai}
     security_opt:
       - no-new-privileges:true

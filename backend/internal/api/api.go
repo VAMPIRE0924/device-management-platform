@@ -130,7 +130,6 @@ type Dependencies struct {
 	TrustedProxyCIDRs []string
 	Mode              string
 	Version           string
-	CookieSecure      bool
 	MFA               *auth.MFA
 	MFAEnabled        bool
 	MFAMethods        []string
@@ -164,7 +163,6 @@ type server struct {
 	accessScheme      string
 	mode              string
 	version           string
-	cookieSecure      bool
 	trustedProxyCIDRs []netip.Prefix
 	loginLimiter      *auth.LoginLimiter
 	mfa               *auth.MFA
@@ -199,7 +197,7 @@ type apiError struct {
 }
 
 func New(deps Dependencies) http.Handler {
-	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, accessDomain: strings.ToLower(deps.AccessDomain), accessScheme: deps.AccessScheme, mode: deps.Mode, version: deps.Version, cookieSecure: deps.CookieSecure, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials}
+	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, accessDomain: strings.ToLower(deps.AccessDomain), accessScheme: deps.AccessScheme, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials}
 	if s.emailCodeTTL == 0 {
 		s.emailCodeTTL = 10 * time.Minute
 	}
@@ -2193,7 +2191,7 @@ func (s *server) createPasswordSession(w http.ResponseWriter, r *http.Request, c
 		return err
 	}
 	s.auditLogin(r, credential.Username, "success")
-	s.setAuthCookies(w, token, csrfToken, expiresAt)
+	s.setAuthCookies(w, r, token, csrfToken, expiresAt)
 	writeJSON(w, http.StatusOK, map[string]any{"user": sessionRecord.User, "csrfToken": csrfToken, "expiresAt": expiresAt})
 	return nil
 }
@@ -2511,14 +2509,22 @@ func (s *server) completeMFA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成双重认证登录", nil)
 		return
 	}
-	s.setAuthCookies(w, token, csrfToken, expiresAt)
+	s.setAuthCookies(w, r, token, csrfToken, expiresAt)
 	remaining, _ := s.store.RecoveryCodeCount(r.Context(), challenge.User.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"user": sessionRecord.User, "csrfToken": csrfToken, "expiresAt": expiresAt, "recoveryCodes": recoveryCodes, "recoveryCodeUsed": method == "recovery", "recoveryCodesRemaining": remaining})
 }
 
-func (s *server) setAuthCookies(w http.ResponseWriter, token, csrfToken string, expiresAt time.Time) {
-	http.SetCookie(w, &http.Cookie{Name: authCookieName, Value: token, Path: "/", HttpOnly: true, Secure: s.cookieSecure, SameSite: http.SameSiteStrictMode, Expires: expiresAt, MaxAge: int(time.Until(expiresAt).Seconds())})
-	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: csrfToken, Path: "/", HttpOnly: false, Secure: s.cookieSecure, SameSite: http.SameSiteStrictMode, Expires: expiresAt, MaxAge: int(time.Until(expiresAt).Seconds())})
+func (s *server) setAuthCookies(w http.ResponseWriter, r *http.Request, token, csrfToken string, expiresAt time.Time) {
+	secure := requestUsesHTTPS(r)
+	http.SetCookie(w, &http.Cookie{Name: authCookieName, Value: token, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, Expires: expiresAt, MaxAge: int(time.Until(expiresAt).Seconds())})
+	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: csrfToken, Path: "/", HttpOnly: false, Secure: secure, SameSite: http.SameSiteStrictMode, Expires: expiresAt, MaxAge: int(time.Until(expiresAt).Seconds())})
+}
+
+func requestUsesHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
 func (s *server) auditLogin(r *http.Request, username, result string) {
@@ -2540,8 +2546,9 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(authCookieName); err == nil {
 		_ = s.store.RevokeAuthSession(r.Context(), digestString(cookie.Value))
 	}
-	http.SetCookie(w, &http.Cookie{Name: authCookieName, Value: "", Path: "/", HttpOnly: true, Secure: s.cookieSecure, SameSite: http.SameSiteStrictMode, MaxAge: -1, Expires: time.Unix(1, 0)})
-	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: "", Path: "/", HttpOnly: false, Secure: s.cookieSecure, SameSite: http.SameSiteStrictMode, MaxAge: -1, Expires: time.Unix(1, 0)})
+	secure := requestUsesHTTPS(r)
+	http.SetCookie(w, &http.Cookie{Name: authCookieName, Value: "", Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: -1, Expires: time.Unix(1, 0)})
+	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: "", Path: "/", HttpOnly: false, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: -1, Expires: time.Unix(1, 0)})
 	w.WriteHeader(http.StatusNoContent)
 }
 

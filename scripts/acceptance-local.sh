@@ -25,7 +25,6 @@ DMP_CONFIG_FILE="$acceptance_dir/missing.conf" \
 DMP_LISTEN_ADDR="127.0.0.1:$acceptance_port" \
 DMP_DATA_DIR="$acceptance_dir" \
 DMP_DB_PATH="$acceptance_dir/platform.db" \
-DMP_COOKIE_SECURE=false \
 "$binary" serve >"$acceptance_dir/server.log" 2>&1 &
 server_pid=$!
 

@@ -5702,14 +5702,42 @@ function SettingsView({
             <div>
               <span className="settings-icon">⌁</span>
               <div>
-                <h2>证书与访问域名</h2>
-                <p>分别配置面板地址和 Web 会话泛域名</p>
+                <h2>访问端口、证书与域名</h2>
+                <p>分别配置 HTTP、HTTPS、面板地址和 Web 会话泛域名</p>
               </div>
               <Tag tone={draft.tlsConfigured ? "green" : "gray"}>
                 {draft.tlsConfigured ? "已配置证书" : "未配置证书"}
               </Tag>
             </div>
             <div className="settings-field-grid">
+              <label>
+                HTTP 端口
+                <input
+                  disabled={locked("httpPort")}
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value={draft.httpPort}
+                  onChange={(event) =>
+                    patch({ httpPort: Number(event.target.value) })
+                  }
+                />
+                <small>默认 80，保存后重启容器生效</small>
+              </label>
+              <label>
+                HTTPS 端口
+                <input
+                  disabled={locked("httpsPort")}
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value={draft.httpsPort}
+                  onChange={(event) =>
+                    patch({ httpsPort: Number(event.target.value) })
+                  }
+                />
+                <small>默认 443，配置证书后启用</small>
+              </label>
               <label>
                 证书文件路径
                 <input

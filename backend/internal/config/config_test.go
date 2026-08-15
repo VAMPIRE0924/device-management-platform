@@ -71,21 +71,47 @@ func TestRejectsInvalidTrustedProxyCIDR(t *testing.T) {
 	}
 }
 
-func TestProductionRejectsInsecureCookieOnPublicListener(t *testing.T) {
-	t.Setenv("DMP_MODE", "pro")
-	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
-	t.Setenv("DMP_COOKIE_SECURE", "false")
-	t.Setenv("DMP_LISTEN_ADDR", "0.0.0.0:8088")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected insecure production cookie validation error")
+func TestDefaultListenerPorts(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DMP_CONFIG_FILE", filepath.Join(dir, "missing.conf"))
+	t.Setenv("DMP_DATA_DIR", dir)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ListenAddress != "0.0.0.0:80" || cfg.HTTPSListenAddress != "0.0.0.0:443" {
+		t.Fatalf("default listeners = %q and %q", cfg.ListenAddress, cfg.HTTPSListenAddress)
 	}
 }
 
-func TestProductionAllowsInsecureCookieForLoopbackAcceptance(t *testing.T) {
+func TestRejectsInvalidOrDuplicateListenerPorts(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DMP_CONFIG_FILE", filepath.Join(dir, "missing.conf"))
+	t.Setenv("DMP_DATA_DIR", dir)
+	t.Setenv("DMP_LISTEN_ADDR", "0.0.0.0:70000")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected out-of-range HTTP port to be rejected")
+	}
+	t.Setenv("DMP_LISTEN_ADDR", "0.0.0.0:443")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected duplicate HTTP and HTTPS ports to be rejected")
+	}
+}
+
+func TestProductionAllowsHTTPLoginOnPublicListener(t *testing.T) {
 	t.Setenv("DMP_MODE", "pro")
 	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
-	t.Setenv("DMP_COOKIE_SECURE", "false")
-	t.Setenv("DMP_LISTEN_ADDR", "127.0.0.1:8088")
+	t.Setenv("DMP_LISTEN_ADDR", "0.0.0.0:18080")
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("direct HTTP production config rejected: %v", err)
+	}
+}
+
+func TestProductionAllowsLoopbackHTTP(t *testing.T) {
+	t.Setenv("DMP_MODE", "pro")
+	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
+	t.Setenv("DMP_LISTEN_ADDR", "127.0.0.1:18080")
 	if _, err := Load(); err != nil {
 		t.Fatalf("loopback acceptance config rejected: %v", err)
 	}
@@ -120,7 +146,7 @@ func TestReadsPanelConfigWithMandatoryEmailVerification(t *testing.T) {
 	configPath := filepath.Join(dir, "platform.conf")
 	content := `
 run_mode = pro
-listen_addr = 127.0.0.1:18088
+listen_addr = 127.0.0.1:18080
 database_path = ` + filepath.Join(dir, "panel.db") + `
 api_token = api-token-0123456789abcdef0123456789
 mfa_enabled = true
@@ -131,7 +157,6 @@ smtp_port = 587
 smtp_username = notifier@example.test
 smtp_password = test-only-secret
 smtp_from = 设备管理平台 <notifier@example.test>
-cookie_secure = false
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -160,7 +185,7 @@ func TestWebSettingsOverridePersistsWithoutExposingSMTPPassword(t *testing.T) {
 	overridePath := filepath.Join(dir, "settings.override.conf")
 	content := `
 run_mode = dev
-listen_addr = 127.0.0.1:18088
+listen_addr = 127.0.0.1:18080
 data_dir = ` + dir + `
 database_path = ` + filepath.Join(dir, "panel.db") + `
 settings_override_file = ` + overridePath + `
@@ -168,7 +193,6 @@ mfa_enabled = false
 mfa_methods = totp
 smtp_host = old.example.test
 smtp_from = Old <old@example.test>
-cookie_secure = false
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -182,7 +206,7 @@ cookie_secure = false
 	updated, err := manager.Save(PanelSettings{
 		MFAEnabled: true, MFAMethods: []string{"email", "totp"}, EmailCodeTTL: "8m", MFAKeyFile: cfg.MFAKeyFile,
 		SMTPHost: "smtp.example.test", SMTPPort: 587, SMTPUsername: "notifier@example.test", SMTPPassword: "smtp-test-password",
-		SMTPFrom: "设备管理平台 <notifier@example.test>", AccessDomain: "remote.example.test",
+		SMTPFrom: "设备管理平台 <notifier@example.test>", HTTPPort: 18080, HTTPSPort: 18443, AccessDomain: "remote.example.test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +225,7 @@ cookie_secure = false
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reloaded.MFAEnabled || reloaded.SMTPHost != "smtp.example.test" || reloaded.SMTPPassword != "smtp-test-password" || reloaded.AccessDomain != "remote.example.test" || reloaded.AccessScheme != "https" {
+	if !reloaded.MFAEnabled || reloaded.SMTPHost != "smtp.example.test" || reloaded.SMTPPassword != "smtp-test-password" || reloaded.ListenAddress != "127.0.0.1:18080" || reloaded.HTTPSListenAddress != "0.0.0.0:18443" || reloaded.AccessDomain != "remote.example.test" || reloaded.AccessScheme != "https" {
 		t.Fatalf("web override did not survive reload: %#v", reloaded)
 	}
 	if NewSettingsManager(reloaded).Current().RestartRequired {
@@ -220,7 +244,7 @@ cookie_secure = false
 
 func TestSMTPPasswordOnlyChangeRequiresRestart(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Config{ConfigFile: filepath.Join(dir, "missing.conf"), OverrideFile: filepath.Join(dir, "override.conf"), Mode: "dev", ListenAddress: "127.0.0.1:8088", DataDirectory: dir, DatabasePath: filepath.Join(dir, "db"), MFAKeyFile: filepath.Join(dir, "mfa.key"), MFAMethods: []string{"totp"}, EmailCodeTTL: 10 * time.Minute, SMTPPort: 587, SMTPTLSMode: "starttls", AccessScheme: "https"}
+	cfg := Config{ConfigFile: filepath.Join(dir, "missing.conf"), OverrideFile: filepath.Join(dir, "override.conf"), Mode: "dev", ListenAddress: "127.0.0.1:18080", DataDirectory: dir, DatabasePath: filepath.Join(dir, "db"), MFAKeyFile: filepath.Join(dir, "mfa.key"), MFAMethods: []string{"totp"}, EmailCodeTTL: 10 * time.Minute, SMTPPort: 587, SMTPTLSMode: "starttls", AccessScheme: "https"}
 	manager := NewSettingsManager(cfg)
 	settings := manager.Current()
 	settings.SMTPPassword = "new-password"
@@ -230,6 +254,29 @@ func TestSMTPPasswordOnlyChangeRequiresRestart(t *testing.T) {
 	}
 	if !updated.RestartRequired {
 		t.Fatal("SMTP password change must require email sender restart")
+	}
+}
+
+func TestPendingSavePreservesWriteOnlySMTPPassword(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{ConfigFile: filepath.Join(dir, "missing.conf"), OverrideFile: filepath.Join(dir, "override.conf"), Mode: "dev", ListenAddress: "127.0.0.1:18080", DataDirectory: dir, DatabasePath: filepath.Join(dir, "db"), MFAKeyFile: filepath.Join(dir, "mfa.key"), MFAMethods: []string{"totp"}, EmailCodeTTL: 10 * time.Minute, SMTPPort: 587, SMTPTLSMode: "starttls", AccessScheme: "https"}
+	manager := NewSettingsManager(cfg)
+	settings := manager.Current()
+	settings.SMTPPassword = "pending-password"
+	if _, err := manager.Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	settings = manager.Current()
+	settings.PanelDomain = "panel.example.test"
+	if _, err := manager.Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	password, err := os.ReadFile(filepath.Join(dir, "smtp-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(password)) != "pending-password" {
+		t.Fatalf("pending SMTP password changed: %q", password)
 	}
 }
 
@@ -270,7 +317,7 @@ func TestEnvironmentLockedMethodsUseSetEquality(t *testing.T) {
 
 func TestWebSettingsCanClearManagedSMTPPassword(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Config{ConfigFile: filepath.Join(dir, "missing.conf"), OverrideFile: filepath.Join(dir, "override.conf"), Mode: "dev", ListenAddress: "127.0.0.1:8088", DataDirectory: dir, DatabasePath: filepath.Join(dir, "db"), MFAKeyFile: filepath.Join(dir, "mfa.key"), MFAMethods: []string{"totp"}, EmailCodeTTL: 10 * time.Minute, SMTPPort: 587, SMTPTLSMode: "starttls", AccessScheme: "https", SMTPPassword: "existing"}
+	cfg := Config{ConfigFile: filepath.Join(dir, "missing.conf"), OverrideFile: filepath.Join(dir, "override.conf"), Mode: "dev", ListenAddress: "127.0.0.1:18080", DataDirectory: dir, DatabasePath: filepath.Join(dir, "db"), MFAKeyFile: filepath.Join(dir, "mfa.key"), MFAMethods: []string{"totp"}, EmailCodeTTL: 10 * time.Minute, SMTPPort: 587, SMTPTLSMode: "starttls", AccessScheme: "https", SMTPPassword: "existing"}
 	manager := NewSettingsManager(cfg)
 	settings := manager.Current()
 	settings.ClearSMTPPassword = true
