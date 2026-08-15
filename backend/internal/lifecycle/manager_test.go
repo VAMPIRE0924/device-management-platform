@@ -28,7 +28,7 @@ func (f *fakeStore) DeletePortForward(_ context.Context, id string, _ store.Audi
 	f.deleted = append(f.deleted, id)
 	return nil
 }
-func (f *fakeStore) ExpireAccessSessions(context.Context, time.Time) (int64, error) {
+func (f *fakeStore) ExpireAccessSessions(context.Context, time.Time, time.Time) (int64, error) {
 	f.expiredSession = true
 	return 1, nil
 }
@@ -58,7 +58,7 @@ func TestSweepDeletesExpiredTasksAndRetainsFailedCleanup(t *testing.T) {
 		{ID: "reserved-only", NodeID: "node"},
 	}}
 	nodes := &fakeNodes{failID: taskTwo}
-	manager := New(database, nodes, time.Minute)
+	manager := New(database, nodes, time.Minute, 15*time.Minute)
 	manager.now = func() time.Time { return time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC) }
 	if err := manager.Sweep(t.Context()); err != nil {
 		t.Fatal(err)

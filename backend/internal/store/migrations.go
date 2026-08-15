@@ -1,6 +1,6 @@
 package store
 
-const schemaVersion = 23
+const schemaVersion = 24
 
 var migrations = []string{`
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -330,4 +330,10 @@ UPDATE access_sessions SET status = 'revoked', ended_at = COALESCE(ended_at, dat
 CREATE INDEX idx_access_sessions_auth ON access_sessions(auth_session_id,status,expires_at);
 `, `
 ALTER TABLE endpoints DROP COLUMN allow_insecure_tls;
+`, `
+ALTER TABLE access_sessions ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT '';
+UPDATE access_sessions
+SET last_seen_at = COALESCE(grant_exchanged_at, started_at)
+WHERE last_seen_at = '';
+CREATE INDEX idx_access_sessions_activity ON access_sessions(status,last_seen_at,expires_at);
 `}

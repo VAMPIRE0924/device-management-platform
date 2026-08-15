@@ -541,7 +541,7 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	unauthorizedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(unauthorizedResponse, unauthorizedRequest)
 	if unauthorizedResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("random access subdomain without grant = %d, want 401", unauthorizedResponse.Code)
+		t.Fatalf("access route without grant = %d, want 401", unauthorizedResponse.Code)
 	}
 	legacyQueryRequest := httptest.NewRequest(http.MethodGet, "https://"+launchURL.Host+"/?grant="+grant, nil)
 	legacyQueryResponse := httptest.NewRecorder()
@@ -589,11 +589,31 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reopenedURL.Hostname() == launchURL.Hostname() {
-		t.Fatalf("reopened access reused the previous routing host: %s", launchURL.Hostname())
+	if reopenedURL.Hostname() != launchURL.Hostname() {
+		t.Fatalf("reopened access changed the stable routing host: first=%s reopened=%s", launchURL.Hostname(), reopenedURL.Hostname())
 	}
 	if reopenedURL.Fragment == launchURL.Fragment {
 		t.Fatal("reopened access reused the one-time grant")
+	}
+	rotatedRequest := httptest.NewRequest(http.MethodGet, "https://"+token+".remote.example.test/", nil)
+	rotatedRequest.AddCookie(exchangeResponse.Result().Cookies()[0])
+	rotatedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(rotatedResponse, rotatedRequest)
+	if rotatedResponse.Code != http.StatusGone {
+		t.Fatalf("previous grant remained usable after reopening: status=%d", rotatedResponse.Code)
+	}
+	activeResponse := request(t, handler, http.MethodGet, "/api/v1/access-sessions", nil, true)
+	if activeResponse.Code != http.StatusOK {
+		t.Fatalf("list active sessions = %d: %s", activeResponse.Code, activeResponse.Body.String())
+	}
+	var active struct {
+		Items []store.AccessSession `json:"items"`
+	}
+	if err := json.Unmarshal(activeResponse.Body.Bytes(), &active); err != nil {
+		t.Fatal(err)
+	}
+	if len(active.Items) != 1 || active.Items[0].ID == "" {
+		t.Fatalf("reopening must rotate one logical session, got %#v", active.Items)
 	}
 }
 

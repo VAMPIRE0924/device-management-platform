@@ -131,7 +131,7 @@ func run() error {
 	nodes := nodeadapter.New(db, nodeCredentialVault)
 	discoveryManager := discovery.NewManager(db, nodes)
 	sshGateway := access.NewSSHGateway(db, nodes, nodeCredentialVault, cfg.AuthSessionIdleTTL)
-	lifecycleManager := lifecycle.New(db, nodes, 30*time.Second)
+	lifecycleManager := lifecycle.New(db, nodes, 30*time.Second, cfg.AuthSessionIdleTTL)
 	restartRequested := make(chan struct{}, 1)
 	handler := api.New(api.Dependencies{
 		Store:              db,

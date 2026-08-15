@@ -2,7 +2,7 @@
 
 面向客户内网设备的远程管理平台。系统接入重构版 NPS 节点，项目绑定既有 Client，并通过同 ID 的 SOCKS 通道完成设备发现、Web 服务访问和 WebSSH 运维。
 
-[Docker Hub](https://hub.docker.com/r/vampirerune/device-management-platform) · [部署说明](./docs/部署运维/Docker部署.md) · [运维与备份](./docs/部署运维/构建部署与备份.md) · [登录安全](./docs/部署运维/登录安全与双重认证.md) · [安全边界](./docs/安全边界.md)
+[Docker Hub](https://hub.docker.com/r/vampirerune/device-management-platform) · [部署说明](./docs/部署运维/Docker部署.md) · [运维与备份](./docs/部署运维/构建部署与备份.md) · [登录安全](./docs/部署运维/登录安全与双重认证.md)
 
 ## 主要功能
 
@@ -40,7 +40,7 @@ Compose 不设置宿主机 `ports` 映射。容器默认监听 HTTP 80；在系�
 ## 镜像
 
 ```bash
-docker pull vampirerune/device-management-platform:v1.0.8
+docker pull vampirerune/device-management-platform:v1.0.9
 ```
 
 已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，不要长期依赖 `latest`。
@@ -58,10 +58,10 @@ docker pull vampirerune/device-management-platform:v1.0.8
 
 ```bash
 docker build \
-  --build-arg VERSION=v1.0.8 \
+  --build-arg VERSION=v1.0.9 \
   --build-arg VCS_REF="$(git rev-parse HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -t device-management-platform:v1.0.8 .
+  -t device-management-platform:v1.0.9 .
 ```
 
 仓库未声明开源许可证。未经许可，不授予复制、修改或再分发权利。

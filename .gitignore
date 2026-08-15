@@ -4,9 +4,6 @@
 !.env.example
 conf/device-management-platform.conf
 secrets/*
-!secrets/nodes/
-secrets/nodes/*
-!secrets/nodes/.gitkeep
 
 # Runtime data and generated artifacts.
 data/

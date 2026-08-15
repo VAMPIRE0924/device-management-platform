@@ -12,7 +12,7 @@ type storage interface {
 	ListExpiredPortForwards(context.Context, time.Time) ([]store.PortForward, error)
 	SetPortForwardStatus(context.Context, string, string, store.AuditInput) error
 	DeletePortForward(context.Context, string, store.AuditInput) error
-	ExpireAccessSessions(context.Context, time.Time) (int64, error)
+	ExpireAccessSessions(context.Context, time.Time, time.Time) (int64, error)
 	CleanupAuthSessions(context.Context, time.Time) (int64, error)
 }
 
@@ -24,14 +24,18 @@ type Manager struct {
 	store    storage
 	nodes    nodeControl
 	interval time.Duration
+	idleTTL  time.Duration
 	now      func() time.Time
 }
 
-func New(store storage, nodes nodeControl, interval time.Duration) *Manager {
+func New(store storage, nodes nodeControl, interval, idleTTL time.Duration) *Manager {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	return &Manager{store: store, nodes: nodes, interval: interval, now: time.Now}
+	if idleTTL <= 0 {
+		idleTTL = 15 * time.Minute
+	}
+	return &Manager{store: store, nodes: nodes, interval: interval, idleTTL: idleTTL, now: time.Now}
 }
 
 func (m *Manager) Run(ctx context.Context) {
@@ -73,7 +77,7 @@ func (m *Manager) Sweep(ctx context.Context) error {
 			slog.Error("release expired port forward", "forward_id", forward.ID, "error", err)
 		}
 	}
-	if _, err := m.store.ExpireAccessSessions(ctx, now); err != nil {
+	if _, err := m.store.ExpireAccessSessions(ctx, now, now.Add(-m.idleTTL)); err != nil {
 		return err
 	}
 	if _, err := m.store.CleanupAuthSessions(ctx, now); err != nil {

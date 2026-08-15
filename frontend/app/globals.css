@@ -1065,14 +1065,6 @@ main {
   font-size: 10px;
   background: white;
 }
-.filter-button {
-  border: 1px solid var(--line);
-  background: white;
-  color: #607176;
-  border-radius: 7px;
-  padding: 0 11px;
-  font-size: 10px;
-}
 .table-wrap {
   overflow-x: auto;
 }
@@ -3595,6 +3587,30 @@ main {
   color: #8a969a;
   font-size: 17px;
 }
+.native-service-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 9px;
+  border-top: 1px dashed #dbe9e7;
+  color: #74868a;
+  font-size: 12px;
+}
+.native-service-actions button {
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid #bfe1dc;
+  border-radius: 7px;
+  background: #eef8f6;
+  color: #087f75;
+  font: inherit;
+  font-weight: 700;
+}
+.native-service-actions button:hover {
+  background: #def2ee;
+}
 .web-service-row.has-tls-options {
   border-color: #cfe8e3;
   background: #fcfefe;
@@ -4581,7 +4597,7 @@ main {
   min-height: 40px;
   font-size: 12px;
 }
-.filter-button,
+.table-tools select,
 .management-tools select,
 .management-bar select,
 .range-select {
@@ -4592,11 +4608,6 @@ main {
   color: #52666a;
   padding: 0 13px;
   font-size: 12px;
-}
-.filter-button.selected {
-  color: #087f75;
-  border-color: #91cec6;
-  background: #ebf7f5;
 }
 .device-table th {
   padding: 13px 17px;
@@ -4903,108 +4914,6 @@ main {
   font-size: 9px;
   font-weight: 500;
 }
-.project-client-combobox {
-  border: 1px solid #dce4e6;
-  border-radius: 8px;
-  background: #fff;
-  overflow: hidden;
-  transition:
-    border-color 0.15s,
-    box-shadow 0.15s;
-}
-.project-client-combobox.open {
-  border-color: #72b9b0;
-  box-shadow: 0 0 0 3px rgba(8, 127, 117, 0.08);
-}
-.project-client-input-row {
-  display: grid;
-  grid-template-columns: 1fr 42px;
-  align-items: center;
-}
-.form-grid .project-client-input-row input {
-  min-width: 0;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-.project-client-input-row > button {
-  align-self: stretch;
-  border: 0;
-  border-left: 1px solid #e5ebec;
-  background: #f8fbfb;
-  color: #62777a;
-  font-size: 14px;
-  cursor: pointer;
-}
-.project-client-input-row > button:hover:not(:disabled) {
-  color: #087f75;
-  background: #eef8f6;
-}
-.project-client-input-row > button:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-}
-.project-client-options {
-  max-height: 216px;
-  padding: 5px;
-  overflow-y: auto;
-  border-top: 1px solid #e7eded;
-  background: #fff;
-  scrollbar-width: thin;
-}
-.project-client-options > button {
-  width: 100%;
-  min-height: 38px;
-  padding: 6px 9px;
-  display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 9px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: #354a4e;
-  text-align: left;
-  cursor: pointer;
-}
-.project-client-options > button:hover,
-.project-client-options > button.selected {
-  background: #edf8f6;
-  color: #087f75;
-}
-.project-client-options b {
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.project-client-options span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  font-weight: 600;
-}
-.project-client-options i {
-  padding: 3px 7px;
-  border-radius: 999px;
-  font-size: 9px;
-  font-style: normal;
-  font-weight: 700;
-}
-.project-client-options i.online {
-  color: #087f75;
-  background: #e4f5f1;
-}
-.project-client-options i.offline {
-  color: #8b6b36;
-  background: #fff4df;
-}
-.project-client-empty {
-  padding: 18px 12px;
-  color: var(--muted);
-  text-align: center;
-  font-size: 10px;
-  font-weight: 500;
-}
 .form-error {
   margin: 13px 22px 0;
   padding: 9px 11px;
@@ -5014,92 +4923,6 @@ main {
   color: #a75145;
   font-size: 10px;
   font-weight: 650;
-}
-.multi-choice {
-  position: relative;
-}
-.multi-choice summary {
-  min-height: 40px;
-  padding: 0 34px 0 10px;
-  display: flex;
-  align-items: center;
-  overflow: hidden;
-  border: 1px solid #dce4e6;
-  border-radius: 7px;
-  background: #fff;
-  color: #314347;
-  font-size: 12px;
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-  list-style: none;
-}
-.multi-choice summary::-webkit-details-marker {
-  display: none;
-}
-.multi-choice summary::after {
-  content: "⌄";
-  position: absolute;
-  right: 12px;
-  color: #78898c;
-  font-size: 12px;
-}
-.multi-choice[open] summary {
-  border-color: #7bbcb4;
-  box-shadow: 0 0 0 3px rgba(8, 127, 117, 0.08);
-}
-.multi-choice[open] summary::after {
-  content: "⌃";
-}
-.multi-choice > div {
-  position: absolute;
-  z-index: 450;
-  top: calc(100% + 6px);
-  right: 0;
-  left: 0;
-  max-height: 210px;
-  padding: 6px;
-  overflow-y: auto;
-  border: 1px solid #d7e1e2;
-  border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 15px 35px rgba(22, 55, 59, 0.18);
-}
-.multi-choice > div button {
-  width: 100%;
-  min-height: 34px;
-  padding: 6px 8px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: #3d5155;
-  text-align: left;
-  font-size: 11px;
-}
-.multi-choice > div button:hover,
-.multi-choice > div button.selected {
-  color: #087f75;
-  background: #edf8f6;
-}
-.multi-choice > div button i {
-  width: 16px;
-  height: 16px;
-  display: grid;
-  place-items: center;
-  flex: none;
-  border: 1px solid #bdcacb;
-  border-radius: 4px;
-  font-style: normal;
-  font-size: 10px;
-}
-.multi-choice > div button.selected i {
-  color: #fff;
-  border-color: #0a9889;
-  background: #0a9889;
 }
 .sidebar nav {
   overflow-y: auto;
@@ -6746,8 +6569,6 @@ main {
 .form-grid .form-field,
 .web-service-row label,
 .route-note strong,
-.project-client-options b,
-.project-client-options span,
 .overview-capability-card span,
 .overview-resource-summary span,
 .overview-status-list span,
@@ -6760,8 +6581,6 @@ main {
   font-size: 12px;
 }
 .field-hint,
-.project-client-options i,
-.project-client-empty,
 .detail-grid span,
 .detail-grid small,
 .metric-card small,
@@ -6803,8 +6622,6 @@ main {
   font-size: 11px;
 }
 .field-hint,
-.project-client-options i,
-.project-client-empty,
 .detail-grid span,
 .detail-grid small,
 .metric-card small,

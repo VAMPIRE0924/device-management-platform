@@ -9,6 +9,8 @@ import (
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/id"
 )
 
+const accessActivityTouchInterval = 30 * time.Second
+
 func (s *Store) EndpointRoute(ctx context.Context, endpointID string) (EndpointRoute, error) {
 	var route EndpointRoute
 	var clientID sql.NullInt64
@@ -49,8 +51,25 @@ func (s *Store) CreateAccessSession(ctx context.Context, input CreateAccessSessi
 		return AccessSession{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO access_sessions(id,user_id,auth_session_id,project_id,endpoint_id,token_hash,grant_hash,mode,source_ip,status,expires_at,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		sessionID, input.UserID, input.AuthSessionID, input.ProjectID, input.EndpointID, input.TokenHash, input.GrantHash, input.Mode, input.SourceIP, "active", input.ExpiresAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO access_sessions(id,user_id,auth_session_id,project_id,endpoint_id,token_hash,grant_hash,grant_exchanged_at,mode,source_ip,status,expires_at,started_at,ended_at,last_seen_at)
+VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL,?)
+ON CONFLICT(token_hash) DO UPDATE SET
+  id=excluded.id,
+  user_id=excluded.user_id,
+  auth_session_id=excluded.auth_session_id,
+  project_id=excluded.project_id,
+  endpoint_id=excluded.endpoint_id,
+  grant_hash=excluded.grant_hash,
+  grant_exchanged_at=NULL,
+  mode=excluded.mode,
+  source_ip=excluded.source_ip,
+  status='active',
+  expires_at=excluded.expires_at,
+  started_at=excluded.started_at,
+  ended_at=NULL,
+  last_seen_at=excluded.last_seen_at`,
+		sessionID, input.UserID, input.AuthSessionID, input.ProjectID, input.EndpointID, input.TokenHash, input.GrantHash, input.Mode, input.SourceIP, "active", input.ExpiresAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return AccessSession{}, err
 	}
@@ -61,7 +80,7 @@ func (s *Store) CreateAccessSession(ctx context.Context, input CreateAccessSessi
 	if err := tx.Commit(); err != nil {
 		return AccessSession{}, err
 	}
-	return AccessSession{ID: sessionID, UserID: input.UserID, AuthSessionID: input.AuthSessionID, ProjectID: input.ProjectID, EndpointID: input.EndpointID, Mode: input.Mode, SourceIP: input.SourceIP, Status: "active", ExpiresAt: input.ExpiresAt.UTC(), StartedAt: now}, nil
+	return AccessSession{ID: sessionID, UserID: input.UserID, AuthSessionID: input.AuthSessionID, ProjectID: input.ProjectID, EndpointID: input.EndpointID, Mode: input.Mode, SourceIP: input.SourceIP, Status: "active", ExpiresAt: input.ExpiresAt.UTC(), StartedAt: now, LastSeenAt: now}, nil
 }
 
 // ExchangeAccessGrant consumes the one-time browser grant before issuing the
@@ -94,10 +113,15 @@ func (s *Store) ResolveAccessGrant(ctx context.Context, tokenHash, grantHash str
 	var route EndpointRoute
 	var userID, endedAt sql.NullString
 	var clientID sql.NullInt64
-	var expiresAt, startedAt string
+	var expiresAt, startedAt, lastSeenAt string
 	now := time.Now().UTC()
-	err := s.db.QueryRowContext(ctx, `
-SELECT s.id,s.user_id,s.auth_session_id,s.project_id,s.endpoint_id,e.name,d.name,s.mode,s.source_ip,s.status,s.expires_at,s.started_at,s.ended_at,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AccessSession{}, EndpointRoute{}, err
+	}
+	defer tx.Rollback()
+	err = tx.QueryRowContext(ctx, `
+SELECT s.id,s.user_id,s.auth_session_id,s.project_id,s.endpoint_id,e.name,d.name,s.mode,s.source_ip,s.status,s.expires_at,s.started_at,s.last_seen_at,s.ended_at,
        e.protocol,e.target_port,e.access_type,e.tls_server_name,e.ssh_credential_ref,e.ssh_auth_method,e.ssh_username,e.ssh_key_path,e.ssh_host_key_fingerprint,d.id,d.host,p.name,p.node_id,p.client_id
 FROM access_sessions s
 JOIN auth_sessions a ON a.id = s.auth_session_id AND a.user_id = s.user_id
@@ -109,7 +133,7 @@ WHERE s.token_hash = ? AND s.grant_hash = ? AND s.grant_exchanged_at IS NOT NULL
   AND s.status = 'active' AND s.expires_at > ?
   AND a.status = 'active' AND a.expires_at > ? AND a.last_seen_at > ?`,
 		tokenHash, grantHash, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), idleCutoff.UTC().Format(time.RFC3339Nano)).Scan(
-		&session.ID, &userID, &session.AuthSessionID, &session.ProjectID, &session.EndpointID, &session.EndpointName, &session.DeviceName, &session.Mode, &session.SourceIP, &session.Status, &expiresAt, &startedAt, &endedAt,
+		&session.ID, &userID, &session.AuthSessionID, &session.ProjectID, &session.EndpointID, &session.EndpointName, &session.DeviceName, &session.Mode, &session.SourceIP, &session.Status, &expiresAt, &startedAt, &lastSeenAt, &endedAt,
 		&route.Protocol, &route.TargetPort, &route.AccessType, &route.TLSServerName, &route.CredentialRef, &route.SSHAuthMethod, &route.SSHUsername, &route.SSHKeyPath, &route.SSHHostKeyFingerprint, &route.DeviceID, &route.Host, &route.ProjectName, &route.NodeID, &clientID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -126,6 +150,11 @@ WHERE s.token_hash = ? AND s.grant_hash = ? AND s.grant_exchanged_at IS NOT NULL
 	if err != nil {
 		return AccessSession{}, EndpointRoute{}, err
 	}
+	previousLastSeen, err := time.Parse(time.RFC3339Nano, lastSeenAt)
+	if err != nil {
+		return AccessSession{}, EndpointRoute{}, err
+	}
+	session.LastSeenAt = now
 	if userID.Valid {
 		session.UserID = &userID.String
 	}
@@ -140,17 +169,34 @@ WHERE s.token_hash = ? AND s.grant_hash = ? AND s.grant_exchanged_at IS NOT NULL
 	if clientID.Valid {
 		route.ClientID = int(clientID.Int64)
 	}
+	// A single HTML page can load many assets concurrently. Persist activity at
+	// a coarse interval so those requests do not create a SQLite write storm.
+	if now.Sub(previousLastSeen) >= accessActivityTouchInterval {
+		if _, err := tx.ExecContext(ctx, `UPDATE access_sessions SET last_seen_at = ? WHERE id = ?`, now.Format(time.RFC3339Nano), session.ID); err != nil {
+			return AccessSession{}, EndpointRoute{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE auth_sessions SET last_seen_at = ? WHERE id = ? AND status = 'active'`, now.Format(time.RFC3339Nano), session.AuthSessionID); err != nil {
+			return AccessSession{}, EndpointRoute{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return AccessSession{}, EndpointRoute{}, err
+	}
 	return session, route, nil
 }
 
-func (s *Store) ListActiveAccessSessions(ctx context.Context) ([]AccessSession, error) {
+func (s *Store) ListActiveAccessSessions(ctx context.Context, idleCutoff time.Time) ([]AccessSession, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	rows, err := s.db.QueryContext(ctx, `
-SELECT s.id,s.user_id,s.project_id,s.endpoint_id,e.name,d.name,s.mode,s.source_ip,s.status,s.expires_at,s.started_at,s.ended_at
+SELECT s.id,s.user_id,s.project_id,s.endpoint_id,e.name,d.name,s.mode,s.source_ip,s.status,s.expires_at,s.started_at,s.last_seen_at,s.ended_at
 FROM access_sessions s
+JOIN auth_sessions a ON a.id = s.auth_session_id AND a.user_id = s.user_id
+JOIN users u ON u.id = a.user_id AND u.enabled = 1
 JOIN endpoints e ON e.id = s.endpoint_id
 JOIN devices d ON d.id = e.device_id
-WHERE s.status = 'active' AND s.expires_at > ?
-ORDER BY s.started_at DESC`, time.Now().UTC().Format(time.RFC3339Nano))
+WHERE s.status = 'active' AND s.expires_at > ? AND s.last_seen_at > ?
+  AND a.status = 'active' AND a.expires_at > ? AND a.last_seen_at > ?
+ORDER BY s.last_seen_at DESC`, now, idleCutoff.UTC().Format(time.RFC3339Nano), now, idleCutoff.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
 	}
@@ -195,9 +241,19 @@ func (s *Store) RevokeAccessSession(ctx context.Context, sessionID string, audit
 	return tx.Commit()
 }
 
-func (s *Store) ExpireAccessSessions(ctx context.Context, now time.Time) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE access_sessions SET status = 'expired', ended_at = ? WHERE status = 'active' AND expires_at <= ?`,
-		now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
+func (s *Store) ExpireAccessSessions(ctx context.Context, now, idleCutoff time.Time) (int64, error) {
+	nowText := now.UTC().Format(time.RFC3339Nano)
+	idleText := idleCutoff.UTC().Format(time.RFC3339Nano)
+	result, err := s.db.ExecContext(ctx, `
+UPDATE access_sessions
+SET status = 'expired', ended_at = ?
+WHERE status = 'active' AND (
+  expires_at <= ? OR last_seen_at <= ? OR NOT EXISTS (
+    SELECT 1 FROM auth_sessions a JOIN users u ON u.id = a.user_id
+    WHERE a.id = access_sessions.auth_session_id AND a.user_id = access_sessions.user_id
+      AND a.status = 'active' AND a.expires_at > ? AND a.last_seen_at > ? AND u.enabled = 1
+  )
+)`, nowText, nowText, idleText, nowText, idleText)
 	if err != nil {
 		return 0, err
 	}
@@ -207,8 +263,8 @@ func (s *Store) ExpireAccessSessions(ctx context.Context, now time.Time) (int64,
 func scanAccessSession(scanner rowScanner) (AccessSession, error) {
 	var session AccessSession
 	var userID, endedAt sql.NullString
-	var expiresAt, startedAt string
-	if err := scanner.Scan(&session.ID, &userID, &session.ProjectID, &session.EndpointID, &session.EndpointName, &session.DeviceName, &session.Mode, &session.SourceIP, &session.Status, &expiresAt, &startedAt, &endedAt); err != nil {
+	var expiresAt, startedAt, lastSeenAt string
+	if err := scanner.Scan(&session.ID, &userID, &session.ProjectID, &session.EndpointID, &session.EndpointName, &session.DeviceName, &session.Mode, &session.SourceIP, &session.Status, &expiresAt, &startedAt, &lastSeenAt, &endedAt); err != nil {
 		return AccessSession{}, err
 	}
 	var err error
@@ -217,6 +273,10 @@ func scanAccessSession(scanner rowScanner) (AccessSession, error) {
 		return AccessSession{}, err
 	}
 	session.StartedAt, err = time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		return AccessSession{}, err
+	}
+	session.LastSeenAt, err = time.Parse(time.RFC3339Nano, lastSeenAt)
 	if err != nil {
 		return AccessSession{}, err
 	}

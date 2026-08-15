@@ -80,6 +80,16 @@ type WebService = {
 type ServiceProtocol =
   "http" | "https" | "ssh" | "rtsp" | "tcp" | "rdp" | "mysql" | "postgresql";
 type OtherServiceProtocol = Exclude<ServiceProtocol, "http" | "https" | "ssh">;
+const OTHER_SERVICE_DEFAULTS: Record<
+  OtherServiceProtocol,
+  { name: string; port: string }
+> = {
+  rtsp: { name: "RTSP 视频流", port: "554" },
+  rdp: { name: "远程桌面", port: "3389" },
+  mysql: { name: "MySQL", port: "3306" },
+  postgresql: { name: "PostgreSQL", port: "5432" },
+  tcp: { name: "TCP 服务", port: "" },
+};
 type DeviceServiceEndpoint = {
   id?: string;
   name: string;
@@ -1824,7 +1834,7 @@ export default function Home() {
     const otherServices = otherPorts
       .filter((port) => port > 0)
       .map((port, index) => ({
-        name: otherNames[index] || `其他服务 ${index + 1}`,
+        name: otherNames[index] || `TCP 服务 ${index + 1}`,
         protocol: otherProtocols[index] || "tcp",
         port,
       }));
@@ -2581,7 +2591,10 @@ export default function Home() {
                   (item) => item.projectId === activeProject.id,
                 )}
                 nodes={nodeItems}
-                onCreate={() => setModal("create-connection")}
+                onCreate={() => {
+                  setActiveResourceName("");
+                  setModal("create-connection");
+                }}
                 onManage={(forward) => {
                   setActiveResourceName(forward.id);
                   setModal("edit-connection");
@@ -2797,7 +2810,7 @@ export default function Home() {
                         service.protocol === "https",
                     ).length;
                     setToast(
-                      `已导入 ${item.title}：${webCount} 个 Web 服务 · ${selectedServices.length - webCount} 个其他服务`,
+                      `已导入 ${item.title}：${webCount} 个 Web 服务 · ${selectedServices.length - webCount} 个 TCP 服务`,
                     );
                   } catch (error) {
                     setToast(
@@ -2828,7 +2841,17 @@ export default function Home() {
         {modal === "manage-device" && (
           <ManageDeviceModal
             device={activeDevice}
+            forwards={forwardItems.filter(
+              (item) => item.projectId === activeProject.id,
+            )}
             onClose={() => setModal(null)}
+            onOpenForward={(endpointId) => {
+              const forward = forwardItems.find(
+                (item) => item.endpointId === endpointId,
+              );
+              setActiveResourceName(forward?.id || endpointId);
+              setModal(forward ? "edit-connection" : "create-connection");
+            }}
             onDelete={async () => {
               const project =
                 projectItems.find(
@@ -3005,6 +3028,9 @@ export default function Home() {
           <PortForwardModal
             project={activeProject}
             devices={projectDevices}
+            defaultEndpointId={
+              modal === "create-connection" ? activeResourceName : ""
+            }
             existing={
               modal === "edit-connection"
                 ? forwardItems.find((item) => item.id === activeResourceName)
@@ -3021,6 +3047,7 @@ export default function Home() {
                 ]);
               }
               setModal(null);
+              setView("connections");
               setToast(message);
             }}
           />
@@ -4268,7 +4295,7 @@ function MonitorView({
         <div className="card-header">
           <div>
             <h2>活动访问会话</h2>
-            <p>会话令牌、Web 网关和 WebSSH 网关由平台管理；终止后立即吊销</p>
+            <p>仅显示当前真实可用的访问；空闲超时或终止后授权立即失效</p>
           </div>
           <Tag tone="green">{sessions.length} 个活动会话</Tag>
         </div>
@@ -4284,7 +4311,7 @@ function MonitorView({
                     <th>目标</th>
                     <th>类型</th>
                     <th>来源 IP</th>
-                    <th>到期</th>
+                    <th>最后活动</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -4310,7 +4337,7 @@ function MonitorView({
                         <code>{session.sourceIp}</code>
                       </td>
                       <td>
-                        {new Date(session.expiresAt).toLocaleString("zh-CN")}
+                        {new Date(session.lastSeenAt).toLocaleString("zh-CN")}
                       </td>
                       <td>
                         <ConfirmButton
@@ -4805,15 +4832,17 @@ function Workspace({
                 placeholder="搜索设备或 IP"
               />
             </div>
-            <button
-              className={`filter-button ${onlyOnline ? "selected" : ""}`}
-              onClick={() => {
-                setOnlyOnline(!onlyOnline);
+            <select
+              aria-label="设备状态"
+              value={onlyOnline ? "online" : "all"}
+              onChange={(event) => {
+                setOnlyOnline(event.target.value === "online");
                 setPage(1);
               }}
             >
-              {onlyOnline ? "仅在线 ✓" : "全部状态⌄"}
-            </button>
+              <option value="all">全部状态</option>
+              <option value="online">仅在线</option>
+            </select>
           </div>
         </div>
         {visibleDevices.length ? (
@@ -4940,7 +4969,7 @@ function Workspace({
                                 .join(" · ")}
                             >
                               <Tag tone="gray">
-                                其它 ·{" "}
+                                TCP ·{" "}
                                 {device.services -
                                   device.webServices.length -
                                   Number(device.ssh)}
@@ -5863,7 +5892,7 @@ function SettingsView({
                     placeholder="admin.example.com"
                   />
                 </div>
-                <small>每次打开都使用独立的随机子域名</small>
+                <small>同一登录会话内，每个 Web 服务使用独立且稳定的子域名</small>
               </label>
               <label className="full">
                 反代端口
@@ -6651,7 +6680,7 @@ function DiscoveryView({
                         <option value="rdp">RDP 远程桌面</option>
                         <option value="mysql">MySQL</option>
                         <option value="postgresql">PostgreSQL</option>
-                        <option value="tcp">其他 TCP</option>
+                        <option value="tcp">自定义 TCP</option>
                       </select>
                       <input
                         aria-label={`${service.name} 目标端口`}
@@ -7059,12 +7088,14 @@ function ProjectSettingsModal({
 function PortForwardModal({
   project,
   devices,
+  defaultEndpointId = "",
   existing,
   onClose,
   onChanged,
 }: {
   project: ProjectView;
   devices: Device[];
+  defaultEndpointId?: string;
   existing?: APIPortForward;
   onClose: () => void;
   onChanged: (message: string) => Promise<void>;
@@ -7238,8 +7269,8 @@ function PortForwardModal({
           <div>
             <strong>Web 后台不创建端口转发</strong>
             <small>
-              此处只用于 SSH、RTSP 与其他 TCP
-              原生客户端；目标主机和端口来自设备命名服务。
+              此处用于 SSH、RTSP、RDP、数据库和自定义 TCP
+              客户端；目标主机和端口直接取自设备服务配置。
             </small>
           </div>
         </div>
@@ -7250,7 +7281,11 @@ function PortForwardModal({
                 设备服务{" "}
                 <HelpTip text="先在内网设备中登记服务名称、协议和实际目标端口，再在此选择，避免重复手输内网地址。" />
               </span>
-              <select name="endpointId" required defaultValue="">
+              <select
+                name="endpointId"
+                required
+                defaultValue={defaultEndpointId}
+              >
                 <option value="" disabled>
                   请选择设备与服务
                 </option>
@@ -7316,7 +7351,7 @@ function PortForwardModal({
         ) : (
           <EmptyState
             title="没有可转发的设备服务"
-            detail="请先在项目的内网设备中添加 SSH、RTSP 或其他 TCP 服务"
+            detail="请先在项目设备中添加 SSH、RTSP、RDP、数据库或自定义 TCP 服务"
           />
         )}
         {error && (
@@ -7366,24 +7401,13 @@ function CreateProjectModal({
   const [nodeId, setNodeId] = useState("");
   const [clients, setClients] = useState<APINodeClient[]>([]);
   const [clientIdInput, setClientIdInput] = useState("");
-  const [clientMenuOpen, setClientMenuOpen] = useState(false);
   const [loadingClients, setLoadingClients] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-  const visibleClients = useMemo(() => {
-    const query = clientIdInput.trim().toLocaleLowerCase("zh-CN");
-    if (!query) return clients;
-    return clients.filter(
-      (client) =>
-        String(client.id).includes(query) ||
-        client.remark.toLocaleLowerCase("zh-CN").includes(query),
-    );
-  }, [clientIdInput, clients]);
   const selectNode = async (value: string) => {
     setNodeId(value);
     setClients([]);
     setClientIdInput("");
-    setClientMenuOpen(false);
     setError("");
     if (!value) return;
     setLoadingClients(true);
@@ -7500,92 +7524,35 @@ function CreateProjectModal({
               Client{" "}
               <HelpTip text="可以从节点 Client 列表选择，也可以直接输入 Client ID；后台会核对同 ID 的 Client 与 SOCKS 代理。" />
             </span>
-            <div
-              className={`project-client-combobox${clientMenuOpen ? " open" : ""}`}
-            >
-              <div className="project-client-input-row">
-                <input
-                  name="clientId"
-                  type="text"
-                  inputMode="numeric"
-                  pattern="[0-9]+"
-                  required
-                  value={clientIdInput}
-                  disabled={!nodeId || loadingClients}
-                  placeholder={
-                    loadingClients
-                      ? "正在读取 Client…"
-                      : nodeId
-                        ? "选择 Client 或手动输入 ID"
-                        : "请先选择接入节点"
-                  }
-                  role="combobox"
-                  aria-autocomplete="list"
-                  aria-expanded={clientMenuOpen}
-                  aria-controls="project-client-list"
-                  onFocus={() =>
-                    setClientMenuOpen(Boolean(nodeId && !loadingClients))
-                  }
-                  onBlur={() =>
-                    window.setTimeout(() => setClientMenuOpen(false), 120)
-                  }
-                  onChange={(event) => {
-                    setClientIdInput(event.target.value.replace(/\D/g, ""));
-                    setClientMenuOpen(true);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") setClientMenuOpen(false);
-                  }}
+            <input
+              name="clientId"
+              type="text"
+              inputMode="numeric"
+              pattern="[1-9][0-9]*"
+              list="project-client-options"
+              required
+              value={clientIdInput}
+              disabled={!nodeId || loadingClients}
+              placeholder={
+                loadingClients
+                  ? "正在读取 Client…"
+                  : nodeId
+                    ? "选择 Client 或手动输入 ID"
+                    : "请先选择接入节点"
+              }
+              onChange={(event) =>
+                setClientIdInput(event.target.value.replace(/\D/g, ""))
+              }
+            />
+            <datalist id="project-client-options">
+              {clients.map((client) => (
+                <option
+                  key={client.id}
+                  value={String(client.id)}
+                  label={`#${client.id} · ${client.remark || `Client ${client.id}`} · ${client.connected ? "已连接" : "离线"}`}
                 />
-                <button
-                  type="button"
-                  aria-label={
-                    clientMenuOpen ? "收起 Client 列表" : "展开 Client 列表"
-                  }
-                  disabled={!nodeId || loadingClients}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => setClientMenuOpen((open) => !open)}
-                >
-                  {clientMenuOpen ? "⌃" : "⌄"}
-                </button>
-              </div>
-              {clientMenuOpen && (
-                <div
-                  id="project-client-list"
-                  className="project-client-options"
-                  role="listbox"
-                >
-                  {visibleClients.length ? (
-                    visibleClients.map((client) => (
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={String(client.id) === clientIdInput}
-                        className={
-                          String(client.id) === clientIdInput ? "selected" : ""
-                        }
-                        key={client.id}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => {
-                          setClientIdInput(String(client.id));
-                          setClientMenuOpen(false);
-                        }}
-                      >
-                        <b>#{client.id}</b>
-                        <span>{client.remark || `Client ${client.id}`}</span>
-                        <i className={client.connected ? "online" : "offline"}>
-                          {client.connected ? "已连接" : "离线"}
-                        </i>
-                      </button>
-                    ))
-                  ) : (
-                    <div className="project-client-empty">
-                      没有匹配项，可继续手动输入此 ID
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
+              ))}
+            </datalist>
             {nodeId && !loadingClients && (
               <small className="field-hint">
                 共 {clients.length} 个 Client · 支持选择或手动输入 ID
@@ -7835,55 +7802,40 @@ function ResourceModal({
                   {FIELD_HELP[label] && <HelpTip text={FIELD_HELP[label]} />}
                 </span>
                 {options && MULTI_CHOICE_FIELDS.has(label) ? (
-                  <details className="multi-choice">
-                    <summary>
-                      {selectedChoices.length
-                        ? selectedChoices.join("、")
-                        : `请选择${label}`}
-                    </summary>
-                    <div>
-                      {options.map((option) => {
-                        const selected = selectedChoices.includes(option);
-                        return (
-                          <button
-                            type="button"
-                            key={option}
-                            className={selected ? "selected" : ""}
-                            onClick={() => {
-                              setFormError("");
-                              setMultiChoices((currentChoices) => {
-                                const current = currentChoices[label] || [];
-                                if (option === "全部项目")
-                                  return {
-                                    ...currentChoices,
-                                    [label]: selected ? [] : [option],
-                                  };
-                                const withoutAll = current.filter(
-                                  (item) => item !== "全部项目",
-                                );
-                                return {
-                                  ...currentChoices,
-                                  [label]: selected
-                                    ? withoutAll.filter(
-                                        (item) => item !== option,
-                                      )
-                                    : [...withoutAll, option],
-                                };
-                              });
-                            }}
-                          >
-                            <i>{selected ? "✓" : ""}</i>
-                            {option}
-                          </button>
+                  <select
+                    aria-label={label}
+                    name={`field-${index}`}
+                    multiple
+                    required={required}
+                    size={Math.min(5, Math.max(2, options.length))}
+                    value={selectedChoices}
+                    onChange={(event) => {
+                      setFormError("");
+                      let selected = Array.from(
+                        event.currentTarget.selectedOptions,
+                        (option) => option.value,
+                      );
+                      if (
+                        selected.includes("全部项目") &&
+                        !selectedChoices.includes("全部项目")
+                      )
+                        selected = ["全部项目"];
+                      else if (selected.length > 1)
+                        selected = selected.filter(
+                          (option) => option !== "全部项目",
                         );
-                      })}
-                    </div>
-                    <input
-                      type="hidden"
-                      name={`field-${index}`}
-                      value={selectedChoices.join(",")}
-                    />
-                  </details>
+                      setMultiChoices((currentChoices) => ({
+                        ...currentChoices,
+                        [label]: selected,
+                      }));
+                    }}
+                  >
+                    {options.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
                 ) : options ? (
                   <select
                     aria-label={label}
@@ -8678,7 +8630,7 @@ function WebServiceEditor({
         ))}
         {!rows.length && (
           <div className="empty-inline">
-            暂无 Web 服务，可只登记 SSH 或其他服务
+            暂无 Web 服务，可只登记 SSH 或 TCP 服务
           </div>
         )}
       </div>
@@ -8702,7 +8654,7 @@ function DeviceModalNav({
     ["basic", "基本信息", null],
     ["web", "Web 服务", webCount],
     ["ssh", "WebSSH", null],
-    ["other", "其他服务", otherCount],
+    ["other", "TCP 服务", otherCount],
   ];
   return (
     <nav className="device-modal-nav" aria-label="设备配置分类">
@@ -8908,7 +8860,7 @@ function AddDeviceModal({
         <div className={`device-panel ${section === "other" ? "active" : ""}`}>
           <div className="form-section">
             <div>
-              <strong>其他服务</strong>
+              <strong>TCP 服务</strong>
               <button
                 type="button"
                 className="inline-add"
@@ -8917,14 +8869,14 @@ function AddDeviceModal({
                     ...rows,
                     {
                       id: Date.now(),
-                      name: `其他服务 ${rows.length + 1}`,
-                      protocol: "tcp",
-                      port: "",
+                      name: OTHER_SERVICE_DEFAULTS.rtsp.name,
+                      protocol: "rtsp",
+                      port: OTHER_SERVICE_DEFAULTS.rtsp.port,
                     },
                   ])
                 }
               >
-                ＋ 添加原生服务
+                ＋ 添加 TCP 服务
               </button>
             </div>
             <div className="web-service-editor">
@@ -8952,25 +8904,33 @@ function AddDeviceModal({
                     <select
                       name="otherProtocol"
                       value={row.protocol}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        const protocol = event.target
+                          .value as OtherServiceProtocol;
+                        const preset = OTHER_SERVICE_DEFAULTS[protocol];
                         setOtherRows((rows) =>
                           rows.map((item) =>
                             item.id === row.id
                               ? {
                                   ...item,
-                                  protocol: event.target
-                                    .value as OtherServiceProtocol,
+                                  name:
+                                    item.name ===
+                                    OTHER_SERVICE_DEFAULTS[item.protocol].name
+                                      ? preset.name
+                                      : item.name,
+                                  protocol,
+                                  port: preset.port,
                                 }
                               : item,
                           ),
-                        )
-                      }
+                        );
+                      }}
                     >
                       <option value="rtsp">RTSP</option>
                       <option value="rdp">RDP</option>
                       <option value="mysql">MySQL</option>
                       <option value="postgresql">PostgreSQL</option>
-                      <option value="tcp">其他 TCP</option>
+                      <option value="tcp">自定义 TCP</option>
                     </select>
                   </label>
                   <label>
@@ -8995,7 +8955,7 @@ function AddDeviceModal({
                   </label>
                   <button
                     type="button"
-                    aria-label={`删除其他服务 ${index + 1}`}
+                    aria-label={`删除 TCP 服务 ${index + 1}`}
                     onClick={() =>
                       setOtherRows((rows) =>
                         rows.filter((item) => item.id !== row.id),
@@ -9007,7 +8967,7 @@ function AddDeviceModal({
                 </div>
               ))}
               {!otherRows.length && (
-                <div className="empty-inline">暂无其他服务</div>
+                <div className="empty-inline">暂无 TCP 服务</div>
               )}
             </div>
           </div>
@@ -9027,12 +8987,16 @@ function AddDeviceModal({
 
 function ManageDeviceModal({
   device,
+  forwards,
   onClose,
+  onOpenForward,
   onSave,
   onDelete,
 }: {
   device: Device;
+  forwards: APIPortForward[];
   onClose: () => void;
+  onOpenForward: (endpointId: string) => void;
   onSave: (device: Device) => Promise<void>;
   onDelete: () => Promise<void>;
 }) {
@@ -9342,7 +9306,7 @@ function ManageDeviceModal({
         <div className={`device-panel ${section === "other" ? "active" : ""}`}>
           <div className="form-section">
             <div>
-              <strong>其他服务端口</strong>
+              <strong>TCP 服务</strong>
               <button
                 type="button"
                 className="inline-add"
@@ -9352,19 +9316,23 @@ function ManageDeviceModal({
                     {
                       id: `new-other-${Date.now()}`,
                       endpointId: undefined,
-                      name: `其他服务 ${rows.length + 1}`,
-                      protocol: "tcp",
-                      port: "",
+                      name: OTHER_SERVICE_DEFAULTS.rtsp.name,
+                      protocol: "rtsp",
+                      port: OTHER_SERVICE_DEFAULTS.rtsp.port,
                     },
                   ])
                 }
               >
-                ＋ 添加原生服务
+                ＋ 添加 TCP 服务
               </button>
             </div>
             <div className="web-service-editor">
-              {otherRows.map((row, index) => (
-                <div className="web-service-row" key={row.id}>
+              {otherRows.map((row, index) => {
+                const forward = row.endpointId
+                  ? forwards.find((item) => item.endpointId === row.endpointId)
+                  : undefined;
+                return (
+                  <div className="web-service-row" key={row.id}>
                   <label>
                     服务名称
                     <input
@@ -9385,25 +9353,33 @@ function ManageDeviceModal({
                     协议
                     <select
                       value={row.protocol}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        const protocol = event.target
+                          .value as OtherServiceProtocol;
+                        const preset = OTHER_SERVICE_DEFAULTS[protocol];
                         setOtherRows((rows) =>
                           rows.map((item) =>
                             item.id === row.id
                               ? {
                                   ...item,
-                                  protocol: event.target
-                                    .value as OtherServiceProtocol,
+                                  name:
+                                    item.name ===
+                                    OTHER_SERVICE_DEFAULTS[item.protocol].name
+                                      ? preset.name
+                                      : item.name,
+                                  protocol,
+                                  port: preset.port,
                                 }
                               : item,
                           ),
-                        )
-                      }
+                        );
+                      }}
                     >
                       <option value="rtsp">RTSP</option>
                       <option value="rdp">RDP</option>
                       <option value="mysql">MySQL</option>
                       <option value="postgresql">PostgreSQL</option>
-                      <option value="tcp">其他 TCP</option>
+                      <option value="tcp">自定义 TCP</option>
                     </select>
                   </label>
                   <label>
@@ -9427,7 +9403,7 @@ function ManageDeviceModal({
                   </label>
                   <button
                     type="button"
-                    aria-label={`删除其他服务 ${index + 1}`}
+                    aria-label={`删除 TCP 服务 ${index + 1}`}
                     onClick={() =>
                       setOtherRows((rows) =>
                         rows.filter((item) => item.id !== row.id),
@@ -9436,10 +9412,28 @@ function ManageDeviceModal({
                   >
                     ×
                   </button>
-                </div>
-              ))}
+                  <div className="native-service-actions">
+                    <span>
+                      {forward
+                        ? `${forward.serverPort} · ${forward.status === "running" ? "运行中" : "已停止"}`
+                        : row.endpointId
+                          ? "尚未创建访问入口"
+                          : "保存配置后可创建访问入口"}
+                    </span>
+                    {row.endpointId && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenForward(row.endpointId!)}
+                      >
+                        {forward ? "管理访问入口" : "创建访问入口"}
+                      </button>
+                    )}
+                  </div>
+                  </div>
+                );
+              })}
               {!otherRows.length && (
-                <div className="empty-inline">暂无其他服务</div>
+                <div className="empty-inline">暂无 TCP 服务</div>
               )}
             </div>
           </div>

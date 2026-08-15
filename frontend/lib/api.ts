@@ -240,6 +240,7 @@ export type APIAccessSession = {
   status: string;
   expiresAt: string;
   startedAt: string;
+  lastSeenAt: string;
 };
 
 export type APIAccessPolicy = {

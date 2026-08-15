@@ -173,6 +173,7 @@ type AccessSession struct {
 	Status        string     `json:"status"`
 	ExpiresAt     time.Time  `json:"expiresAt"`
 	StartedAt     time.Time  `json:"startedAt"`
+	LastSeenAt    time.Time  `json:"lastSeenAt"`
 	EndedAt       *time.Time `json:"endedAt"`
 }
 

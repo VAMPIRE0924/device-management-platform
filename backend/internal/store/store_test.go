@@ -55,7 +55,7 @@ func TestMigrateAndCreateControlPlaneObjects(t *testing.T) {
 			t.Fatalf("projects.%s must be physically removed, found %d column", column, count)
 		}
 	}
-	for _, indexName := range []string{"idx_discovery_jobs_project_created", "idx_access_sessions_project_status_expiry"} {
+	for _, indexName := range []string{"idx_discovery_jobs_project_created", "idx_access_sessions_project_status_expiry", "idx_access_sessions_activity"} {
 		var count int
 		if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=?`, indexName).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("migration index %s count = %d, err = %v", indexName, count, err)

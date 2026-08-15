@@ -44,7 +44,7 @@ curl -fsS "$acceptance_url/health/live" >/dev/null
 curl -fsS "$acceptance_url/health/ready" >/dev/null
 meta=$(curl -fsS -H "Authorization: Bearer $api_token" "$acceptance_url/api/v1/meta")
 printf '%s' "$meta" | grep -q '"mode":"pro"'
-printf '%s' "$meta" | grep -q '"schemaVersion":21'
+printf '%s' "$meta" | grep -q '"schemaVersion":24'
 
 unauthorized=$(curl -sS -o "$acceptance_dir/unauthorized.json" -w '%{http_code}' "$acceptance_url/api/v1/nodes")
 unknown=$(curl -sS -o "$acceptance_dir/unknown.json" -w '%{http_code}' -H "Authorization: Bearer $api_token" "$acceptance_url/api/v1/not-a-route")

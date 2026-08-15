@@ -99,7 +99,7 @@ if grep -i '^Set-Cookie:.*; Secure' "$login_headers" >/dev/null; then
   exit 1
 fi
 curl -fsS -b "$login_cookies" "$primary_url/api/v1/auth/me" | grep -q '"username":"container-admin"'
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/meta" | grep -q '"schemaVersion":23'
+curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/meta" | grep -q '"schemaVersion":24'
 
 settings_response="$artifact_dir/settings.json"
 curl -fsS -X PUT -H "Authorization: Bearer $api_token" -H 'Content-Type: application/json' \
@@ -155,7 +155,7 @@ test "$(grep -ic '^Set-Cookie:.*; Secure' "$https_headers")" = "2"
 
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/data/backup" -o "$artifact_dir/backup.db"
 test "$(sqlite3 "$artifact_dir/backup.db" 'pragma integrity_check;')" = "ok"
-test "$(sqlite3 "$artifact_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "23"
+test "$(sqlite3 "$artifact_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "24"
 docker volume create "$restored_volume" >/dev/null
 docker run --rm -v "$restored_volume:/data" -v "$artifact_dir:/backup:ro" \
   "$image" restore /backup/backup.db >/dev/null
@@ -166,6 +166,6 @@ wait_ready "$restored_url"
 restored_api_token=$(docker exec "$restored" sh -c 'cat /data/api.token')
 test "${#restored_api_token}" = "64"
 curl -fsS -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/nodes" | grep -q '容器持久化验收节点'
-curl -fsS -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/meta" | grep -q '"schemaVersion":23'
+curl -fsS -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/meta" | grep -q '"schemaVersion":24'
 
 printf 'Container acceptance passed\nbackup artifact: %s\n' "$artifact_dir/backup.db"

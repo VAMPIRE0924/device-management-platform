@@ -77,7 +77,8 @@ test("shows all node tunnels with independent state and activity", async () => {
 
 test("creates projects by binding an existing Client and scopes CIDRs to discovery", async () => {
   const page = await readFile(pageURL, "utf8");
-  contains(page, ["项目名称", "负责人", "接入节点", "选择 Client 或手动输入 ID", "扫描内网 IP 段", "project-client-combobox", 'role="listbox"', 'className="project-table"']);
+  contains(page, ["项目名称", "负责人", "接入节点", "选择 Client 或手动输入 ID", "扫描内网 IP 段", '<datalist id="project-client-options">', "multiple", 'className="project-table"']);
+  assert.doesNotMatch(page, /project-client-combobox|role="listbox"|aria-expanded=/);
   assert.doesNotMatch(page, /关联规则|GatewayBootstrapModal|网关接入方式|客户端运行环境|范围外.*不能访问|配置后才允许发现和远程访问/);
 });
 
@@ -91,7 +92,7 @@ test("persists the compact per-project discovery contract", async () => {
 
 test("edits devices atomically with per-service HTTPS and practical SSH settings", async () => {
   const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
-  contains(page, ["api.updateDevice", "endpoints:", "api.createDevices", "事务化导入", "Web 服务入口", "其他服务端口", "TLS 校验主机名", "SSH 主机密钥指纹", "SSH 登录方式", "SSH 私钥文件路径", "密码加密保存且不回显"]);
+  contains(page, ["api.updateDevice", "endpoints:", "api.createDevices", "事务化导入", "Web 服务入口", "TCP 服务", "创建访问入口", "TLS 校验主机名", "SSH 主机密钥指纹", "SSH 登录方式", "SSH 私钥文件路径", "密码加密保存且不回显"]);
   for (const removed of ["HTTPS 高级设置", "允许设备自签名证书", "授权凭据引用（可选）", "临时允许未知主机密钥"]) assert.doesNotMatch(page, new RegExp(removed));
   contains(api, ["tlsServerName", "credentialConfigured", "sshHostKeyFingerprint", "sshAuthMethod", "sshUsername", "sshKeyPath"]);
   assert.doesNotMatch(api, /addEndpoint\(|updateEndpoint\(|deleteEndpoint\(/);

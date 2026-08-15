@@ -56,7 +56,7 @@ type storage interface {
 	VerifyDeviceEndpoints(context.Context, string, string, map[string]bool, store.AuditInput) (store.Device, error)
 	EndpointRoute(context.Context, string) (store.EndpointRoute, error)
 	CreateAccessSession(context.Context, store.CreateAccessSessionInput, store.AuditInput) (store.AccessSession, error)
-	ListActiveAccessSessions(context.Context) ([]store.AccessSession, error)
+	ListActiveAccessSessions(context.Context, time.Time) ([]store.AccessSession, error)
 	RevokeAccessSession(context.Context, string, store.AuditInput) error
 	ExchangeAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error)
 	ResolveAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error)
@@ -674,7 +674,7 @@ func (s *server) monitorSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取监控项目失败", nil)
 		return
 	}
-	sessions, err := s.store.ListActiveAccessSessions(ctx)
+	sessions, err := s.store.ListActiveAccessSessions(ctx, time.Now().UTC().Add(-s.authSessionIdleTTL))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取活动会话失败", nil)
 		return
@@ -1073,7 +1073,7 @@ func (s *server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "project_in_use", "项目仍有端口转发，请先在项目的端口转发页删除并释放节点端口", nil)
 		return
 	}
-	sessions, err := s.store.ListActiveAccessSessions(r.Context())
+	sessions, err := s.store.ListActiveAccessSessions(r.Context(), time.Now().UTC().Add(-s.authSessionIdleTTL))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "无法检查项目活动访问会话", nil)
 		return
@@ -1467,14 +1467,20 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadGateway, "managed_tunnel_unavailable", "远程访问前无法启动托管通道", nil)
 		return
 	}
-	// Every access attempt gets its own unguessable routing hostname. Reusing a
-	// generated hostname across launches gives external reputation systems a
-	// long-lived URL for short-lived customer login pages and also makes one
-	// browser launch overwrite another session in storage.
-	token, tokenHash, err := newAccessToken()
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "token_generation_failed", "无法创建安全访问令牌", nil)
-		return
+	// A Web route is stable only inside the current authenticated login and for
+	// one endpoint. Reopening rotates the one-time grant and invalidates the old
+	// access authorization without creating bursts of unrelated subdomains.
+	// The route label remains routing information only; it never authorizes a
+	// request without the host-scoped grant cookie.
+	var token, tokenHash string
+	if input.Mode == "web" {
+		token, tokenHash = stableWebRouteToken(current.AuthSessionID, route.EndpointID)
+	} else {
+		token, tokenHash, err = newAccessToken()
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "token_generation_failed", "无法创建安全访问令牌", nil)
+			return
+		}
 	}
 	grant, grantHash, err := newAccessToken()
 	if err != nil {
@@ -1550,7 +1556,7 @@ func webAccessLaunchURL(r *http.Request, scheme, accessDomain, mode, token strin
 }
 
 func (s *server) listAccessSessions(w http.ResponseWriter, r *http.Request) {
-	sessions, err := s.store.ListActiveAccessSessions(r.Context())
+	sessions, err := s.store.ListActiveAccessSessions(r.Context(), time.Now().UTC().Add(-s.authSessionIdleTTL))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取活动访问会话失败", nil)
 		return
@@ -1949,6 +1955,13 @@ func newAccessToken() (string, string, error) {
 	token := hex.EncodeToString(raw)
 	digest := sha256.Sum256([]byte(token))
 	return token, hex.EncodeToString(digest[:]), nil
+}
+
+func stableWebRouteToken(authSessionID, endpointID string) (string, string) {
+	digest := sha256.Sum256([]byte("web-route\x00" + authSessionID + "\x00" + endpointID))
+	token := "device-" + hex.EncodeToString(digest[:16])
+	tokenDigest := sha256.Sum256([]byte(token))
+	return token, hex.EncodeToString(tokenDigest[:])
 }
 
 func newOpaqueSecret(bytesCount int) (string, error) {
@@ -3212,11 +3225,7 @@ func (s *server) accessDomainRouting(next http.Handler) http.Handler {
 			return
 		}
 		token := strings.TrimSuffix(host, suffix)
-		if len(token) != 48 {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if _, err := hex.DecodeString(token); err != nil {
+		if !validAccessRouteLabel(token) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -3227,10 +3236,28 @@ func (s *server) accessDomainRouting(next http.Handler) http.Handler {
 	})
 }
 
+func validAccessRouteLabel(token string) bool {
+	if strings.HasPrefix(token, "device-") {
+		encoded := strings.TrimPrefix(token, "device-")
+		if len(encoded) != 32 {
+			return false
+		}
+		_, err := hex.DecodeString(encoded)
+		return err == nil && encoded == strings.ToLower(encoded)
+	}
+	// Keep already-issued v1.0.8 links routable until their authorization
+	// naturally expires during a rolling upgrade.
+	if len(token) != 48 {
+		return false
+	}
+	_, err := hex.DecodeString(token)
+	return err == nil && token == strings.ToLower(token)
+}
+
 func (s *server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Device Web applications are isolated by their short-lived access token
-		// (and, in production, by a dedicated session subdomain). Do not impose the
+		// Device Web applications are isolated by a host-scoped grant cookie and,
+		// in production, by a dedicated route subdomain. Do not impose the
 		// control plane's CSP/Permissions-Policy on upstream applications: camera,
 		// microphone, USB and vendor-specific browser APIs may be legitimate there.
 		if strings.HasPrefix(r.URL.Path, "/access/web/") {
