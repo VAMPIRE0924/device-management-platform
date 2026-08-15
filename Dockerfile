@@ -32,12 +32,12 @@ LABEL org.opencontainers.image.title="Device Management Platform" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.source="https://github.com/VAMPIRE0924/device-management-platform" \
       org.opencontainers.image.licenses="NOASSERTION"
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk add --no-cache ca-certificates su-exec tzdata && \
     addgroup -S -g 10001 platform && \
     adduser -S -D -H -u 10001 -G platform platform && \
     install -d -o platform -g platform -m 0750 /data
 COPY --from=build /out/device-management-platform /usr/local/bin/device-management-platform
-USER platform:platform
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 WORKDIR /data
 ENV DMP_MODE=pro \
     DMP_CONFIG_FILE=/etc/device-management-platform/platform.conf \
@@ -48,5 +48,5 @@ EXPOSE 8088
 VOLUME ["/data"]
 HEALTHCHECK --interval=20s --timeout=3s --start-period=10s --retries=3 \
   CMD ["/usr/local/bin/device-management-platform", "healthcheck"]
-ENTRYPOINT ["/usr/local/bin/device-management-platform"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["serve"]

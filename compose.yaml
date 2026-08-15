@@ -16,8 +16,6 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     security_opt:
       - no-new-privileges:true
-    cap_drop:
-      - ALL
     healthcheck:
       test: ["CMD", "/usr/local/bin/device-management-platform", "healthcheck"]
       interval: 20s

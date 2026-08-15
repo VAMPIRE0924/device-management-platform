@@ -1,6 +1,6 @@
 # Docker 正式部署
 
-本文适用于 `vampirerune/device-management-platform:v1.0.1`。生产形态为单容器、单实例 SQLite；不支持多个应用实例同时写同一数据卷。
+本文适用于 `vampirerune/device-management-platform:v1.0.2`。生产形态为单容器、单实例 SQLite；不支持多个应用实例同时写同一数据卷。
 
 ## 1. 前置条件
 
@@ -26,7 +26,7 @@ cp conf/device-management-platform.conf.example conf/device-management-platform.
 `.env` 建议保持：
 
 ```dotenv
-DMP_IMAGE=vampirerune/device-management-platform:v1.0.1
+DMP_IMAGE=vampirerune/device-management-platform:v1.0.2
 DMP_BIND_ADDRESS=127.0.0.1
 DMP_HOST_PORT=8088
 TZ=Asia/Shanghai
@@ -174,7 +174,7 @@ SMTP 端口决定连接方式：
 然后修改 `.env` 中的固定版本：
 
 ```bash
-DMP_IMAGE=vampirerune/device-management-platform:v1.0.1
+DMP_IMAGE=vampirerune/device-management-platform:v1.0.2
 ```
 
 执行：
@@ -200,7 +200,7 @@ docker run --rm \
   -v "$PWD/backup:/backup:ro" \
   -v "$PWD/conf/device-management-platform.conf:/etc/device-management-platform/platform.conf:ro" \
   -e DMP_CONFIG_FILE=/etc/device-management-platform/platform.conf \
-  vampirerune/device-management-platform:v1.0.1 \
+  vampirerune/device-management-platform:v1.0.2 \
   restore /backup/device-management-platform-backup.db
 docker compose up -d
 ```
