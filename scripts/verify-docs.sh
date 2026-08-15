@@ -9,13 +9,17 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const docs = path.resolve(process.argv[2]);
-const requiredDirectories = ["产品决策", "验收标准", "文档维护规范", "开发日志", "架构设计", "部署运维"];
+const requiredDirectories = ["部署运维"];
 const errors = [];
 
 for (const directory of requiredDirectories) {
   const target = path.join(docs, directory);
   if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) errors.push(`缺少目录：${directory}`);
   if (!fs.existsSync(path.join(target, "README.md"))) errors.push(`缺少目录索引：${directory}/README.md`);
+}
+
+for (const document of ["Docker部署.md", "构建部署与备份.md", "登录安全与双重认证.md"]) {
+  if (!fs.existsSync(path.join(docs, "部署运维", document))) errors.push(`缺少部署资料：部署运维/${document}`);
 }
 
 const rootFiles = fs.readdirSync(docs, { withFileTypes: true })
@@ -61,5 +65,5 @@ if (errors.length) {
   process.stderr.write(errors.map((error) => `- ${error}`).join("\n") + "\n");
   process.exit(1);
 }
-process.stdout.write("I5CLOUD documentation verification passed\n");
+process.stdout.write("Documentation verification passed\n");
 NODE

@@ -130,14 +130,14 @@ func (m *SettingsManager) Save(input PanelSettings) (PanelSettings, error) {
 	if input.ClearSMTPPassword {
 		passwordFile = ""
 	} else if strings.TrimSpace(input.SMTPPassword) != "" {
-		passwordFile = filepath.Join(m.active.DataDirectory, "i5cloud.smtp-password")
+		passwordFile = filepath.Join(m.active.DataDirectory, "smtp-password")
 		if err := writePrivateFile(passwordFile, []byte(input.SMTPPassword+"\n")); err != nil {
 			return PanelSettings{}, fmt.Errorf("write SMTP password: %w", err)
 		}
 	} else if candidate.SMTPPassword != "" {
 		passwordFile = configuredSMTPPasswordFile(m.active)
-		if passwordFile == "" && strings.TrimSpace(os.Getenv("I5CLOUD_SMTP_PASSWORD")) == "" {
-			passwordFile = filepath.Join(m.active.DataDirectory, "i5cloud.smtp-password")
+		if passwordFile == "" && strings.TrimSpace(os.Getenv("DMP_SMTP_PASSWORD")) == "" {
+			passwordFile = filepath.Join(m.active.DataDirectory, "smtp-password")
 			if err := writePrivateFile(passwordFile, []byte(candidate.SMTPPassword+"\n")); err != nil {
 				return PanelSettings{}, fmt.Errorf("protect existing SMTP password: %w", err)
 			}
@@ -148,7 +148,7 @@ func (m *SettingsManager) Save(input PanelSettings) (PanelSettings, error) {
 		return PanelSettings{}, fmt.Errorf("write settings override: %w", err)
 	}
 	if input.ClearSMTPPassword {
-		managedPasswordFile := filepath.Join(m.active.DataDirectory, "i5cloud.smtp-password")
+		managedPasswordFile := filepath.Join(m.active.DataDirectory, "smtp-password")
 		if err := os.Remove(managedPasswordFile); err != nil && !os.IsNotExist(err) {
 			return PanelSettings{}, fmt.Errorf("remove managed SMTP password: %w", err)
 		}
@@ -225,7 +225,7 @@ func applyEditableValues(cfg Config, values map[string]string) Config {
 
 func renderOverride(cfg Config, smtpPasswordFile string) string {
 	lines := []string{
-		"# 由 I5CLOUD 系统设置生成。可由部署配置或环境变量覆盖。",
+		"# 由 设备管理平台 系统设置生成。可由部署配置或环境变量覆盖。",
 		"mfa_enabled = " + strconv.FormatBool(cfg.MFAEnabled),
 		"mfa_methods = " + strings.Join(cfg.MFAMethods, ","),
 		"mfa_email_code_ttl = " + cfg.EmailCodeTTL.String(),
@@ -250,7 +250,7 @@ func writePrivateFile(path string, content []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".i5cloud-settings-*")
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".platform-settings-*")
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func writePrivateFile(path string, content []byte) error {
 }
 
 func configuredSMTPPasswordFile(cfg Config) string {
-	if path := strings.TrimSpace(os.Getenv("I5CLOUD_SMTP_PASSWORD_FILE")); path != "" {
+	if path := strings.TrimSpace(os.Getenv("DMP_SMTP_PASSWORD_FILE")); path != "" {
 		return path
 	}
 	if values, err := readConfigFile(cfg.OverrideFile); err == nil {
@@ -325,10 +325,10 @@ func sameEditableConfig(left, right Config) bool {
 }
 
 var editableEnvironment = map[string]string{
-	"mfaEnabled": "I5CLOUD_MFA_ENABLED", "mfaMethods": "I5CLOUD_MFA_METHODS", "emailCodeTTL": "I5CLOUD_MFA_EMAIL_CODE_TTL",
-	"smtpHost": "I5CLOUD_SMTP_HOST", "smtpPort": "I5CLOUD_SMTP_PORT", "smtpUsername": "I5CLOUD_SMTP_USERNAME",
-	"smtpPassword": "I5CLOUD_SMTP_PASSWORD", "smtpFrom": "I5CLOUD_SMTP_FROM",
-	"tlsCertFile": "I5CLOUD_TLS_CERT_FILE", "tlsKeyFile": "I5CLOUD_TLS_KEY_FILE", "panelDomain": "I5CLOUD_PANEL_DOMAIN", "accessDomain": "I5CLOUD_ACCESS_DOMAIN",
+	"mfaEnabled": "DMP_MFA_ENABLED", "mfaMethods": "DMP_MFA_METHODS", "emailCodeTTL": "DMP_MFA_EMAIL_CODE_TTL",
+	"smtpHost": "DMP_SMTP_HOST", "smtpPort": "DMP_SMTP_PORT", "smtpUsername": "DMP_SMTP_USERNAME",
+	"smtpPassword": "DMP_SMTP_PASSWORD", "smtpFrom": "DMP_SMTP_FROM",
+	"tlsCertFile": "DMP_TLS_CERT_FILE", "tlsKeyFile": "DMP_TLS_KEY_FILE", "panelDomain": "DMP_PANEL_DOMAIN", "accessDomain": "DMP_ACCESS_DOMAIN",
 }
 
 func environmentLockedFields() []string {
@@ -338,7 +338,7 @@ func environmentLockedFields() []string {
 			locked = append(locked, field)
 		}
 	}
-	if strings.TrimSpace(os.Getenv("I5CLOUD_SMTP_PASSWORD_FILE")) != "" {
+	if strings.TrimSpace(os.Getenv("DMP_SMTP_PASSWORD_FILE")) != "" {
 		locked = append(locked, "smtpPassword")
 	}
 	sort.Strings(locked)

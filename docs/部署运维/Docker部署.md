@@ -17,18 +17,18 @@ Web 会话必须使用泛域名。每个会话会生成独立子域名，从而�
 ## 2. 准备目录
 
 ```bash
-git clone https://github.com/VAMPIRE0924/device-management-platform.git i5cloud
-cd i5cloud
+git clone https://github.com/VAMPIRE0924/device-management-platform.git device-management-platform
+cd device-management-platform
 cp .env.example .env
-cp conf/i5cloud.conf.example conf/i5cloud.conf
+cp conf/device-management-platform.conf.example conf/device-management-platform.conf
 ```
 
 `.env` 建议保持：
 
 ```dotenv
-I5CLOUD_IMAGE=vampirerune/device-management-platform:v1.0.0
-I5CLOUD_BIND_ADDRESS=127.0.0.1
-I5CLOUD_HOST_PORT=8088
+DMP_IMAGE=vampirerune/device-management-platform:v1.0.0
+DMP_BIND_ADDRESS=127.0.0.1
+DMP_HOST_PORT=8088
 TZ=Asia/Shanghai
 ```
 
@@ -36,30 +36,30 @@ TZ=Asia/Shanghai
 
 ```bash
 umask 077
-openssl rand -hex 32 > secrets/i5cloud_api_token
-openssl rand -hex 24 > secrets/i5cloud_setup_token
+openssl rand -hex 32 > secrets/api_token
+openssl rand -hex 24 > secrets/setup_token
 mkdir -p secrets/nodes
-chmod 600 secrets/i5cloud_api_token secrets/i5cloud_setup_token
+chmod 600 secrets/api_token secrets/setup_token
 ```
 
-- `i5cloud_api_token` 用于管理 API，不用于网页登录；
-- `i5cloud_setup_token` 只用于首次创建系统管理员；
+- `api_token` 用于管理 API，不用于网页登录；
+- `setup_token` 只用于首次创建系统管理员；
 - 两者必须不同，不能写入 `.env`、Compose 或命令行参数；
 - 真实 Secret、数据库、覆盖配置和本地证书均已被 Git 忽略。
 
 ## 3. 配置平台
 
-编辑 `conf/i5cloud.conf`：
+编辑 `conf/device-management-platform.conf`：
 
 ```ini
-app_name = I5CLOUD
+app_name = 设备管理平台
 run_mode = pro
 listen_addr = 0.0.0.0:8088
 data_dir = /data
-database_path = /data/i5cloud.db
-settings_override_file = /data/i5cloud.override.conf
-api_token_file = /run/secrets/i5cloud_api_token
-setup_token_file = /run/secrets/i5cloud_setup_token
+database_path = /data/platform.db
+settings_override_file = /data/settings.override.conf
+api_token_file = /run/secrets/platform_api_token
+setup_token_file = /run/secrets/platform_setup_token
 
 mfa_enabled = false
 mfa_methods = totp,email
@@ -84,7 +84,7 @@ trusted_proxy_cidrs = 172.20.0.0/24
 
 ## 4. HTTPS 反向代理
 
-面板域名和所有会话子域名必须转发到同一个 I5CLOUD 端口，并保留原始 `Host`。
+面板域名和所有会话子域名必须转发到同一个 设备管理平台 端口，并保留原始 `Host`。
 
 ### Nginx
 
@@ -144,10 +144,10 @@ admin.example.com, *.admin.example.com {
 docker compose pull
 docker compose up -d
 docker compose ps
-docker compose logs --tail=100 i5cloud
+docker compose logs --tail=100 platform
 ```
 
-容器状态应变为 `healthy`。随后访问 `https://admin.example.com`，输入 `secrets/i5cloud_setup_token` 的内容创建首个系统管理员。完成初始化后再次调用初始化接口会被拒绝。
+容器状态应变为 `healthy`。随后访问 `https://admin.example.com`，输入 `secrets/setup_token` 的内容创建首个系统管理员。完成初始化后再次调用初始化接口会被拒绝。
 
 基础检查：
 
@@ -168,7 +168,7 @@ curl -fsS https://admin.example.com/health/ready
 
 认证密码加密写入 SQLite，页面再次打开时不回显。节点 Client 只允许查看和新增，不能从平台修改或删除。项目只绑定既有 Client；Client ID 与重构版 NPS 的 SOCKS ID 必须一致。
 
-如需文件方式管理外部节点或 SSH 凭据，将 JSON 放入 `secrets/nodes/`，在平台填写 `file:///run/secrets/i5cloud-nodes/<文件名>.json`。文件必须保持 `0600`，且必须与数据库一起备份。
+如需文件方式管理外部节点或 SSH 凭据，将 JSON 放入 `secrets/nodes/`，在平台填写 `file:///run/secrets/platform-nodes/<文件名>.json`。文件必须保持 `0600`，且必须与数据库一起备份。
 
 ## 7. SMTP 与 MFA
 
@@ -183,15 +183,15 @@ SMTP 端口决定连接方式：
 
 升级前先从“系统设置”下载 SQLite 一致性备份，并备份以下文件：
 
-- Docker volume `i5cloud_i5cloud-data`；
-- `conf/i5cloud.conf` 和 `.env`；
+- Docker volume `device-management-platform_platform-data`；
+- `conf/device-management-platform.conf` 和 `.env`；
 - `secrets/` 中全部 Secret；
 - 反向代理配置和 TLS 证书。
 
 然后修改 `.env` 中的固定版本：
 
 ```bash
-I5CLOUD_IMAGE=vampirerune/device-management-platform:v1.0.0
+DMP_IMAGE=vampirerune/device-management-platform:v1.0.0
 ```
 
 执行：
@@ -213,18 +213,18 @@ docker compose ps
 ```bash
 docker compose down
 docker run --rm \
-  -v i5cloud_i5cloud-data:/data \
+  -v device-management-platform_platform-data:/data \
   -v "$PWD/backup:/backup:ro" \
-  -v "$PWD/conf/i5cloud.conf:/etc/i5cloud/i5cloud.conf:ro" \
-  -v "$PWD/secrets/i5cloud_api_token:/run/secrets/i5cloud_api_token:ro" \
-  -v "$PWD/secrets/i5cloud_setup_token:/run/secrets/i5cloud_setup_token:ro" \
-  -e I5CLOUD_CONFIG_FILE=/etc/i5cloud/i5cloud.conf \
+  -v "$PWD/conf/device-management-platform.conf:/etc/device-management-platform/platform.conf:ro" \
+  -v "$PWD/secrets/api_token:/run/secrets/platform_api_token:ro" \
+  -v "$PWD/secrets/setup_token:/run/secrets/platform_setup_token:ro" \
+  -e DMP_CONFIG_FILE=/etc/device-management-platform/platform.conf \
   vampirerune/device-management-platform:v1.0.0 \
-  restore /backup/i5cloud-backup.db
+  restore /backup/device-management-platform-backup.db
 docker compose up -d
 ```
 
-数据库、`/data/i5cloud.secrets.key`、`/data/mfa.key`、外部 Secret 和配置必须来自同一备份批次。缺少节点凭据主密钥时，数据库中的节点和 SSH 密文无法解密。
+数据库、`/data/credentials.key`、`/data/mfa.key`、外部 Secret 和配置必须来自同一备份批次。缺少节点凭据主密钥时，数据库中的节点和 SSH 密文无法解密。
 
 ## 10. 卸载
 

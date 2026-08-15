@@ -2,9 +2,8 @@
 .env
 .env.*
 !.env.example
-conf/i5cloud.conf
+conf/device-management-platform.conf
 secrets/*
-!secrets/README.md
 !secrets/nodes/
 secrets/nodes/*
 !secrets/nodes/.gitkeep

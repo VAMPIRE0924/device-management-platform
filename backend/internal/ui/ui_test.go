@@ -15,7 +15,7 @@ func TestHandlerServesIndexAndSPAFallback(t *testing.T) {
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("%s: status = %d", requestPath, recorder.Code)
 		}
-		if !strings.Contains(recorder.Body.String(), "I5CLOUD") {
+		if !strings.Contains(recorder.Body.String(), "远程管理平台") {
 			t.Fatalf("%s: expected branded index", requestPath)
 		}
 	}

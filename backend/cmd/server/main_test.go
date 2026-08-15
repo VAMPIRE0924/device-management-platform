@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"testing"
 
-	"i5cloud/internal/config"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/config"
 )
 
 func TestHealthcheckSupportsHTTPAndTLSListeners(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"i5cloud/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
 type fakeStore struct {

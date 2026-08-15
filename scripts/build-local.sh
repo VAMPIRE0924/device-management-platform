@@ -4,7 +4,7 @@ set -eu
 project_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 ui_target="$project_dir/backend/internal/ui/dist"
 output_dir="$project_dir/backend/bin"
-build_version="${I5CLOUD_BUILD_VERSION:-local}"
+build_version="${DMP_BUILD_VERSION:-local}"
 
 case "$ui_target" in
   "$project_dir/backend/internal/ui/dist") ;;
@@ -20,5 +20,5 @@ cp -R "$project_dir/frontend/dist-spa/." "$ui_target/"
 mkdir -p "$output_dir"
 cd "$project_dir/backend"
 CGO_ENABLED=0 go test ./...
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$build_version" -o "$output_dir/i5cloud" ./cmd/i5cloud
-echo "built $output_dir/i5cloud"
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$build_version" -o "$output_dir/device-management-platform" ./cmd/server
+echo "built $output_dir/device-management-platform"

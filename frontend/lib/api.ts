@@ -11,11 +11,11 @@ export class APIError extends Error {
 
 type ErrorEnvelope = { error?: { code?: string; message?: string } };
 
-let csrfToken = typeof window === "undefined" ? "" : window.sessionStorage.getItem("i5cloud.csrf") || "";
+let csrfToken = typeof window === "undefined" ? "" : window.sessionStorage.getItem("dmp.csrf") || "";
 
 function csrfCookie(): string {
   if (typeof document === "undefined") return "";
-  const prefix = "i5cloud_csrf=";
+  const prefix = "dmp_csrf=";
   const item = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(prefix));
   return item ? decodeURIComponent(item.slice(prefix.length)) : "";
 }
@@ -321,7 +321,7 @@ export const api = {
   async logout() {
     await request<void>("/api/v1/auth/logout", { method: "POST" });
     csrfToken = "";
-    if (typeof window !== "undefined") window.sessionStorage.removeItem("i5cloud.csrf");
+    if (typeof window !== "undefined") window.sessionStorage.removeItem("dmp.csrf");
   },
   async nodes() { return (await request<{ items: APINode[] }>("/api/v1/nodes")).items; },
   async createNode(input: Record<string, unknown>) { return request<APINode>("/api/v1/nodes", { method: "POST", body: JSON.stringify(input) }); },
@@ -383,5 +383,5 @@ export const api = {
 
 function rememberSession(result: APIAuthSession) {
   csrfToken = result.csrfToken;
-  if (typeof window !== "undefined") window.sessionStorage.setItem("i5cloud.csrf", csrfToken);
+  if (typeof window !== "undefined") window.sessionStorage.setItem("dmp.csrf", csrfToken);
 }

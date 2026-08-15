@@ -20,7 +20,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"golang.org/x/crypto/ssh"
 
-	"i5cloud/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
 type SecretResolver interface {
@@ -405,6 +405,6 @@ func clearSSHAuth(auth *sshAuthMessage) {
 	auth.Password = ""
 }
 
-const terminalPage = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>I5CLOUD WebSSH</title><style>
+const terminalPage = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>设备管理平台 WebSSH</title><style>
 *{box-sizing:border-box}html,body{height:100%;margin:0}body{background:#071317;color:#d8eeeb;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) 24px}.login-shell{padding:28px 20px;background:linear-gradient(135deg,#0b3039,#08242d);border-bottom:1px solid #1c4b53}.login-card{max-width:720px;margin:auto}.login-title{display:flex;align-items:center;gap:12px;margin-bottom:18px}.login-icon{width:42px;height:42px;display:grid;place-items:center;border-radius:11px;background:#0aa49e;color:#fff;font-size:20px}.login-title h1{margin:0;font-size:18px}.login-title p{margin:4px 0 0;color:#8fb1b2;font-size:12px}.credentials{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end}.credentials label{display:flex;flex-direction:column;gap:6px;color:#a9c1c1;font-size:11px;font-weight:650}.credentials input{height:42px;padding:0 12px;border:1px solid #37646a;border-radius:8px;outline:none;background:#092831;color:#f3fffd;font:14px inherit}.credentials input:focus{border-color:#45bdb4;box-shadow:0 0 0 3px #0aa49e22}.credentials button{height:42px;padding:0 22px;border:0;border-radius:8px;background:#0aa49e;color:#fff;font-weight:750;cursor:pointer}.credentials button:disabled{opacity:.55}.status{margin-left:auto;color:#71ddd4}#terminal{min-width:0;min-height:0;height:100%;background:#071317;overflow:hidden}#terminal .xterm{height:100%}#terminal .xterm-viewport{scrollbar-color:#315158 #071317}.terminal-safe-area{background:#071317}.hidden{display:none!important}@media(max-width:680px){main{grid-template-rows:auto minmax(0,1fr) 18px}.credentials{grid-template-columns:1fr}.credentials button{width:100%}.status{display:block;margin:8px 0 0}}
 </style></head><body><main><section class="login-shell" id="authShell"><form class="login-card" id="auth" autocomplete="off" data-auto-connect="false"><div class="login-title"><span class="login-icon">⌨</span><div><h1>连接 SSH</h1><p>请输入目标设备的 SSH 账号</p></div><span class="status" id="status">等待连接</span></div><div class="credentials"><label>SSH 用户名<input id="username" required autocomplete="off" spellcheck="false" placeholder="例如 root"></label><label>SSH 密码<input id="password" required type="password" autocomplete="off" placeholder="输入当次连接密码"></label><button id="connect" type="submit">连接</button></div></form></section><div id="terminal" role="application" aria-label="SSH 终端"></div><div class="terminal-safe-area" aria-hidden="true"></div></main><script type="module" src="/assets/webssh.js"></script></body></html>`

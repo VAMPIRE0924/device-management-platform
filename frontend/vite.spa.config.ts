@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 const rootDir = fileURLToPath(new URL(".", import.meta.url));
-const apiTarget = process.env.I5CLOUD_DEV_API_TARGET ?? "http://127.0.0.1:8088";
+const apiTarget = process.env.DMP_DEV_API_TARGET ?? "http://127.0.0.1:8088";
 
 // The single formal frontend build. Its static output is embedded into the Go
 // server and is also used by local development and contract tests.

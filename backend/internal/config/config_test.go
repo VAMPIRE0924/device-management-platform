@@ -9,8 +9,8 @@ import (
 )
 
 func TestProductionRequiresStrongToken(t *testing.T) {
-	t.Setenv("I5CLOUD_MODE", "pro")
-	t.Setenv("I5CLOUD_API_TOKEN", "short")
+	t.Setenv("DMP_MODE", "pro")
+	t.Setenv("DMP_API_TOKEN", "short")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected production token validation error")
 	}
@@ -22,10 +22,10 @@ func TestReadsTokenFromSecretFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("I5CLOUD_MODE", "pro")
-	t.Setenv("I5CLOUD_API_TOKEN", "")
-	t.Setenv("I5CLOUD_API_TOKEN_FILE", path)
-	t.Setenv("I5CLOUD_SETUP_TOKEN", "setup-token-0123456789abcdef")
+	t.Setenv("DMP_MODE", "pro")
+	t.Setenv("DMP_API_TOKEN", "")
+	t.Setenv("DMP_API_TOKEN_FILE", path)
+	t.Setenv("DMP_SETUP_TOKEN", "setup-token-0123456789abcdef")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -36,73 +36,73 @@ func TestReadsTokenFromSecretFile(t *testing.T) {
 }
 
 func TestProductionRequiresSetupToken(t *testing.T) {
-	t.Setenv("I5CLOUD_MODE", "pro")
-	t.Setenv("I5CLOUD_API_TOKEN", "0123456789abcdef0123456789abcdef")
-	t.Setenv("I5CLOUD_SETUP_TOKEN", "short")
+	t.Setenv("DMP_MODE", "pro")
+	t.Setenv("DMP_API_TOKEN", "0123456789abcdef0123456789abcdef")
+	t.Setenv("DMP_SETUP_TOKEN", "short")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected production setup token validation error")
 	}
 }
 
 func TestRejectsInvalidTrustedProxyCIDR(t *testing.T) {
-	t.Setenv("I5CLOUD_TRUSTED_PROXY_CIDRS", "10.0.0.0/24,not-a-cidr")
+	t.Setenv("DMP_TRUSTED_PROXY_CIDRS", "10.0.0.0/24,not-a-cidr")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected invalid trusted proxy CIDR error")
 	}
 }
 
 func TestProductionRequiresDistinctTokens(t *testing.T) {
-	t.Setenv("I5CLOUD_MODE", "pro")
-	t.Setenv("I5CLOUD_API_TOKEN", "same-token-0123456789abcdef01234567")
-	t.Setenv("I5CLOUD_SETUP_TOKEN", "same-token-0123456789abcdef01234567")
+	t.Setenv("DMP_MODE", "pro")
+	t.Setenv("DMP_API_TOKEN", "same-token-0123456789abcdef01234567")
+	t.Setenv("DMP_SETUP_TOKEN", "same-token-0123456789abcdef01234567")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected distinct production token validation error")
 	}
 }
 
 func TestProductionRejectsInsecureCookieOnPublicListener(t *testing.T) {
-	t.Setenv("I5CLOUD_MODE", "pro")
-	t.Setenv("I5CLOUD_API_TOKEN", "api-token-0123456789abcdef0123456789")
-	t.Setenv("I5CLOUD_SETUP_TOKEN", "setup-token-0123456789abcdef")
-	t.Setenv("I5CLOUD_COOKIE_SECURE", "false")
-	t.Setenv("I5CLOUD_LISTEN_ADDR", "0.0.0.0:8088")
+	t.Setenv("DMP_MODE", "pro")
+	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
+	t.Setenv("DMP_SETUP_TOKEN", "setup-token-0123456789abcdef")
+	t.Setenv("DMP_COOKIE_SECURE", "false")
+	t.Setenv("DMP_LISTEN_ADDR", "0.0.0.0:8088")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected insecure production cookie validation error")
 	}
 }
 
 func TestProductionAllowsInsecureCookieForLoopbackAcceptance(t *testing.T) {
-	t.Setenv("I5CLOUD_MODE", "pro")
-	t.Setenv("I5CLOUD_API_TOKEN", "api-token-0123456789abcdef0123456789")
-	t.Setenv("I5CLOUD_SETUP_TOKEN", "setup-token-0123456789abcdef")
-	t.Setenv("I5CLOUD_COOKIE_SECURE", "false")
-	t.Setenv("I5CLOUD_LISTEN_ADDR", "127.0.0.1:8088")
+	t.Setenv("DMP_MODE", "pro")
+	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
+	t.Setenv("DMP_SETUP_TOKEN", "setup-token-0123456789abcdef")
+	t.Setenv("DMP_COOKIE_SECURE", "false")
+	t.Setenv("DMP_LISTEN_ADDR", "127.0.0.1:8088")
 	if _, err := Load(); err != nil {
 		t.Fatalf("loopback acceptance config rejected: %v", err)
 	}
 }
 
 func TestProductionAccessDomainRequiresHTTPS(t *testing.T) {
-	t.Setenv("I5CLOUD_MODE", "pro")
-	t.Setenv("I5CLOUD_API_TOKEN", "api-token-0123456789abcdef0123456789")
-	t.Setenv("I5CLOUD_SETUP_TOKEN", "setup-token-0123456789abcdef")
-	t.Setenv("I5CLOUD_ACCESS_DOMAIN", "remote.example.com")
-	t.Setenv("I5CLOUD_ACCESS_SCHEME", "http")
+	t.Setenv("DMP_MODE", "pro")
+	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
+	t.Setenv("DMP_SETUP_TOKEN", "setup-token-0123456789abcdef")
+	t.Setenv("DMP_ACCESS_DOMAIN", "remote.example.com")
+	t.Setenv("DMP_ACCESS_SCHEME", "http")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected production access domain HTTPS validation error")
 	}
 }
 
 func TestProductionLocalWildcardDomainAllowsHTTPAcceptance(t *testing.T) {
-	t.Setenv("I5CLOUD_MODE", "pro")
-	t.Setenv("I5CLOUD_API_TOKEN", "api-token-0123456789abcdef0123456789")
-	t.Setenv("I5CLOUD_SETUP_TOKEN", "setup-token-0123456789abcdef")
-	t.Setenv("I5CLOUD_ACCESS_DOMAIN", "admin.i5cloud.localhost")
-	t.Setenv("I5CLOUD_ACCESS_SCHEME", "http")
+	t.Setenv("DMP_MODE", "pro")
+	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
+	t.Setenv("DMP_SETUP_TOKEN", "setup-token-0123456789abcdef")
+	t.Setenv("DMP_ACCESS_DOMAIN", "admin.platform.localhost")
+	t.Setenv("DMP_ACCESS_SCHEME", "http")
 	if _, err := Load(); err != nil {
 		t.Fatalf("local wildcard acceptance config rejected: %v", err)
 	}
-	t.Setenv("I5CLOUD_ACCESS_DOMAIN", "admin.i5cloud.127.0.0.1.nip.io")
+	t.Setenv("DMP_ACCESS_DOMAIN", "admin.platform.127.0.0.1.nip.io")
 	if _, err := Load(); err != nil {
 		t.Fatalf("loopback wildcard DNS acceptance config rejected: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestProductionLocalWildcardDomainAllowsHTTPAcceptance(t *testing.T) {
 
 func TestReadsPanelConfigWithMandatoryEmailVerification(t *testing.T) {
 	dir := t.TempDir()
-	configPath := filepath.Join(dir, "i5cloud.conf")
+	configPath := filepath.Join(dir, "platform.conf")
 	content := `
 run_mode = pro
 listen_addr = 127.0.0.1:18088
@@ -124,13 +124,13 @@ smtp_host = smtp.example.test
 smtp_port = 587
 smtp_username = notifier@example.test
 smtp_password = test-only-secret
-smtp_from = I5CLOUD <notifier@example.test>
+smtp_from = 设备管理平台 <notifier@example.test>
 cookie_secure = false
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("I5CLOUD_CONFIG_FILE", configPath)
+	t.Setenv("DMP_CONFIG_FILE", configPath)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -141,8 +141,8 @@ cookie_secure = false
 }
 
 func TestMFARequiresSMTPBecauseOnboardingBindsEmail(t *testing.T) {
-	t.Setenv("I5CLOUD_CONFIG_FILE", filepath.Join(t.TempDir(), "missing.conf"))
-	t.Setenv("I5CLOUD_MFA_ENABLED", "true")
+	t.Setenv("DMP_CONFIG_FILE", filepath.Join(t.TempDir(), "missing.conf"))
+	t.Setenv("DMP_MFA_ENABLED", "true")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected MFA configuration without SMTP to be rejected")
 	}
@@ -150,8 +150,8 @@ func TestMFARequiresSMTPBecauseOnboardingBindsEmail(t *testing.T) {
 
 func TestWebSettingsOverridePersistsWithoutExposingSMTPPassword(t *testing.T) {
 	dir := t.TempDir()
-	configPath := filepath.Join(dir, "i5cloud.conf")
-	overridePath := filepath.Join(dir, "i5cloud.override.conf")
+	configPath := filepath.Join(dir, "platform.conf")
+	overridePath := filepath.Join(dir, "settings.override.conf")
 	content := `
 run_mode = dev
 listen_addr = 127.0.0.1:18088
@@ -167,7 +167,7 @@ cookie_secure = false
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("I5CLOUD_CONFIG_FILE", configPath)
+	t.Setenv("DMP_CONFIG_FILE", configPath)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +176,7 @@ cookie_secure = false
 	updated, err := manager.Save(PanelSettings{
 		MFAEnabled: true, MFAMethods: []string{"email", "totp"}, EmailCodeTTL: "8m", MFAKeyFile: cfg.MFAKeyFile,
 		SMTPHost: "smtp.example.test", SMTPPort: 587, SMTPUsername: "notifier@example.test", SMTPPassword: "smtp-test-password",
-		SMTPFrom: "I5CLOUD <notifier@example.test>", AccessDomain: "remote.example.test",
+		SMTPFrom: "设备管理平台 <notifier@example.test>", AccessDomain: "remote.example.test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +201,7 @@ cookie_secure = false
 	if NewSettingsManager(reloaded).Current().RestartRequired {
 		t.Fatal("loaded override should not remain pending after restart")
 	}
-	for _, path := range []string{overridePath, filepath.Join(dir, "i5cloud.smtp-password")} {
+	for _, path := range []string{overridePath, filepath.Join(dir, "smtp-password")} {
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
@@ -229,9 +229,9 @@ func TestSMTPPasswordOnlyChangeRequiresRestart(t *testing.T) {
 
 func TestWebSettingsCannotOverrideEnvironmentControlledField(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("I5CLOUD_CONFIG_FILE", filepath.Join(dir, "missing.conf"))
-	t.Setenv("I5CLOUD_DATA_DIR", dir)
-	t.Setenv("I5CLOUD_MFA_ENABLED", "false")
+	t.Setenv("DMP_CONFIG_FILE", filepath.Join(dir, "missing.conf"))
+	t.Setenv("DMP_DATA_DIR", dir)
+	t.Setenv("DMP_MFA_ENABLED", "false")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +240,7 @@ func TestWebSettingsCannotOverrideEnvironmentControlledField(t *testing.T) {
 	settings.MFAEnabled = true
 	settings.MFAMethods = []string{"totp"}
 	settings.SMTPHost = "smtp.example.test"
-	settings.SMTPFrom = "I5CLOUD <notifier@example.test>"
+	settings.SMTPFrom = "设备管理平台 <notifier@example.test>"
 	if _, err := NewSettingsManager(cfg).Save(settings); err == nil || !strings.Contains(err.Error(), "environment variable") {
 		t.Fatalf("expected environment lock error, got %v", err)
 	}
@@ -248,9 +248,9 @@ func TestWebSettingsCannotOverrideEnvironmentControlledField(t *testing.T) {
 
 func TestEnvironmentLockedMethodsUseSetEquality(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("I5CLOUD_CONFIG_FILE", filepath.Join(dir, "missing.conf"))
-	t.Setenv("I5CLOUD_DATA_DIR", dir)
-	t.Setenv("I5CLOUD_MFA_METHODS", "totp,email")
+	t.Setenv("DMP_CONFIG_FILE", filepath.Join(dir, "missing.conf"))
+	t.Setenv("DMP_DATA_DIR", dir)
+	t.Setenv("DMP_MFA_METHODS", "totp,email")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)

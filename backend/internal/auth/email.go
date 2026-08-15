@@ -123,8 +123,8 @@ func (sender *SMTPEmailSender) SendCode(ctx context.Context, recipient, code str
 		return fmt.Errorf("open SMTP message: %w", err)
 	}
 	minutes := int(ttl.Round(time.Minute) / time.Minute)
-	subject := mime.QEncoding.Encode("UTF-8", "I5CLOUD 登录验证码")
-	body := fmt.Sprintf("您的 I5CLOUD 登录验证码是：%s\r\n\r\n验证码 %d 分钟内有效。若非本人操作，请忽略本邮件。\r\n", code, minutes)
+	subject := mime.QEncoding.Encode("UTF-8", "设备管理平台 登录验证码")
+	body := fmt.Sprintf("您的 设备管理平台 登录验证码是：%s\r\n\r\n验证码 %d 分钟内有效。若非本人操作，请忽略本邮件。\r\n", code, minutes)
 	message := "From: " + sender.config.From + "\r\nTo: " + to + "\r\nSubject: " + subject + "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n" + body
 	if _, err := writer.Write([]byte(message)); err != nil {
 		_ = writer.Close()

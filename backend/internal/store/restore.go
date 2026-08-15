@@ -38,7 +38,7 @@ func RestoreDatabase(ctx context.Context, databasePath, backupPath string) (stri
 	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return "", fmt.Errorf("create database directory: %w", err)
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(target), ".i5cloud-restore-*.db")
+	temporary, err := os.CreateTemp(filepath.Dir(target), ".platform-restore-*.db")
 	if err != nil {
 		return "", fmt.Errorf("create restore staging file: %w", err)
 	}

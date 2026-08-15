@@ -61,7 +61,7 @@ func VerifyPassword(encoded, password string) bool {
 
 func VerifyDummy(password string) {
 	dummyPasswordHash.Do(func() {
-		dummyPasswordHash.value, _ = HashPassword("I5CLOUD dummy password value")
+		dummyPasswordHash.value, _ = HashPassword("设备管理平台 dummy password value")
 	})
 	_ = VerifyPassword(dummyPasswordHash.value, password)
 }

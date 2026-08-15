@@ -42,16 +42,16 @@ type Config struct {
 }
 
 func Load() (Config, error) {
-	configPath := strings.TrimSpace(os.Getenv("I5CLOUD_CONFIG_FILE"))
+	configPath := strings.TrimSpace(os.Getenv("DMP_CONFIG_FILE"))
 	if configPath == "" {
-		configPath = "./conf/i5cloud.conf"
+		configPath = "./conf/device-management-platform.conf"
 	}
 	values, err := readConfigFile(configPath)
 	if err != nil {
 		return Config{}, err
 	}
-	dataDirectory := firstConfigured(os.Getenv("I5CLOUD_DATA_DIR"), values["data_dir"], "./data")
-	overridePath := firstConfigured(os.Getenv("I5CLOUD_SETTINGS_OVERRIDE_FILE"), values["settings_override_file"], filepath.Join(dataDirectory, "i5cloud.override.conf"))
+	dataDirectory := firstConfigured(os.Getenv("DMP_DATA_DIR"), values["data_dir"], "./data")
+	overridePath := firstConfigured(os.Getenv("DMP_SETTINGS_OVERRIDE_FILE"), values["settings_override_file"], filepath.Join(dataDirectory, "settings.override.conf"))
 	overrides, err := readConfigFile(overridePath)
 	if err != nil {
 		return Config{}, fmt.Errorf("read settings override: %w", err)
@@ -68,63 +68,63 @@ func Load() (Config, error) {
 		}
 		return fallback
 	}
-	dataDirectory = value("I5CLOUD_DATA_DIR", "data_dir", dataDirectory)
-	databasePath := value("I5CLOUD_DB_PATH", "database_path", filepath.Join(dataDirectory, "i5cloud.db"))
-	apiToken, err := loadConfiguredSecret("I5CLOUD_API_TOKEN", "I5CLOUD_API_TOKEN_FILE", values["api_token"], values["api_token_file"])
+	dataDirectory = value("DMP_DATA_DIR", "data_dir", dataDirectory)
+	databasePath := value("DMP_DB_PATH", "database_path", filepath.Join(dataDirectory, "platform.db"))
+	apiToken, err := loadConfiguredSecret("DMP_API_TOKEN", "DMP_API_TOKEN_FILE", values["api_token"], values["api_token_file"])
 	if err != nil {
 		return Config{}, err
 	}
-	setupToken, err := loadConfiguredSecret("I5CLOUD_SETUP_TOKEN", "I5CLOUD_SETUP_TOKEN_FILE", values["setup_token"], values["setup_token_file"])
+	setupToken, err := loadConfiguredSecret("DMP_SETUP_TOKEN", "DMP_SETUP_TOKEN_FILE", values["setup_token"], values["setup_token_file"])
 	if err != nil {
 		return Config{}, err
 	}
-	smtpPassword, err := loadConfiguredSecret("I5CLOUD_SMTP_PASSWORD", "I5CLOUD_SMTP_PASSWORD_FILE", values["smtp_password"], values["smtp_password_file"])
+	smtpPassword, err := loadConfiguredSecret("DMP_SMTP_PASSWORD", "DMP_SMTP_PASSWORD_FILE", values["smtp_password"], values["smtp_password_file"])
 	if err != nil {
 		return Config{}, err
 	}
-	mfaEnabled, err := parseBool(value("I5CLOUD_MFA_ENABLED", "mfa_enabled", "false"), "mfa_enabled")
+	mfaEnabled, err := parseBool(value("DMP_MFA_ENABLED", "mfa_enabled", "false"), "mfa_enabled")
 	if err != nil {
 		return Config{}, err
 	}
-	cookieSecure, err := parseBool(value("I5CLOUD_COOKIE_SECURE", "cookie_secure", ""), "cookie_secure")
+	cookieSecure, err := parseBool(value("DMP_COOKIE_SECURE", "cookie_secure", ""), "cookie_secure")
 	if err != nil {
 		return Config{}, err
 	}
-	smtpPort, err := parsePort(value("I5CLOUD_SMTP_PORT", "smtp_port", "587"), "smtp_port")
+	smtpPort, err := parsePort(value("DMP_SMTP_PORT", "smtp_port", "587"), "smtp_port")
 	if err != nil {
 		return Config{}, err
 	}
-	emailCodeTTL, err := time.ParseDuration(value("I5CLOUD_MFA_EMAIL_CODE_TTL", "mfa_email_code_ttl", "10m"))
+	emailCodeTTL, err := time.ParseDuration(value("DMP_MFA_EMAIL_CODE_TTL", "mfa_email_code_ttl", "10m"))
 	if err != nil || emailCodeTTL < time.Minute || emailCodeTTL > 30*time.Minute {
 		return Config{}, fmt.Errorf("mfa_email_code_ttl must be between 1m and 30m")
 	}
 	cfg := Config{
 		ConfigFile:        configPath,
 		OverrideFile:      overridePath,
-		Mode:              strings.ToLower(value("I5CLOUD_MODE", "run_mode", "dev")),
-		ListenAddress:     value("I5CLOUD_LISTEN_ADDR", "listen_addr", "127.0.0.1:8088"),
+		Mode:              strings.ToLower(value("DMP_MODE", "run_mode", "dev")),
+		ListenAddress:     value("DMP_LISTEN_ADDR", "listen_addr", "127.0.0.1:8088"),
 		DataDirectory:     dataDirectory,
 		DatabasePath:      databasePath,
 		APIToken:          apiToken,
 		SetupToken:        setupToken,
 		MFAEnabled:        mfaEnabled,
-		MFAMethods:        splitList(value("I5CLOUD_MFA_METHODS", "mfa_methods", "totp")),
-		MFAKeyFile:        value("I5CLOUD_MFA_KEY_FILE", "mfa_key_file", filepath.Join(filepath.Dir(databasePath), "mfa.key")),
+		MFAMethods:        splitList(value("DMP_MFA_METHODS", "mfa_methods", "totp")),
+		MFAKeyFile:        value("DMP_MFA_KEY_FILE", "mfa_key_file", filepath.Join(filepath.Dir(databasePath), "mfa.key")),
 		EmailCodeTTL:      emailCodeTTL,
-		SMTPHost:          value("I5CLOUD_SMTP_HOST", "smtp_host", ""),
+		SMTPHost:          value("DMP_SMTP_HOST", "smtp_host", ""),
 		SMTPPort:          smtpPort,
-		SMTPUsername:      value("I5CLOUD_SMTP_USERNAME", "smtp_username", ""),
+		SMTPUsername:      value("DMP_SMTP_USERNAME", "smtp_username", ""),
 		SMTPPassword:      smtpPassword,
-		SMTPFrom:          value("I5CLOUD_SMTP_FROM", "smtp_from", ""),
+		SMTPFrom:          value("DMP_SMTP_FROM", "smtp_from", ""),
 		SMTPTLSMode:       smtpTLSModeForPort(smtpPort),
-		TLSCertFile:       value("I5CLOUD_TLS_CERT_FILE", "tls_cert_file", ""),
-		TLSKeyFile:        value("I5CLOUD_TLS_KEY_FILE", "tls_key_file", ""),
-		PanelDomain:       strings.ToLower(strings.Trim(value("I5CLOUD_PANEL_DOMAIN", "panel_domain", ""), ".")),
-		AccessDomain:      strings.ToLower(strings.Trim(value("I5CLOUD_ACCESS_DOMAIN", "access_domain", ""), ".")),
-		AccessScheme:      strings.ToLower(value("I5CLOUD_ACCESS_SCHEME", "access_scheme", "https")),
-		TrustedProxyCIDRs: splitList(value("I5CLOUD_TRUSTED_PROXY_CIDRS", "trusted_proxy_cidrs", "")),
+		TLSCertFile:       value("DMP_TLS_CERT_FILE", "tls_cert_file", ""),
+		TLSKeyFile:        value("DMP_TLS_KEY_FILE", "tls_key_file", ""),
+		PanelDomain:       strings.ToLower(strings.Trim(value("DMP_PANEL_DOMAIN", "panel_domain", ""), ".")),
+		AccessDomain:      strings.ToLower(strings.Trim(value("DMP_ACCESS_DOMAIN", "access_domain", ""), ".")),
+		AccessScheme:      strings.ToLower(value("DMP_ACCESS_SCHEME", "access_scheme", "https")),
+		TrustedProxyCIDRs: splitList(value("DMP_TRUSTED_PROXY_CIDRS", "trusted_proxy_cidrs", "")),
 	}
-	if strings.TrimSpace(os.Getenv("I5CLOUD_COOKIE_SECURE")) == "" && strings.TrimSpace(values["cookie_secure"]) == "" {
+	if strings.TrimSpace(os.Getenv("DMP_COOKIE_SECURE")) == "" && strings.TrimSpace(values["cookie_secure"]) == "" {
 		cfg.CookieSecure = cfg.Mode == "pro"
 	} else {
 		cfg.CookieSecure = cookieSecure

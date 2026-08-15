@@ -5497,7 +5497,7 @@ function SettingsView({
             <strong>配置已保存，等待重启生效</strong>
             <p>
               当前进程仍使用启动时配置。Docker 部署可执行{" "}
-              <code>docker compose restart i5cloud</code>
+              <code>docker compose restart platform</code>
               ，重启后此提示会自动消失。
             </p>
           </div>
@@ -5729,7 +5729,7 @@ function SettingsView({
                   onChange={(event) =>
                     patch({ tlsCertFile: event.target.value })
                   }
-                  placeholder="/run/secrets/i5cloud_tls_cert"
+                  placeholder="/run/secrets/platform_tls_cert"
                 />
               </label>
               <label>
@@ -5740,7 +5740,7 @@ function SettingsView({
                   onChange={(event) =>
                     patch({ tlsKeyFile: event.target.value })
                   }
-                  placeholder="/run/secrets/i5cloud_tls_key"
+                  placeholder="/run/secrets/platform_tls_key"
                 />
                 <small>只保存文件路径，不读取或显示私钥</small>
               </label>
@@ -5756,7 +5756,7 @@ function SettingsView({
                         .replace(/^\*\./, ""),
                     })
                   }
-                  placeholder="admin.i5cloud.com"
+                  placeholder="admin.example.com"
                 />
                 <small>仅填写域名，不填协议和路径</small>
               </label>
@@ -5772,7 +5772,7 @@ function SettingsView({
                         accessDomain: event.target.value.replace(/^\*\./, ""),
                       })
                     }
-                    placeholder="admin.i5cloud.com"
+                    placeholder="admin.example.com"
                   />
                 </div>
                 <small>每个 Web 访问会话使用独立子域名</small>

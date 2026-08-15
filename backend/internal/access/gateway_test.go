@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"i5cloud/internal/nodeadapter"
-	"i5cloud/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
 type fakeSessionResolver struct {
@@ -67,8 +67,8 @@ func TestWebGatewayProxiesThroughAuthenticatedSOCKS(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer platform-secret")
 	request.Header.Set("X-CSRF-Token", "platform-csrf")
 	request.Header.Set("X-Forwarded-For", "198.51.100.10")
-	request.Header.Set("X-I5CLOUD-Access-Subdomain", "1")
-	request.Header.Set("Cookie", "i5cloud_session=platform-session; i5cloud_csrf=platform-csrf; device_session=device-value")
+	request.Header.Set("X-DMP-Access-Subdomain", "1")
+	request.Header.Set("Cookie", "dmp_session=platform-session; dmp_csrf=platform-csrf; device_session=device-value")
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
 	if response.Code != http.StatusFound {

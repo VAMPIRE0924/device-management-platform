@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"i5cloud/internal/nodeadapter"
-	"i5cloud/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
 type fakeDiscoveryStore struct {

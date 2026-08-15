@@ -1,38 +1,38 @@
-name: i5cloud
+name: device-management-platform
 
 services:
-  i5cloud:
-    image: ${I5CLOUD_IMAGE:-vampirerune/device-management-platform:latest}
-    container_name: i5cloud
+  platform:
+    image: ${DMP_IMAGE:-vampirerune/device-management-platform:latest}
+    container_name: device-management-platform
     restart: unless-stopped
     ports:
-      - "${I5CLOUD_BIND_ADDRESS:-127.0.0.1}:${I5CLOUD_HOST_PORT:-8088}:8088"
+      - "${DMP_BIND_ADDRESS:-127.0.0.1}:${DMP_HOST_PORT:-8088}:8088"
     volumes:
-      - i5cloud-data:/data
-      - ./conf/i5cloud.conf:/etc/i5cloud/i5cloud.conf:ro
-      - ./secrets/nodes:/run/secrets/i5cloud-nodes:ro
+      - platform-data:/data
+      - ./conf/device-management-platform.conf:/etc/device-management-platform/platform.conf:ro
+      - ./secrets/nodes:/run/secrets/platform-nodes:ro
     secrets:
-      - i5cloud_api_token
-      - i5cloud_setup_token
+      - platform_api_token
+      - platform_setup_token
     environment:
-      I5CLOUD_CONFIG_FILE: /etc/i5cloud/i5cloud.conf
+      DMP_CONFIG_FILE: /etc/device-management-platform/platform.conf
       TZ: ${TZ:-Asia/Shanghai}
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     healthcheck:
-      test: ["CMD", "/usr/local/bin/i5cloud", "healthcheck"]
+      test: ["CMD", "/usr/local/bin/device-management-platform", "healthcheck"]
       interval: 20s
       timeout: 3s
       start_period: 10s
       retries: 3
 
 volumes:
-  i5cloud-data:
+  platform-data:
 
 secrets:
-  i5cloud_api_token:
-    file: ./secrets/i5cloud_api_token
-  i5cloud_setup_token:
-    file: ./secrets/i5cloud_setup_token
+  platform_api_token:
+    file: ./secrets/api_token
+  platform_setup_token:
+    file: ./secrets/setup_token

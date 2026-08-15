@@ -16,9 +16,9 @@ import (
 	"sync"
 	"time"
 
-	"i5cloud/internal/access"
-	"i5cloud/internal/nodeadapter"
-	"i5cloud/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/access"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
 type storage interface {
@@ -325,7 +325,7 @@ type protocolProbeResult struct {
 }
 
 func probeRTSP(conn net.Conn, host string, port int) (protocolProbeResult, bool) {
-	request := fmt.Sprintf("OPTIONS rtsp://%s/ RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: I5CLOUD-Discovery/1\r\n\r\n", net.JoinHostPort(host, strconv.Itoa(port)))
+	request := fmt.Sprintf("OPTIONS rtsp://%s/ RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: 设备管理平台-Discovery/1\r\n\r\n", net.JoinHostPort(host, strconv.Itoa(port)))
 	if _, err := io.WriteString(conn, request); err != nil {
 		return protocolProbeResult{}, false
 	}
@@ -415,7 +415,7 @@ func probeHTTP(raw net.Conn, host string, secure bool, timeout time.Duration) (h
 		conn = tlsConn
 	}
 	_ = conn.SetDeadline(time.Now().Add(timeout))
-	request := "HEAD / HTTP/1.0\r\nHost: " + host + "\r\nUser-Agent: I5CLOUD-Discovery/1\r\nConnection: close\r\n\r\n"
+	request := "HEAD / HTTP/1.0\r\nHost: " + host + "\r\nUser-Agent: 设备管理平台-Discovery/1\r\nConnection: close\r\n\r\n"
 	if _, err := io.WriteString(conn, request); err != nil {
 		return httpProbeResult{}, false
 	}

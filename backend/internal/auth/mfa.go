@@ -95,10 +95,10 @@ func (m *MFA) NewEnrollment(username string) (Enrollment, error) {
 		return Enrollment{}, err
 	}
 	secret := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secretBytes)
-	label := "I5CLOUD:" + username
+	label := "设备管理平台:" + username
 	query := url.Values{}
 	query.Set("secret", secret)
-	query.Set("issuer", "I5CLOUD")
+	query.Set("issuer", "设备管理平台")
 	query.Set("algorithm", "SHA1")
 	query.Set("digits", strconv.Itoa(totpDigits))
 	query.Set("period", strconv.FormatInt(totpPeriod, 10))

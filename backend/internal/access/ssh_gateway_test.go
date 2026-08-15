@@ -17,8 +17,8 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"golang.org/x/crypto/ssh"
 
-	"i5cloud/internal/nodeadapter"
-	"i5cloud/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
 func TestWebSSHGatewayConnectsThroughSOCKS(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"i5cloud/internal/id"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/id"
 )
 
 func (s *Store) AppendAudit(ctx context.Context, input AuditInput) error {

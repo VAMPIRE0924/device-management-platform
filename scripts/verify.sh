@@ -22,18 +22,16 @@ npm run build:spa
 
 echo "[4/5] embedded single-binary build"
 cd "$project_dir"
-I5CLOUD_BUILD_VERSION="${I5CLOUD_BUILD_VERSION:-local}" ./scripts/build-local.sh
-test "$(./backend/bin/i5cloud version)" != "dev"
+DMP_BUILD_VERSION="${DMP_BUILD_VERSION:-local}" ./scripts/build-local.sh
+test "$(./backend/bin/device-management-platform version)" != "dev"
 
 echo "[5/5] artifact checks"
-test -x "$project_dir/backend/bin/i5cloud"
+test -x "$project_dir/backend/bin/device-management-platform"
 test -s "$project_dir/backend/internal/ui/dist/index.html"
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$project_dir/scripts/verify.sh" "$project_dir/scripts/verify-docs.sh" "$project_dir/scripts/build-local.sh" "$project_dir/scripts/acceptance-local.sh" "$project_dir/scripts/acceptance-container.sh"
 fi
 grep -qx 'secrets/\*' "$project_dir/.gitignore"
-grep -qx '!secrets/README.md' "$project_dir/.gitignore"
 grep -qx 'secrets/\*' "$project_dir/.dockerignore"
-grep -qx '!secrets/README.md' "$project_dir/.dockerignore"
 
-echo "I5CLOUD local verification passed"
+echo "Local verification passed"

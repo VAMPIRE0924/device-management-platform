@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"i5cloud/internal/id"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/id"
 )
 
 var DefaultProjectScanPorts = []DiscoveryPort{

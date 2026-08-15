@@ -28,7 +28,7 @@ test("keeps the complete formal navigation and no preview artifacts", async () =
   contains(page, ["概览", "访问门户", "客户项目", "托管通道", "接入节点", "用户与权限", "访问策略", "运行监控", "访问审计", "系统设置"]);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
   assert.doesNotMatch(page, /SkeletonPreview|codex-preview|remote-management-demo/);
-  assert.match(packageJson, /"name": "i5cloud-remote-management-platform"/);
+  assert.match(packageJson, /"name": "device-management-platform-frontend"/);
   assert.doesNotMatch(packageJson, /vinext|wrangler|cloudflare|next/);
 });
 
@@ -36,7 +36,7 @@ test("uses the authenticated versioned backend contract", async () => {
   const [api, config] = await Promise.all([readFile(apiURL, "utf8"), readFile(viteConfigURL, "utf8")]);
   contains(api, ["/api/v1/nodes", "/api/v1/projects", "/devices/batch", "/api/v1/access-policies", "/api/v1/access-sessions", "/api/v1/monitor/snapshot", "/managed-tunnels", "/discovery-jobs"]);
   contains(api, ['credentials: "same-origin"', "X-CSRF-Token", "throw new APIError"]);
-  contains(config, ["I5CLOUD_DEV_API_TARGET", '"/api"', '"/access"', "ws: true", '"/health"']);
+  contains(config, ["DMP_DEV_API_TARGET", '"/api"', '"/access"', "ws: true", '"/health"']);
   assert.doesNotMatch(config, /mock|fakeData|fixture/i);
 });
 

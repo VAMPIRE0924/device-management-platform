@@ -9,7 +9,7 @@ import (
 )
 
 func TestMigrateAndCreateControlPlaneObjects(t *testing.T) {
-	db, err := Open(filepath.Join(t.TempDir(), "i5cloud.db"))
+	db, err := Open(filepath.Join(t.TempDir(), "platform.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

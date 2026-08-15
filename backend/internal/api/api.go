@@ -23,13 +23,13 @@ import (
 	"sync"
 	"time"
 
-	"i5cloud/internal/access"
-	"i5cloud/internal/auth"
-	"i5cloud/internal/config"
-	"i5cloud/internal/id"
-	"i5cloud/internal/nodeadapter"
-	"i5cloud/internal/secrets"
-	"i5cloud/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/access"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/auth"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/config"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/id"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/secrets"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
 type storage interface {
@@ -328,7 +328,7 @@ func (s *server) trustedProxySource(next http.Handler) http.Handler {
 }
 
 func (s *server) live(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "i5cloud"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "device-management-platform"})
 }
 
 func (s *server) ready(w http.ResponseWriter, r *http.Request) {
@@ -347,7 +347,7 @@ func (s *server) meta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "无法读取数据库版本", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"service": "i5cloud", "version": s.version, "mode": s.mode, "schemaVersion": version, "apiVersion": "v1"})
+	writeJSON(w, http.StatusOK, map[string]any{"service": "device-management-platform", "version": s.version, "mode": s.mode, "schemaVersion": version, "apiVersion": "v1"})
 }
 
 func (s *server) securitySettings(w http.ResponseWriter, r *http.Request) {
@@ -2031,8 +2031,8 @@ func addressAllowedByCIDRs(host string, cidrs []string) bool {
 }
 
 const (
-	authCookieName = "i5cloud_session"
-	csrfCookieName = "i5cloud_csrf"
+	authCookieName = "dmp_session"
+	csrfCookieName = "dmp_csrf"
 )
 
 type principal struct {
@@ -2866,7 +2866,7 @@ func (s *server) exportAuditLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="i5cloud-audit.csv"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="audit.csv"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte{0xEF, 0xBB, 0xBF})
 	writer := csv.NewWriter(w)
@@ -2881,7 +2881,7 @@ func (s *server) backupData(w http.ResponseWriter, r *http.Request) {
 	if !requireSystemAdmin(w, r) {
 		return
 	}
-	temporary, err := os.CreateTemp("", "i5cloud-backup-*.db")
+	temporary, err := os.CreateTemp("", "device-management-platform-backup-*.db")
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "backup_failed", "无法创建临时备份文件", nil)
 		return
@@ -2904,7 +2904,7 @@ func (s *server) backupData(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "audit_write_failed", "备份已生成但审计写入失败", nil)
 		return
 	}
-	filename := "i5cloud-backup-" + time.Now().UTC().Format("20060102T150405Z") + ".db"
+	filename := "device-management-platform-backup-" + time.Now().UTC().Format("20060102T150405Z") + ".db"
 	w.Header().Set("Content-Type", "application/vnd.sqlite3")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	w.Header().Set("Cache-Control", "no-store")

@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"i5cloud/internal/secrets"
-	"i5cloud/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/secrets"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
 func TestNodeCredentialVaultEncryptsPersistsAndRotates(t *testing.T) {
@@ -23,7 +23,7 @@ func TestNodeCredentialVaultEncryptsPersistsAndRotates(t *testing.T) {
 	if err := db.Migrate(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	keyPath := filepath.Join(dir, "i5cloud.secrets.key")
+	keyPath := filepath.Join(dir, "credentials.key")
 	vault, err := secrets.LoadOrCreateNodeCredentialVault(db, keyPath)
 	if err != nil {
 		t.Fatal(err)

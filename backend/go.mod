@@ -1,4 +1,4 @@
-module i5cloud
+module github.com/VAMPIRE0924/device-management-platform/backend
 
 go 1.26.6
 

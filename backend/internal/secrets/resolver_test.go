@@ -8,8 +8,8 @@ import (
 
 func TestResolveEnvironmentAndFileSecrets(t *testing.T) {
 	resolver := Resolver{}
-	t.Setenv("I5CLOUD_TEST_SECRET", "environment-value")
-	value, err := resolver.Resolve(t.Context(), "env://I5CLOUD_TEST_SECRET")
+	t.Setenv("DMP_TEST_SECRET", "environment-value")
+	value, err := resolver.Resolve(t.Context(), "env://DMP_TEST_SECRET")
 	if err != nil || value != "environment-value" {
 		t.Fatalf("environment secret = %q, err = %v", value, err)
 	}

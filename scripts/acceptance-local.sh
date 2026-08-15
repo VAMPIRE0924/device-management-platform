@@ -2,9 +2,9 @@
 set -eu
 
 project_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-binary="$project_dir/backend/bin/i5cloud"
-acceptance_dir=$(mktemp -d /tmp/i5cloud-acceptance.XXXXXX)
-acceptance_port="${I5CLOUD_ACCEPTANCE_PORT:-18089}"
+binary="$project_dir/backend/bin/device-management-platform"
+acceptance_dir=$(mktemp -d /tmp/device-management-platform-acceptance.XXXXXX)
+acceptance_port="${DMP_ACCEPTANCE_PORT:-18089}"
 acceptance_url="http://127.0.0.1:$acceptance_port"
 api_token="local-acceptance-api-token-0123456789abcdef"
 setup_token="local-acceptance-setup-token-0123456789"
@@ -22,13 +22,13 @@ test -x "$binary"
 command -v curl >/dev/null
 command -v sqlite3 >/dev/null
 
-I5CLOUD_MODE=pro \
-I5CLOUD_LISTEN_ADDR="127.0.0.1:$acceptance_port" \
-I5CLOUD_DATA_DIR="$acceptance_dir" \
-I5CLOUD_DB_PATH="$acceptance_dir/i5cloud.db" \
-I5CLOUD_API_TOKEN="$api_token" \
-I5CLOUD_SETUP_TOKEN="$setup_token" \
-I5CLOUD_COOKIE_SECURE=false \
+DMP_MODE=pro \
+DMP_LISTEN_ADDR="127.0.0.1:$acceptance_port" \
+DMP_DATA_DIR="$acceptance_dir" \
+DMP_DB_PATH="$acceptance_dir/platform.db" \
+DMP_API_TOKEN="$api_token" \
+DMP_SETUP_TOKEN="$setup_token" \
+DMP_COOKIE_SECURE=false \
 "$binary" serve >"$acceptance_dir/server.log" 2>&1 &
 server_pid=$!
 
@@ -59,4 +59,4 @@ test "$(sqlite3 "$acceptance_dir/backup.db" 'select version from schema_migratio
 
 stop_server
 server_pid=""
-printf 'I5CLOUD local black-box acceptance passed\nartifacts: %s\n' "$acceptance_dir"
+printf 'Local black-box acceptance passed\nartifacts: %s\n' "$acceptance_dir"

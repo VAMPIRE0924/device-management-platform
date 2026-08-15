@@ -14,8 +14,7 @@ backend/data
 **/*.log
 **/*.pid
 docs
-conf/i5cloud.conf
+conf/device-management-platform.conf
 .env
 .env.*
 secrets/*
-!secrets/README.md

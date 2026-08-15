@@ -1,12 +1,12 @@
-# 正式部署模板。复制为 i5cloud.conf 后填写域名；不要写入密码或私钥。
-app_name = I5CLOUD
+# 正式部署模板。复制为 device-management-platform.conf 后填写域名；不要写入密码或私钥。
+app_name = 设备管理平台
 run_mode = pro
 listen_addr = 0.0.0.0:8088
 data_dir = /data
-database_path = /data/i5cloud.db
-settings_override_file = /data/i5cloud.override.conf
-api_token_file = /run/secrets/i5cloud_api_token
-setup_token_file = /run/secrets/i5cloud_setup_token
+database_path = /data/platform.db
+settings_override_file = /data/settings.override.conf
+api_token_file = /run/secrets/platform_api_token
+setup_token_file = /run/secrets/platform_setup_token
 
 # 完成 SMTP 配置和恢复演练后再开启。
 mfa_enabled = false
@@ -17,12 +17,12 @@ mfa_email_code_ttl = 10m
 # smtp_host = smtp.example.com
 # smtp_port = 587
 # smtp_username = notifier@example.com
-# smtp_password_file = /run/secrets/i5cloud_smtp_password
-# smtp_from = I5CLOUD <notifier@example.com>
+# smtp_password_file = /run/secrets/platform_smtp_password
+# smtp_from = 设备管理平台 <notifier@example.com>
 
 # 推荐由外部反向代理终止 TLS；若平台直接终止 TLS，再配置以下路径。
-# tls_cert_file = /run/secrets/i5cloud_tls_cert
-# tls_key_file = /run/secrets/i5cloud_tls_key
+# tls_cert_file = /run/secrets/platform_tls_cert
+# tls_key_file = /run/secrets/platform_tls_key
 
 # 仅填写域名，不含协议、路径或 *. 前缀。
 panel_domain = admin.example.com

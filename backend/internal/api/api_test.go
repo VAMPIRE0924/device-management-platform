@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"i5cloud/internal/auth"
-	"i5cloud/internal/config"
-	"i5cloud/internal/nodeadapter"
-	"i5cloud/internal/secrets"
-	"i5cloud/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/auth"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/config"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/secrets"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
 type fakeNodeControl struct {
@@ -233,7 +233,7 @@ func TestSystemAdminCanPersistSecuritySettingsWithoutSecretDisclosure(t *testing
 		t.Fatal(err)
 	}
 	cfg := config.Config{
-		ConfigFile: filepath.Join(dir, "i5cloud.conf"), OverrideFile: filepath.Join(dir, "i5cloud.override.conf"), Mode: "dev",
+		ConfigFile: filepath.Join(dir, "platform.conf"), OverrideFile: filepath.Join(dir, "settings.override.conf"), Mode: "dev",
 		ListenAddress: "127.0.0.1:18088", DataDirectory: dir, DatabasePath: filepath.Join(dir, "api.db"),
 		MFAEnabled: false, MFAMethods: []string{"totp"}, MFAKeyFile: filepath.Join(dir, "mfa.key"), EmailCodeTTL: 10 * time.Minute,
 		SMTPPort: 587, SMTPTLSMode: "starttls", AccessScheme: "https", CookieSecure: false,
@@ -242,7 +242,7 @@ func TestSystemAdminCanPersistSecuritySettingsWithoutSecretDisclosure(t *testing
 	response := request(t, handler, http.MethodPut, "/api/v1/settings/security", map[string]any{
 		"mfaEnabled": true, "mfaMethods": []string{"totp", "email"}, "emailCodeTTL": "10m", "mfaKeyFile": cfg.MFAKeyFile,
 		"smtpHost": "smtp.example.test", "smtpPort": 587, "smtpUsername": "notifier@example.test", "smtpPassword": "smtp-api-test-secret",
-		"smtpFrom": "I5CLOUD <notifier@example.test>", "tlsCertFile": "", "tlsKeyFile": "", "accessDomain": "remote.example.test",
+		"smtpFrom": "设备管理平台 <notifier@example.test>", "tlsCertFile": "", "tlsKeyFile": "", "accessDomain": "remote.example.test",
 	}, true)
 	if response.Code != http.StatusOK {
 		t.Fatalf("save settings = %d: %s", response.Code, response.Body.String())
@@ -353,14 +353,14 @@ func TestDevelopmentAccessDomainLaunchPreservesLocalPort(t *testing.T) {
 		t.Fatalf("production launch URL = %q, want %q", productionURL, productionWant)
 	}
 
-	localProductionURL := webAccessLaunchURL(request, "http", "admin.i5cloud.localhost", "pro", strings.Repeat("c", 48))
-	localProductionWant := "http://" + strings.Repeat("c", 48) + ".admin.i5cloud.localhost:3000/"
+	localProductionURL := webAccessLaunchURL(request, "http", "admin.platform.localhost", "pro", strings.Repeat("c", 48))
+	localProductionWant := "http://" + strings.Repeat("c", 48) + ".admin.platform.localhost:3000/"
 	if localProductionURL != localProductionWant {
 		t.Fatalf("local production launch URL = %q, want %q", localProductionURL, localProductionWant)
 	}
 
-	localDNSURL := webAccessLaunchURL(request, "http", "admin.i5cloud.127.0.0.1.nip.io", "pro", strings.Repeat("d", 48))
-	localDNSWant := "http://" + strings.Repeat("d", 48) + ".admin.i5cloud.127.0.0.1.nip.io:3000/"
+	localDNSURL := webAccessLaunchURL(request, "http", "admin.platform.127.0.0.1.nip.io", "pro", strings.Repeat("d", 48))
+	localDNSWant := "http://" + strings.Repeat("d", 48) + ".admin.platform.127.0.0.1.nip.io:3000/"
 	if localDNSURL != localDNSWant {
 		t.Fatalf("local wildcard DNS launch URL = %q, want %q", localDNSURL, localDNSWant)
 	}

@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"i5cloud/internal/nodeadapter"
-	"i5cloud/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
 type sessionResolver interface {
@@ -149,8 +149,8 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token string,
 	proxy.ServeHTTP(w, r)
 }
 
-const httpsUpgradePath = ".i5cloud-upstream/https"
-const upstreamSchemeCookie = "i5cloud_upstream_scheme"
+const httpsUpgradePath = ".dmp-upstream/https"
+const upstreamSchemeCookie = "dmp_upstream_scheme"
 
 // gatewayUpstream keeps same-device HTTP -> HTTPS upgrades inside the access
 // session. The marker is intentionally limited to HTTPS on port 443, so it
@@ -259,7 +259,7 @@ func stripControlPlaneHeaders(header http.Header) {
 	header.Del("Cookie")
 	deviceCookies := make([]string, 0)
 	for _, cookie := range cookieRequest.Cookies() {
-		if cookie.Name == "i5cloud_session" || cookie.Name == "i5cloud_csrf" || cookie.Name == upstreamSchemeCookie {
+		if cookie.Name == "dmp_session" || cookie.Name == "dmp_csrf" || cookie.Name == upstreamSchemeCookie {
 			continue
 		}
 		deviceCookies = append(deviceCookies, cookie.String())
@@ -269,7 +269,7 @@ func stripControlPlaneHeaders(header http.Header) {
 	}
 	for _, name := range []string{
 		"Authorization", "Proxy-Authorization", "X-CSRF-Token", "X-Real-IP",
-		"X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded", "X-I5CLOUD-Access-Subdomain",
+		"X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded", "X-DMP-Access-Subdomain",
 	} {
 		header.Del(name)
 	}

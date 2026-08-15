@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"i5cloud/internal/id"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/id"
 )
 
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {

@@ -164,7 +164,7 @@ func TestSMTPEmailSenderUsesEncryptedConnections(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			server, roots := newSMTPTestServer(t, mode)
 			host, port := server.address(t)
-			sender, err := NewSMTPEmailSender(SMTPConfig{Host: host, Port: port, From: "I5CLOUD <sender@example.test>", TLSMode: mode, ServerName: "localhost", RootCAs: roots})
+			sender, err := NewSMTPEmailSender(SMTPConfig{Host: host, Port: port, From: "设备管理平台 <sender@example.test>", TLSMode: mode, ServerName: "localhost", RootCAs: roots})
 			if err != nil {
 				t.Fatal(err)
 			}

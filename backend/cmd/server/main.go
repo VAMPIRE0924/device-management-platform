@@ -14,23 +14,23 @@ import (
 	"syscall"
 	"time"
 
-	"i5cloud/internal/access"
-	"i5cloud/internal/api"
-	"i5cloud/internal/auth"
-	"i5cloud/internal/config"
-	"i5cloud/internal/discovery"
-	"i5cloud/internal/lifecycle"
-	"i5cloud/internal/nodeadapter"
-	"i5cloud/internal/secrets"
-	"i5cloud/internal/store"
-	"i5cloud/internal/ui"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/access"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/api"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/auth"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/config"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/discovery"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/lifecycle"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/secrets"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/ui"
 )
 
 var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("i5cloud stopped", "error", err)
+		slog.Error("device management platform stopped", "error", err)
 		os.Exit(1)
 	}
 }
@@ -57,7 +57,7 @@ func run() error {
 	}
 	if command == "restore" {
 		if len(os.Args) != 3 {
-			return fmt.Errorf("usage: i5cloud restore /path/to/i5cloud-backup.db")
+			return fmt.Errorf("usage: device-management-platform restore /path/to/device-management-platform-backup.db")
 		}
 		rollbackPath, err := store.RestoreDatabase(context.Background(), cfg.DatabasePath, os.Args[2])
 		if err != nil {
@@ -87,7 +87,7 @@ func run() error {
 	}
 	if command == "mfa-reset" {
 		if len(os.Args) != 3 {
-			return fmt.Errorf("usage: i5cloud mfa-reset username")
+			return fmt.Errorf("usage: device-management-platform mfa-reset username")
 		}
 		audit := store.AuditInput{Actor: "break-glass-cli", Action: "user.mfa_reset", ResourceType: "user", Result: "success", RequestID: "offline-cli", SourceIP: "local-console"}
 		if err := db.ResetUserMFAByUsername(context.Background(), os.Args[2], audit); err != nil {
@@ -96,7 +96,7 @@ func run() error {
 		slog.Info("MFA reset complete; the user must enroll again after password verification", "username", os.Args[2])
 		return nil
 	}
-	nodeCredentialVault, err := secrets.LoadOrCreateNodeCredentialVault(db, filepath.Join(cfg.DataDirectory, "i5cloud.secrets.key"))
+	nodeCredentialVault, err := secrets.LoadOrCreateNodeCredentialVault(db, filepath.Join(cfg.DataDirectory, "credentials.key"))
 	if err != nil {
 		return fmt.Errorf("initialize node credential vault: %w", err)
 	}
@@ -162,7 +162,7 @@ func run() error {
 		}
 	}()
 
-	slog.Info("i5cloud api listening", "address", cfg.ListenAddress, "mode", cfg.Mode, "version", version)
+	slog.Info("device management platform API listening", "address", cfg.ListenAddress, "mode", cfg.Mode, "version", version)
 	if cfg.TLSCertFile != "" {
 		err = server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
 	} else {
