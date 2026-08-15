@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -58,7 +59,8 @@ type storage interface {
 	CreateAccessSession(context.Context, store.CreateAccessSessionInput, store.AuditInput) (store.AccessSession, error)
 	ListActiveAccessSessions(context.Context) ([]store.AccessSession, error)
 	RevokeAccessSession(context.Context, string, store.AuditInput) error
-	ResolveAccessToken(context.Context, string) (store.AccessSession, store.EndpointRoute, error)
+	ExchangeAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error)
+	ResolveAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error)
 	ListPortForwards(context.Context, string) ([]store.PortForward, error)
 	ReservePortForward(context.Context, store.ReservePortForwardInput, store.AuditInput) (store.PortForward, error)
 	ActivatePortForward(context.Context, string, int) error
@@ -119,29 +121,32 @@ type nodeControl interface {
 }
 
 type Dependencies struct {
-	Store             storage
-	Nodes             nodeControl
-	Discovery         discoveryControl
-	SSHGateway        http.Handler
-	UI                http.Handler
-	APIToken          string
-	AccessDomain      string
-	AccessScheme      string
-	HTTPPort          int
-	HTTPSPort         int
-	AccessHTTPPort    int
-	AccessHTTPSPort   int
-	TrustedProxyCIDRs []string
-	Mode              string
-	Version           string
-	MFA               *auth.MFA
-	MFAEnabled        bool
-	MFAMethods        []string
-	EmailSender       auth.EmailSender
-	EmailCodeTTL      time.Duration
-	TLSConfigured     bool
-	Settings          securitySettingsManager
-	NodeCredentials   nodeCredentialManager
+	Store              storage
+	Nodes              nodeControl
+	Discovery          discoveryControl
+	SSHGateway         http.Handler
+	UI                 http.Handler
+	APIToken           string
+	AccessDomain       string
+	AccessScheme       string
+	HTTPPort           int
+	HTTPSPort          int
+	AccessHTTPPort     int
+	AccessHTTPSPort    int
+	TrustedProxyCIDRs  []string
+	Mode               string
+	Version            string
+	MFA                *auth.MFA
+	MFAEnabled         bool
+	MFAMethods         []string
+	EmailSender        auth.EmailSender
+	EmailCodeTTL       time.Duration
+	AuthSessionTTL     time.Duration
+	AuthSessionIdleTTL time.Duration
+	TLSConfigured      bool
+	Settings           securitySettingsManager
+	NodeCredentials    nodeCredentialManager
+	Restart            func()
 }
 
 type nodeCredentialManager interface {
@@ -155,32 +160,39 @@ type securitySettingsManager interface {
 	Save(config.PanelSettings) (config.PanelSettings, error)
 }
 
+type authSessionToucher interface {
+	TouchAuthSession(context.Context, string, time.Time) error
+}
+
 type server struct {
-	store             storage
-	nodes             nodeControl
-	discovery         discoveryControl
-	sshGateway        http.Handler
-	sessionRevoker    accessSessionRevoker
-	ui                http.Handler
-	apiToken          string
-	accessDomain      string
-	accessScheme      string
-	httpPort          int
-	httpsPort         int
-	accessHTTPPort    int
-	accessHTTPSPort   int
-	mode              string
-	version           string
-	trustedProxyCIDRs []netip.Prefix
-	loginLimiter      *auth.LoginLimiter
-	mfa               *auth.MFA
-	mfaEnabled        bool
-	mfaMethods        []string
-	emailSender       auth.EmailSender
-	emailCodeTTL      time.Duration
-	tlsConfigured     bool
-	settings          securitySettingsManager
-	nodeCredentials   nodeCredentialManager
+	store              storage
+	nodes              nodeControl
+	discovery          discoveryControl
+	sshGateway         http.Handler
+	sessionRevoker     accessSessionRevoker
+	ui                 http.Handler
+	apiToken           string
+	accessDomain       string
+	accessScheme       string
+	httpPort           int
+	httpsPort          int
+	accessHTTPPort     int
+	accessHTTPSPort    int
+	mode               string
+	version            string
+	trustedProxyCIDRs  []netip.Prefix
+	loginLimiter       *auth.LoginLimiter
+	mfa                *auth.MFA
+	mfaEnabled         bool
+	mfaMethods         []string
+	emailSender        auth.EmailSender
+	emailCodeTTL       time.Duration
+	authSessionTTL     time.Duration
+	authSessionIdleTTL time.Duration
+	tlsConfigured      bool
+	settings           securitySettingsManager
+	nodeCredentials    nodeCredentialManager
+	restart            func()
 }
 
 type accessSessionRevoker interface {
@@ -205,9 +217,15 @@ type apiError struct {
 }
 
 func New(deps Dependencies) http.Handler {
-	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, accessDomain: strings.ToLower(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials}
+	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, accessDomain: strings.ToLower(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, authSessionTTL: deps.AuthSessionTTL, authSessionIdleTTL: deps.AuthSessionIdleTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials, restart: deps.Restart}
 	if s.emailCodeTTL == 0 {
 		s.emailCodeTTL = 10 * time.Minute
+	}
+	if s.authSessionTTL == 0 {
+		s.authSessionTTL = 12 * time.Hour
+	}
+	if s.authSessionIdleTTL == 0 {
+		s.authSessionIdleTTL = 15 * time.Minute
 	}
 	if revoker, ok := deps.SSHGateway.(accessSessionRevoker); ok {
 		s.sessionRevoker = revoker
@@ -248,6 +266,7 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("GET /api/v1/meta", s.requireAuth(http.HandlerFunc(s.meta)))
 	mux.Handle("GET /api/v1/settings/security", s.requireAuth(http.HandlerFunc(s.securitySettings)))
 	mux.Handle("PUT /api/v1/settings/security", s.requireAuth(http.HandlerFunc(s.updateSecuritySettings)))
+	mux.Handle("POST /api/v1/system/restart", s.requireAuth(http.HandlerFunc(s.restartPanel)))
 	mux.Handle("GET /api/v1/nodes", s.requireAuth(http.HandlerFunc(s.listNodes)))
 	mux.Handle("POST /api/v1/nodes", s.requireAuth(http.HandlerFunc(s.createNode)))
 	mux.Handle("PATCH /api/v1/nodes/{nodeID}", s.requireAuth(http.HandlerFunc(s.updateNode)))
@@ -284,7 +303,7 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("POST /api/v1/discovery-jobs/{jobID}/cancel", s.requireAuth(http.HandlerFunc(s.cancelDiscoveryJob)))
 	mux.Handle("POST /api/v1/discovery-jobs/{jobID}/import", s.requireAuth(http.HandlerFunc(s.importDiscoveryDevice)))
 	if s.nodes != nil {
-		mux.Handle("/access/web/{token}/{path...}", access.NewWebGateway(s.store, s.nodes))
+		mux.Handle("/access/web/{token}/{path...}", access.NewWebGateway(s.store, s.nodes, s.authSessionIdleTTL))
 	}
 	if s.sshGateway != nil {
 		mux.Handle("GET /access/ssh/{token}", s.sshGateway)
@@ -299,13 +318,17 @@ func New(deps Dependencies) http.Handler {
 func (s *server) trustedProxySource(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if len(s.trustedProxyCIDRs) == 0 {
-			next.ServeHTTP(w, r)
+			clone := r.Clone(r.Context())
+			dropUntrustedForwardingHeaders(clone.Header)
+			next.ServeHTTP(w, clone)
 			return
 		}
 		direct := requestSourceIP(r)
 		directAddress, err := netip.ParseAddr(direct)
 		if err != nil {
-			next.ServeHTTP(w, r)
+			clone := r.Clone(r.Context())
+			dropUntrustedForwardingHeaders(clone.Header)
+			next.ServeHTTP(w, clone)
 			return
 		}
 		trusted := false
@@ -316,19 +339,32 @@ func (s *server) trustedProxySource(next http.Handler) http.Handler {
 			}
 		}
 		if !trusted {
-			next.ServeHTTP(w, r)
+			clone := r.Clone(r.Context())
+			dropUntrustedForwardingHeaders(clone.Header)
+			next.ServeHTTP(w, clone)
 			return
 		}
 		forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
 		clientAddress, err := netip.ParseAddr(forwarded)
 		if err != nil {
-			next.ServeHTTP(w, r)
+			clone := r.Clone(r.Context())
+			dropUntrustedForwardingHeaders(clone.Header)
+			next.ServeHTTP(w, clone)
 			return
 		}
 		clone := r.Clone(r.Context())
 		clone.RemoteAddr = clientAddress.Unmap().String()
 		next.ServeHTTP(w, clone)
 	})
+}
+
+func dropUntrustedForwardingHeaders(header http.Header) {
+	header.Del("Forwarded")
+	header.Del("X-Forwarded-For")
+	header.Del("X-Forwarded-Host")
+	header.Del("X-Forwarded-Port")
+	header.Del("X-Forwarded-Proto")
+	header.Del("X-Real-IP")
 }
 
 func (s *server) live(w http.ResponseWriter, _ *http.Request) {
@@ -400,6 +436,27 @@ func (s *server) updateSecuritySettings(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, updated)
 }
 
+func (s *server) restartPanel(w http.ResponseWriter, r *http.Request) {
+	if !requireSystemAdmin(w, r) {
+		return
+	}
+	if s.restart == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "restart_unavailable", "当前运行方式不支持面板内重载", nil)
+		return
+	}
+	audit := auditFromRequest(r, "system.restart", "system")
+	audit.ResourceID = "panel"
+	if err := s.store.AppendAudit(r.Context(), audit); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "audit_write_failed", "无法写入重载审计记录", nil)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "restarting"})
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		s.restart()
+	}()
+}
+
 func (s *server) listNodes(w http.ResponseWriter, r *http.Request) {
 	nodes, err := s.store.ListNodes(r.Context())
 	if err != nil {
@@ -415,7 +472,7 @@ func (s *server) listNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		allowedNodes := map[string]struct{}{}
 		for _, project := range projects {
-			allowed := canAccessProject(current, project.ID, "read")
+			allowed := canAccessProject(current, project.ID)
 			if current.Role == "temporary" {
 				web, _ := s.store.HasPolicyCapability(r.Context(), current.UserID, project.ID, "web", time.Now().UTC())
 				webSSH, _ := s.store.HasPolicyCapability(r.Context(), current.UserID, project.ID, "webssh", time.Now().UTC())
@@ -1074,7 +1131,6 @@ func (s *server) createDevice(w http.ResponseWriter, r *http.Request) {
 	if input.Source == "" {
 		input.Source = "manual"
 	}
-	normalizeEndpointTLS(input.Endpoints)
 	fields := validateDevice(input)
 	_, err := s.store.ProjectNetworks(r.Context(), projectID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -1133,7 +1189,6 @@ func (s *server) createDeviceBatch(w http.ResponseWriter, r *http.Request) {
 		if item.Source == "" {
 			item.Source = "import"
 		}
-		normalizeEndpointTLS(item.Endpoints)
 		for key, message := range validateDevice(*item) {
 			fields[fmt.Sprintf("items[%d].%s", index, key)] = message
 		}
@@ -1168,7 +1223,6 @@ func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 		fields["host"] = "设备地址必须是合法 IP"
 	}
 	if input.Endpoints != nil {
-		normalizeEndpointTLS(*input.Endpoints)
 		endpointFields := validateDevice(store.CreateDeviceInput{Host: "127.0.0.1", Name: input.Name, Source: "manual", Endpoints: *input.Endpoints})
 		delete(endpointFields, "host")
 		delete(endpointFields, "name")
@@ -1386,7 +1440,11 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := principalFromRequest(r)
-	allowed := canAccessProject(current, route.ProjectID, input.Mode)
+	if current.Bootstrap || current.UserID == "" || current.AuthSessionID == "" {
+		writeError(w, r, http.StatusForbidden, "browser_session_required", "远程访问必须由已登录的平台用户发起", nil)
+		return
+	}
+	allowed := canAccessProject(current, route.ProjectID)
 	if !allowed && current.Role == "temporary" {
 		capability := "web"
 		if input.Mode == "ssh" {
@@ -1410,13 +1468,25 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadGateway, "managed_tunnel_unavailable", "远程访问前无法启动托管通道", nil)
 		return
 	}
-	token, tokenHash, err := newAccessToken()
+	// Keep the routing hostname stable while the same authenticated platform
+	// session opens the same endpoint. Authorization is still provided by a
+	// fresh one-time grant and the host-scoped access cookie; the hostname alone
+	// never authorizes access. A new platform login produces a different host.
+	token, tokenHash := stableAccessToken(s.apiToken, current.AuthSessionID, route.EndpointID, input.Mode)
+	grant, grantHash, err := newAccessToken()
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "token_generation_failed", "无法创建安全访问令牌", nil)
+		writeError(w, r, http.StatusInternalServerError, "grant_generation_failed", "无法创建一次性访问授权", nil)
 		return
 	}
-	expiresAt := time.Now().UTC().Add(5 * time.Minute)
-	session, err := s.store.CreateAccessSession(r.Context(), store.CreateAccessSessionInput{ProjectID: route.ProjectID, EndpointID: route.EndpointID, TokenHash: tokenHash, Mode: input.Mode, SourceIP: requestSourceIP(r), ExpiresAt: expiresAt}, auditFromRequest(r, "access_session.create", "access_session"))
+	// The remote access session must never outlive the authenticated platform
+	// login that created it. Idle expiry remains enforced on every proxied HTTP
+	// request and WebSSH connection by the access-session resolver.
+	expiresAt := current.AuthExpiresAt
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().UTC().Add(s.authSessionTTL)
+	}
+	userID := current.UserID
+	session, err := s.store.CreateAccessSession(r.Context(), store.CreateAccessSessionInput{UserID: &userID, AuthSessionID: current.AuthSessionID, ProjectID: route.ProjectID, EndpointID: route.EndpointID, TokenHash: tokenHash, GrantHash: grantHash, Mode: input.Mode, SourceIP: requestSourceIP(r), ExpiresAt: expiresAt}, auditFromRequest(r, "access_session.create", "access_session"))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "session_create_failed", "访问会话创建失败", nil)
 		return
@@ -1438,6 +1508,7 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 	if input.Mode == "ssh" {
 		launchURL = "/access/ssh/" + token
 	}
+	launchURL += "?grant=" + url.QueryEscape(grant)
 	writeJSON(w, http.StatusCreated, map[string]any{"sessionId": session.ID, "launchUrl": launchURL, "expiresAt": session.ExpiresAt})
 }
 
@@ -1773,7 +1844,6 @@ func (s *server) importDiscoveryDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Source = "discovery"
-	normalizeEndpointTLS(input.Endpoints)
 	fields := validateDevice(input)
 	if _, exists := fields["host"]; !exists && !addressAllowedByCIDRs(input.Host, job.Networks) {
 		fields["host"] = "设备地址不属于本次发现任务的扫描网段"
@@ -1871,6 +1941,24 @@ func newAccessToken() (string, string, error) {
 	token := hex.EncodeToString(raw)
 	digest := sha256.Sum256([]byte(token))
 	return token, hex.EncodeToString(digest[:]), nil
+}
+
+func stableAccessToken(secret, authSessionID, endpointID, mode string) (string, string) {
+	key := []byte(secret)
+	if len(key) == 0 {
+		// Development mode can run without a bootstrap API token. The random auth
+		// session identifier remains an appropriate per-login derivation key.
+		key = []byte(authSessionID)
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte("web-access-host\x00"))
+	_, _ = mac.Write([]byte(authSessionID))
+	_, _ = mac.Write([]byte{'\x00'})
+	_, _ = mac.Write([]byte(endpointID))
+	_, _ = mac.Write([]byte{'\x00'})
+	_, _ = mac.Write([]byte(mode))
+	token := hex.EncodeToString(mac.Sum(nil)[:24])
+	return token, digestString(token)
 }
 
 func newOpaqueSecret(bytesCount int) (string, error) {
@@ -2013,7 +2101,7 @@ func validateDevice(input store.CreateDeviceInput) map[string]string {
 		if endpoint.TargetPort < 1 || endpoint.TargetPort > 65535 {
 			fields[prefix+".targetPort"] = "目标端口必须位于 1-65535"
 		}
-		if endpoint.Protocol != "https" && (strings.TrimSpace(endpoint.TLSServerName) != "" || endpoint.AllowInsecureTLS) {
+		if endpoint.Protocol != "https" && strings.TrimSpace(endpoint.TLSServerName) != "" {
 			fields[prefix+".tls"] = "仅 HTTPS 服务可配置 TLS 校验选项"
 		}
 		if endpoint.Protocol != "ssh" && (strings.TrimSpace(endpoint.CredentialRef) != "" || strings.TrimSpace(endpoint.SSHHostKeyFingerprint) != "") {
@@ -2029,12 +2117,6 @@ func validateDevice(input store.CreateDeviceInput) map[string]string {
 		seen[key] = struct{}{}
 	}
 	return fields
-}
-
-func normalizeEndpointTLS(endpoints []store.CreateEndpointInput) {
-	for index := range endpoints {
-		endpoints[index].AllowInsecureTLS = endpoints[index].Protocol == "https"
-	}
 }
 
 func supportedEndpointProtocol(protocol string) bool {
@@ -2066,12 +2148,14 @@ const (
 )
 
 type principal struct {
-	UserID      string
-	Username    string
-	DisplayName string
-	Role        string
-	ProjectIDs  []string
-	Bootstrap   bool
+	UserID        string
+	AuthSessionID string
+	AuthExpiresAt time.Time
+	Username      string
+	DisplayName   string
+	Role          string
+	ProjectIDs    []string
+	Bootstrap     bool
 }
 
 type loginRequest struct {
@@ -2219,7 +2303,7 @@ func (s *server) createPasswordSession(w http.ResponseWriter, r *http.Request, c
 	if err != nil {
 		return err
 	}
-	expiresAt := time.Now().UTC().Add(12 * time.Hour)
+	expiresAt := time.Now().UTC().Add(s.authSessionTTL)
 	sessionRecord, err := s.store.CreateAuthSession(r.Context(), credential.ID, digestString(token), digestString(csrfToken), expiresAt)
 	if err != nil {
 		return err
@@ -2513,7 +2597,7 @@ func (s *server) completeMFA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "session_generation_failed", "无法创建登录会话", nil)
 		return
 	}
-	expiresAt := time.Now().UTC().Add(12 * time.Hour)
+	expiresAt := time.Now().UTC().Add(s.authSessionTTL)
 	completion := store.CompleteMFAInput{ChallengeID: challenge.ID, Method: method, Counter: counter, CodeHash: codeHash, TokenHash: digestString(token), CSRFHash: digestString(csrfToken), ExpiresAt: expiresAt, Audit: store.AuditInput{Actor: challenge.User.Username, Action: "auth.login", ResourceType: "auth_session", Result: "success", RequestID: requestID(r), SourceIP: requestSourceIP(r)}}
 	recoveryCodes := []string(nil)
 	if challenge.Purpose == "onboard" {
@@ -2580,10 +2664,14 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(authCookieName); err == nil {
 		_ = s.store.RevokeAuthSession(r.Context(), digestString(cookie.Value))
 	}
+	s.clearAuthCookies(w, r)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) clearAuthCookies(w http.ResponseWriter, r *http.Request) {
 	secure := requestUsesHTTPS(r)
 	http.SetCookie(w, &http.Cookie{Name: authCookieName, Value: "", Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: -1, Expires: time.Unix(1, 0)})
 	http.SetCookie(w, &http.Cookie{Name: csrfCookieName, Value: "", Path: "/", HttpOnly: false, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: -1, Expires: time.Unix(1, 0)})
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
@@ -2956,7 +3044,7 @@ func requireSystemAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-func canAccessProject(current principal, projectID, capability string) bool {
+func canAccessProject(current principal, projectID string) bool {
 	if current.Bootstrap || current.Role == "system_admin" {
 		return true
 	}
@@ -3004,6 +3092,13 @@ func (s *server) requireAuth(next http.Handler) http.Handler {
 			writeError(w, r, http.StatusUnauthorized, "session_expired", "登录会话已失效，请重新登录", nil)
 			return
 		}
+		now := time.Now().UTC()
+		if !sessionRecord.LastSeenAt.IsZero() && now.Sub(sessionRecord.LastSeenAt) > s.authSessionIdleTTL {
+			_ = s.store.RevokeAuthSession(r.Context(), digestString(cookie.Value))
+			s.clearAuthCookies(w, r)
+			writeError(w, r, http.StatusUnauthorized, "session_idle_timeout", "登录已超过闲置时间，请重新登录", nil)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 			csrfHash := digestString(r.Header.Get("X-CSRF-Token"))
 			if len(csrfHash) != len(sessionRecord.CSRFHash) || subtle.ConstantTimeCompare([]byte(csrfHash), []byte(sessionRecord.CSRFHash)) != 1 {
@@ -3012,10 +3107,18 @@ func (s *server) requireAuth(next http.Handler) http.Handler {
 			}
 		}
 		user := sessionRecord.User
-		current := principal{UserID: user.ID, Username: user.Username, DisplayName: user.DisplayName, Role: user.Role, ProjectIDs: user.ProjectIDs}
+		current := principal{UserID: user.ID, AuthSessionID: sessionRecord.ID, AuthExpiresAt: sessionRecord.ExpiresAt, Username: user.Username, DisplayName: user.DisplayName, Role: user.Role, ProjectIDs: user.ProjectIDs}
 		if !s.authorizeRequest(r, current) {
 			writeError(w, r, http.StatusForbidden, "forbidden", "当前角色或项目范围无权执行该操作", nil)
 			return
+		}
+		// Polling and background refreshes are not user activity. Without this
+		// guard the dashboard can keep a login alive forever while nobody is at
+		// the browser, defeating the configured idle timeout.
+		userWasActive := r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions
+		userWasActive = userWasActive || r.Header.Get("X-DMP-User-Activity") == "1"
+		if toucher, ok := s.store.(authSessionToucher); ok && userWasActive {
+			_ = toucher.TouchAuthSession(r.Context(), sessionRecord.ID, now)
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, current)))
 	})
@@ -3053,7 +3156,7 @@ func (s *server) authorizeRequest(r *http.Request, current principal) bool {
 			webSSH, _ := s.store.HasPolicyCapability(r.Context(), current.UserID, projectID, "webssh", time.Now().UTC())
 			return web || webSSH
 		}
-		if !canAccessProject(current, projectID, "manage") {
+		if !canAccessProject(current, projectID) {
 			return false
 		}
 		if current.Role == "project_admin" {
@@ -3063,18 +3166,18 @@ func (s *server) authorizeRequest(r *http.Request, current principal) bool {
 	}
 	if endpointID := r.PathValue("endpointID"); endpointID != "" {
 		route, err := s.store.EndpointRoute(r.Context(), endpointID)
-		if err != nil || !canAccessProject(current, route.ProjectID, "manage") {
+		if err != nil || !canAccessProject(current, route.ProjectID) {
 			return false
 		}
 		return current.Role == "project_admin"
 	}
 	if forwardID := r.PathValue("forwardID"); forwardID != "" {
 		forward, err := s.store.PortForwardByID(r.Context(), forwardID)
-		return err == nil && current.Role == "project_admin" && canAccessProject(current, forward.ProjectID, "manage")
+		return err == nil && current.Role == "project_admin" && canAccessProject(current, forward.ProjectID)
 	}
 	if jobID := r.PathValue("jobID"); jobID != "" {
 		job, err := s.store.DiscoveryJob(r.Context(), jobID)
-		return err == nil && current.Role == "project_admin" && canAccessProject(current, job.ProjectID, "manage")
+		return err == nil && current.Role == "project_admin" && canAccessProject(current, job.ProjectID)
 	}
 	if path == "/api/v1/access-sessions" && r.Method == http.MethodPost {
 		return current.Role == "project_admin" || current.Role == "operator" || current.Role == "temporary"

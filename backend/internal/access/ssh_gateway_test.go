@@ -1,7 +1,6 @@
 package access
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -42,7 +41,7 @@ func TestWebSSHGatewayConnectsThroughSOCKS(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/access/ssh/" + token + "/ws"
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Cookie": []string{accessGrantCookie + "=" + strings.Repeat("g", 43)}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +94,7 @@ func TestWebSSHGatewayRevocationTerminatesActiveConnection(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/access/ssh/"+token+"/ws", nil)
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/access/ssh/"+token+"/ws", &websocket.DialOptions{HTTPHeader: http.Header{"Cookie": []string{accessGrantCookie + "=" + strings.Repeat("g", 43)}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,17 +158,6 @@ func startTestSSHServer(t *testing.T, username, password string) (string, string
 	t.Helper()
 	config := &ssh.ServerConfig{PasswordCallback: func(metadata ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
 		if metadata.User() == username && string(pass) == password {
-			return nil, nil
-		}
-		return nil, ssh.ErrNoAuth
-	}}
-	return startTestSSHServerWithConfig(t, config)
-}
-
-func startTestSSHServerWithPublicKey(t *testing.T, username string, authorizedKey ssh.PublicKey) (string, string) {
-	t.Helper()
-	config := &ssh.ServerConfig{PublicKeyCallback: func(metadata ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-		if metadata.User() == username && bytes.Equal(key.Marshal(), authorizedKey.Marshal()) {
 			return nil, nil
 		}
 		return nil, ssh.ErrNoAuth

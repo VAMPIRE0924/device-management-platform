@@ -3,6 +3,7 @@ import {
   FormEvent,
   type SetStateAction,
   useEffect,
+  useId,
   useMemo,
   useState,
 } from "react";
@@ -74,7 +75,6 @@ type WebService = {
   url: string;
   endpointId?: string;
   tlsServerName?: string;
-  allowInsecureTls?: boolean;
   verificationStatus?: string;
 };
 type ServiceProtocol =
@@ -86,7 +86,6 @@ type DeviceServiceEndpoint = {
   protocol: ServiceProtocol;
   port: number;
   tlsServerName?: string;
-  allowInsecureTls?: boolean;
   credentialConfigured?: boolean;
   sshAuthMethod?: "" | "password" | "key";
   sshUsername?: string;
@@ -107,7 +106,6 @@ type EditableWebRow = {
   protocol: string;
   port: string;
   tlsServerName: string;
-  allowInsecureTls: boolean;
 };
 const VALID_VIEWS = new Set<View>([
   "overview",
@@ -386,7 +384,6 @@ const mapDevice = (device: APIDevice, project: ProjectView): Device => {
       protocol: endpoint.protocol as ServiceProtocol,
       port: endpoint.targetPort,
       tlsServerName: endpoint.tlsServerName,
-      allowInsecureTls: endpoint.allowInsecureTls,
       credentialConfigured: endpoint.credentialConfigured,
       sshAuthMethod: endpoint.sshAuthMethod,
       sshUsername: endpoint.sshUsername,
@@ -400,7 +397,6 @@ const mapDevice = (device: APIDevice, project: ProjectView): Device => {
     name: endpoint.name,
     url: `${endpoint.protocol}://${device.host}:${endpoint.targetPort}`,
     tlsServerName: endpoint.tlsServerName,
-    allowInsecureTls: endpoint.allowInsecureTls,
     verificationStatus: endpoint.verificationStatus,
   }));
   return {
@@ -495,11 +491,12 @@ const OPTIONAL_RESOURCE_FIELDS = new Set([
 ]);
 
 function HelpTip({ text }: { text: string }) {
+  const tooltipId = useId();
   return (
     <span
       className="help-tip"
       tabIndex={0}
-      aria-label={`说明：${text}`}
+      aria-describedby={tooltipId}
       onMouseDown={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -511,7 +508,7 @@ function HelpTip({ text }: { text: string }) {
         event.currentTarget.focus();
       }}
     >
-      ?<span role="tooltip">{text}</span>
+      ?<span id={tooltipId} role="tooltip">{text}</span>
     </span>
   );
 }
@@ -880,7 +877,7 @@ function LoginScreen({
         </label>
         {status?.initialized === false && (
           <div className="security-note">
-            首次登录后还需修改初始密码、验证邮箱并绑定双重认证。
+            初始化后可直接登录；双重认证可在系统设置中启用。
           </div>
         )}
         {error && (
@@ -1790,16 +1787,12 @@ export default function Home() {
     const webTlsServerNames = form
       .getAll("webTlsServerName")
       .map((value) => String(value).trim());
-    const webAllowInsecureTls = form
-      .getAll("webAllowInsecureTls")
-      .map((value) => value === "true");
     const webServices = webPorts
       .filter((port) => port > 0)
       .map((port, index) => ({
         name: webNames[index] || `Web 服务 ${index + 1}`,
         url: `${webProtocols[index] || "http"}://${host}:${port}`,
         tlsServerName: webTlsServerNames[index] || "",
-        allowInsecureTls: webAllowInsecureTls[index] || false,
       }));
     const ssh = Boolean(form.get("ssh"));
     const sshPort = ssh ? Number(form.get("sshPort") || 22) : null;
@@ -1843,7 +1836,6 @@ export default function Home() {
           protocol: url.protocol.replace(":", "") as ServiceProtocol,
           port: Number(url.port || (url.protocol === "https:" ? 443 : 80)),
           tlsServerName: service.tlsServerName,
-          allowInsecureTls: service.allowInsecureTls,
         };
       }),
       ...(ssh && sshPort
@@ -1881,7 +1873,6 @@ export default function Home() {
           protocol: service.protocol,
           targetPort: service.port,
           tlsServerName: service.tlsServerName || "",
-          allowInsecureTls: Boolean(service.allowInsecureTls),
           sshCredential: service.sshCredential,
           sshHostKeyFingerprint: service.sshHostKeyFingerprint || "",
         })),
@@ -2885,7 +2876,6 @@ export default function Home() {
                   protocol: endpoint.protocol,
                   targetPort: endpoint.port,
                   tlsServerName: endpoint.tlsServerName || "",
-                  allowInsecureTls: Boolean(endpoint.allowInsecureTls),
                   sshCredential: endpoint.sshCredential,
                   sshHostKeyFingerprint: endpoint.sshHostKeyFingerprint || "",
                 })),
@@ -5424,6 +5414,10 @@ function SettingsView({
 }) {
   const [draft, setDraft] = useState<APISecuritySettings | null>(security);
   const [saving, setSaving] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [activeTab, setActiveTab] = useState<
+    "security" | "mail" | "access" | "maintenance"
+  >("security");
   const locked = (field: string) =>
     Boolean(draft?.lockedFields.includes(field));
   const patch = (value: Partial<APISecuritySettings>) =>
@@ -5445,13 +5439,31 @@ function SettingsView({
       setDraft(updated);
       onToast(
         updated.restartRequired
-          ? "设置已安全保存，重启服务后生效"
+          ? "设置已保存，点击页面中的“重载面板”即可生效"
           : "设置已保存",
       );
     } catch (error) {
       onToast(error instanceof Error ? error.message : "安全设置保存失败");
     } finally {
       setSaving(false);
+    }
+  };
+  const restart = async () => {
+    setRestarting(true);
+    try {
+      const destination = new URL(window.location.href);
+      const useHTTPS = window.location.protocol === "https:";
+      destination.hostname = draft?.panelDomain || window.location.hostname;
+      destination.port = String(useHTTPS ? draft?.httpsPort || 443 : draft?.httpPort || 80);
+      destination.pathname = "/";
+      destination.search = "?view=settings";
+      destination.hash = "";
+      await api.restartPanel();
+      onToast("面板正在重载，页面会自动恢复连接");
+      window.setTimeout(() => window.location.assign(destination.toString()), 1600);
+    } catch (error) {
+      setRestarting(false);
+      onToast(error instanceof Error ? error.message : "面板重载失败");
     }
   };
   return (
@@ -5483,13 +5495,12 @@ function SettingsView({
         <div className="settings-restart-banner">
           <span>!</span>
           <div>
-            <strong>配置已保存，等待重启生效</strong>
-            <p>
-              当前进程仍使用启动时配置。Docker 部署可执行{" "}
-              <code>docker compose restart platform</code>
-              ，重启后此提示会自动消失。
-            </p>
+            <strong>配置已保存，需要重载面板</strong>
+            <p>端口、证书或运行组件发生变化，点击右侧按钮由平台自行重载，无需操作 Docker。</p>
           </div>
+          <button className="btn primary" disabled={restarting} onClick={() => void restart()}>
+            {restarting ? "正在重载…" : "重载面板"}
+          </button>
         </div>
       )}
       {!draft && (
@@ -5502,8 +5513,22 @@ function SettingsView({
         </div>
       )}
       {draft && (
+        <nav className="settings-tabs" aria-label="系统设置分类">
+          {([
+            ["security", "登录安全"],
+            ["mail", "邮件服务"],
+            ["access", "访问与证书"],
+            ["maintenance", "数据与维护"],
+          ] as const).map(([value, label]) => (
+            <button key={value} className={activeTab === value ? "active" : ""} onClick={() => setActiveTab(value)}>
+              {label}
+            </button>
+          ))}
+        </nav>
+      )}
+      {draft && (
         <div className="settings-editor-grid">
-          <section className="settings-card settings-form-card">
+          {activeTab === "security" && <section className="settings-card settings-form-card">
             <div>
               <span className="settings-icon">◇</span>
               <div>
@@ -5575,6 +5600,35 @@ function SettingsView({
             </div>
             <div className="settings-field-grid">
               <label>
+                闲置自动退出
+                <select
+                  disabled={locked("authSessionIdleTTL")}
+                  value={draft.authSessionIdleTTL}
+                  onChange={(event) => patch({ authSessionIdleTTL: event.target.value })}
+                >
+                  <option value="5m">5 分钟</option>
+                  <option value="15m">15 分钟（默认）</option>
+                  <option value="30m">30 分钟</option>
+                  <option value="1h">1 小时</option>
+                  <option value="2h">2 小时</option>
+                </select>
+                <small>连续无操作达到该时间后必须重新登录</small>
+              </label>
+              <label>
+                最长登录时长
+                <select
+                  disabled={locked("authSessionTTL")}
+                  value={draft.authSessionTTL}
+                  onChange={(event) => patch({ authSessionTTL: event.target.value })}
+                >
+                  <option value="8h">8 小时</option>
+                  <option value="12h">12 小时（默认）</option>
+                  <option value="24h">24 小时</option>
+                  <option value="168h">7 天</option>
+                </select>
+                <small>即使持续操作，达到上限后也会重新登录</small>
+              </label>
+              <label>
                 邮箱验证码有效期
                 <select
                   disabled={locked("emailCodeTTL")}
@@ -5595,9 +5649,9 @@ function SettingsView({
                 <small>为避免误操作导致所有 TOTP 失效，网页中只读</small>
               </label>
             </div>
-          </section>
+          </section>}
 
-          <section className="settings-card settings-form-card">
+          {activeTab === "mail" && <section className="settings-card settings-form-card">
             <div>
               <span className="settings-icon">✉</span>
               <div>
@@ -5692,13 +5746,13 @@ function SettingsView({
                   disabled={locked("smtpFrom")}
                   value={draft.smtpFrom}
                   onChange={(event) => patch({ smtpFrom: event.target.value })}
-                  placeholder="I5CLOUD <notifier@example.com>"
+                  placeholder="设备管理平台 <notifier@example.com>"
                 />
               </label>
             </div>
-          </section>
+          </section>}
 
-          <section className="settings-card settings-form-card">
+          {activeTab === "access" && <section className="settings-card settings-form-card">
             <div>
               <span className="settings-icon">⌁</span>
               <div>
@@ -5727,7 +5781,7 @@ function SettingsView({
                     patch({ httpPort: Number(event.target.value) })
                   }
                 />
-                <small>默认 80，保存后重启容器生效</small>
+                <small>默认 80；变更后可在本页重载面板</small>
               </label>
               <label>
                 HTTPS 端口
@@ -5791,7 +5845,7 @@ function SettingsView({
               <div className="settings-certificate-section full">
                 <div>
                   <strong>Web 反代访问</strong>
-                  <small>用于每个 Web 会话的独立子域名</small>
+                  <small>用于隔离不同登录会话和设备入口</small>
                 </div>
               </div>
               <label className="full">
@@ -5809,7 +5863,7 @@ function SettingsView({
                     placeholder="admin.example.com"
                   />
                 </div>
-                <small>每个 Web 访问会话使用独立子域名</small>
+                <small>同一登录会话内，同一设备入口复用同一子域名</small>
               </label>
               <label className="full">
                 反代端口
@@ -5891,9 +5945,9 @@ function SettingsView({
                 <small>留空时由面板证书兜底；域名不同时必须单独配置</small>
               </label>
             </div>
-          </section>
+          </section>}
 
-          <DataManagementSettings onToast={onToast} />
+          {activeTab === "maintenance" && <DataManagementSettings onToast={onToast} />}
         </div>
       )}
     </>
@@ -8564,7 +8618,6 @@ function WebServiceEditor({
                 onChange={(event) =>
                   update(row.id, {
                     protocol: event.target.value,
-                    allowInsecureTls: event.target.value === "https",
                     ...(event.target.value === "http"
                       ? { tlsServerName: "" }
                       : {}),
@@ -8603,11 +8656,6 @@ function WebServiceEditor({
               type="hidden"
               name="webTlsServerName"
               value={row.tlsServerName}
-            />
-            <input
-              type="hidden"
-              name="webAllowInsecureTls"
-              value={String(row.protocol === "https")}
             />
             {row.protocol === "https" && (
               <div className="web-tls-options">
@@ -8687,7 +8735,6 @@ function AddDeviceModal({
       protocol: "http",
       port: "8080",
       tlsServerName: "",
-      allowInsecureTls: false,
     },
   ]);
   const [otherRows, setOtherRows] = useState<
@@ -8769,7 +8816,6 @@ function AddDeviceModal({
                   protocol: "http",
                   port: "",
                   tlsServerName: "",
-                  allowInsecureTls: false,
                 },
               ])
             }
@@ -8999,7 +9045,6 @@ function ManageDeviceModal({
       protocol: url.protocol.replace(":", ""),
       port: url.port || (url.protocol === "https:" ? "443" : "80"),
       tlsServerName: service.tlsServerName || "",
-      allowInsecureTls: url.protocol === "https:",
     };
   };
   const [webRows, setWebRows] = useState(() =>
@@ -9037,7 +9082,6 @@ function ManageDeviceModal({
         url: `${row.protocol}://${host}:${row.port}`,
         endpointId: row.endpointId,
         tlsServerName: row.tlsServerName,
-        allowInsecureTls: row.protocol === "https",
       }));
     const sshPort = sshEnabled ? Number(form.get("sshPort") || 22) : null;
     const sshUsername = String(form.get("sshUsername") || "").trim();
@@ -9066,7 +9110,6 @@ function ManageDeviceModal({
           protocol: row.protocol as ServiceProtocol,
           port: Number(row.port),
           tlsServerName: row.tlsServerName,
-          allowInsecureTls: row.protocol === "https",
         })),
       ...(sshEnabled && sshPort
         ? [
@@ -9188,7 +9231,6 @@ function ManageDeviceModal({
                   protocol: "http",
                   port: "",
                   tlsServerName: "",
-                  allowInsecureTls: false,
                 },
               ])
             }

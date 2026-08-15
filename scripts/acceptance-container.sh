@@ -37,11 +37,29 @@ fi
 docker volume create "$primary_volume" >/dev/null
 docker volume create "$certificate_volume" >/dev/null
 mkdir -p "$artifact_dir/certificate-source/panel" "$artifact_dir/certificate-source/access"
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=panel.container.example.test' \
-  -addext 'subjectAltName=DNS:panel.container.example.test' \
+cat >"$artifact_dir/panel-openssl.cnf" <<'EOF'
+[req]
+distinguished_name=dn
+x509_extensions=san
+prompt=no
+[dn]
+CN=panel.container.example.test
+[san]
+subjectAltName=DNS:panel.container.example.test
+EOF
+cat >"$artifact_dir/access-openssl.cnf" <<'EOF'
+[req]
+distinguished_name=dn
+x509_extensions=san
+prompt=no
+[dn]
+CN=*.container-remote.example.test
+[san]
+subjectAltName=DNS:*.container-remote.example.test
+EOF
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -config "$artifact_dir/panel-openssl.cnf" \
   -keyout "$artifact_dir/certificate-source/panel/privkey.pem" -out "$artifact_dir/certificate-source/panel/fullchain.pem" >/dev/null 2>&1
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=*.container-remote.example.test' \
-  -addext 'subjectAltName=DNS:*.container-remote.example.test' \
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -config "$artifact_dir/access-openssl.cnf" \
   -keyout "$artifact_dir/certificate-source/access/privkey.pem" -out "$artifact_dir/certificate-source/access/fullchain.pem" >/dev/null 2>&1
 docker run --rm --entrypoint sh -v "$certificate_volume:/cert" -v "$artifact_dir/certificate-source:/source:ro" "$image" -c \
   'mkdir -p /cert/panel /cert/access && cp /source/panel/*.pem /cert/panel/ && cp /source/access/*.pem /cert/access/ && chown -R root:root /cert && chmod 0700 /cert /cert/panel /cert/access && chmod 0600 /cert/panel/*.pem /cert/access/*.pem'
@@ -81,7 +99,7 @@ if grep -i '^Set-Cookie:.*; Secure' "$login_headers" >/dev/null; then
   exit 1
 fi
 curl -fsS -b "$login_cookies" "$primary_url/api/v1/auth/me" | grep -q '"username":"container-admin"'
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/meta" | grep -q '"schemaVersion":21'
+curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/meta" | grep -q '"schemaVersion":23'
 
 settings_response="$artifact_dir/settings.json"
 curl -fsS -X PUT -H "Authorization: Bearer $api_token" -H 'Content-Type: application/json' \
@@ -137,7 +155,7 @@ test "$(grep -ic '^Set-Cookie:.*; Secure' "$https_headers")" = "2"
 
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/data/backup" -o "$artifact_dir/backup.db"
 test "$(sqlite3 "$artifact_dir/backup.db" 'pragma integrity_check;')" = "ok"
-test "$(sqlite3 "$artifact_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "21"
+test "$(sqlite3 "$artifact_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "23"
 docker volume create "$restored_volume" >/dev/null
 docker run --rm -v "$restored_volume:/data" -v "$artifact_dir:/backup:ro" \
   "$image" restore /backup/backup.db >/dev/null
@@ -148,6 +166,6 @@ wait_ready "$restored_url"
 restored_api_token=$(docker exec "$restored" sh -c 'cat /data/api.token')
 test "${#restored_api_token}" = "64"
 curl -fsS -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/nodes" | grep -q '容器持久化验收节点'
-curl -fsS -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/meta" | grep -q '"schemaVersion":21'
+curl -fsS -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/meta" | grep -q '"schemaVersion":23'
 
 printf 'Container acceptance passed\nbackup artifact: %s\n' "$artifact_dir/backup.db"

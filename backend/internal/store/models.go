@@ -72,7 +72,6 @@ type DeviceEndpoint struct {
 	VerificationStatus    string     `json:"verificationStatus"`
 	LastVerifiedAt        *time.Time `json:"lastVerifiedAt"`
 	TLSServerName         string     `json:"tlsServerName"`
-	AllowInsecureTLS      bool       `json:"allowInsecureTls"`
 	CredentialConfigured  bool       `json:"credentialConfigured"`
 	SSHAuthMethod         string     `json:"sshAuthMethod"`
 	SSHUsername           string     `json:"sshUsername"`
@@ -109,7 +108,6 @@ type CreateEndpointInput struct {
 	Protocol              string              `json:"protocol"`
 	TargetPort            int                 `json:"targetPort"`
 	TLSServerName         string              `json:"tlsServerName"`
-	AllowInsecureTLS      bool                `json:"allowInsecureTls"`
 	CredentialRef         string              `json:"-"`
 	SSHCredential         *SSHCredentialInput `json:"sshCredential,omitempty"`
 	SSHAuthMethod         string              `json:"-"`
@@ -155,7 +153,6 @@ type EndpointRoute struct {
 	NodeID                string
 	ClientID              int
 	TLSServerName         string
-	AllowInsecureTLS      bool
 	CredentialRef         string
 	SSHAuthMethod         string
 	SSHUsername           string
@@ -164,28 +161,31 @@ type EndpointRoute struct {
 }
 
 type AccessSession struct {
-	ID           string     `json:"id"`
-	UserID       *string    `json:"userId"`
-	ProjectID    string     `json:"projectId"`
-	EndpointID   string     `json:"endpointId"`
-	EndpointName string     `json:"endpointName"`
-	DeviceName   string     `json:"deviceName"`
-	Mode         string     `json:"mode"`
-	SourceIP     string     `json:"sourceIp"`
-	Status       string     `json:"status"`
-	ExpiresAt    time.Time  `json:"expiresAt"`
-	StartedAt    time.Time  `json:"startedAt"`
-	EndedAt      *time.Time `json:"endedAt"`
+	ID            string     `json:"id"`
+	UserID        *string    `json:"userId"`
+	AuthSessionID string     `json:"-"`
+	ProjectID     string     `json:"projectId"`
+	EndpointID    string     `json:"endpointId"`
+	EndpointName  string     `json:"endpointName"`
+	DeviceName    string     `json:"deviceName"`
+	Mode          string     `json:"mode"`
+	SourceIP      string     `json:"sourceIp"`
+	Status        string     `json:"status"`
+	ExpiresAt     time.Time  `json:"expiresAt"`
+	StartedAt     time.Time  `json:"startedAt"`
+	EndedAt       *time.Time `json:"endedAt"`
 }
 
 type CreateAccessSessionInput struct {
-	UserID     *string
-	ProjectID  string
-	EndpointID string
-	TokenHash  string
-	Mode       string
-	SourceIP   string
-	ExpiresAt  time.Time
+	UserID        *string
+	AuthSessionID string
+	ProjectID     string
+	EndpointID    string
+	TokenHash     string
+	GrantHash     string
+	Mode          string
+	SourceIP      string
+	ExpiresAt     time.Time
 }
 
 type PortForward struct {
@@ -300,10 +300,11 @@ type UserCredential struct {
 }
 
 type AuthSession struct {
-	ID        string
-	User      User
-	ExpiresAt time.Time
-	CSRFHash  string
+	ID         string
+	User       User
+	ExpiresAt  time.Time
+	LastSeenAt time.Time
+	CSRFHash   string
 }
 
 type MFAChallenge struct {

@@ -1,13 +1,13 @@
 # Docker 正式部署
 
-本文适用于 `vampirerune/device-management-platform:v1.0.6`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
+本文适用于 `vampirerune/device-management-platform:v1.0.7`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
 
 ## 最简 Compose
 
 ```yaml
 services:
   platform:
-    image: vampirerune/device-management-platform:v1.0.6
+    image: vampirerune/device-management-platform:v1.0.7
     container_name: device-management-platform
     restart: unless-stopped
     volumes:
@@ -22,7 +22,7 @@ Compose 不需要部署令牌、域名、端口或数据库参数，也不声明
 
 - HTTP 默认监听容器的 `80` 端口。
 - 配置证书后，HTTPS 同时监听容器的 `443` 端口。
-- 系统设置可以分别修改 HTTP、HTTPS 端口；保存后重启容器生效。
+- 系统设置可以分别修改 HTTP、HTTPS 端口。涉及监听器或证书的变更保存后会出现“重载面板”按钮，由平台自行平滑重载。
 - 上面的 Compose 不发布宿主机端口。请给容器网络配置静态路由，直接通过容器 IP 访问。
 
 若部署环境没有通往容器 IP 的路由，才需要自行增加端口映射；这不是仓库默认部署方式。
@@ -49,11 +49,9 @@ docker compose logs --tail=100 platform
 
 证书文件需要通过 volume 只读挂载到容器内，再在系统设置中填容器内路径。两套证书可位于同一挂载目录的不同子目录，也可分别挂载。平台可直接读取群晖 root-only 挂载，不修改、复制或放宽宿主机证书权限。
 
-复用同一 HTTPS 端口时，平台根据 TLS SNI 为面板域名和反代子域名选择对应证书。保存端口或证书设置后重启容器：
+复用同一 HTTPS 端口时，平台根据 TLS SNI 为面板域名和反代子域名选择对应证书。保存端口或证书设置后，在系统设置页点击“重载面板”即可，不需要进入 Docker 管理器。平台重载时会重新读取保存的配置并重建 HTTP、HTTPS、反代、SMTP 与登录会话组件。
 
-```bash
-docker compose restart platform
-```
+证书挂载保持只读即可。容器入口仅在 NAS 的证书 ACL 不允许非 root 读取时，以只读方式预先打开证书文件，再以非 root 用户运行平台；平台不会复制、修改证书或要求写权限。若修改为另一个证书路径，新路径必须在容器内可读，否则重载会明确失败而不会继续误用旧证书。
 
 平台直管证书时可直接访问 `https://<容器IP>/` 或配置好的面板域名。若由外部 Nginx、Caddy、网关或路由器终止 TLS，则把面板域名和 `*.反代域名` 一并转发到容器 HTTP 80，并保留原始 `Host`、WebSocket Upgrade 和 `X-Forwarded-Proto`。
 
@@ -77,7 +75,7 @@ docker compose up -d
 docker compose ps
 ```
 
-`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.6` 这类完整版本号。
+`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.7` 这类完整版本号。
 
 ## 常见问题
 
@@ -95,3 +93,9 @@ docker compose up -d --force-recreate
 ### HTTP 登录后仍停留在登录页
 
 v1.0.4 起，登录 Cookie 会按实际访问协议自动设置：HTTP 不带 `Secure`，HTTPS 自动带 `Secure`。旧版本请升级并强制重新创建容器。
+
+### 为什么反代地址偶尔被 Chrome 标记为“危险网站”
+
+这是 Chrome Safe Browsing 的站点信誉/内容判定页面，不是证书错误页面。动态子域名代理的是路由器、NAS 等登录后台，登录表单与新建子域名可能触发异步判定，因此警告不一定每次出现。平台在同一平台登录会话内为同一设备入口复用同一子域名，每次打开仍会签发新的一次性授权；退出登录、会话超时或切换用户后会更换子域名。平台无法也不会绕过浏览器安全拦截。
+
+应先确认泛域名证书、DNS 与域名信誉正常，并向 Google Safe Browsing 申请复核误报。平台侧已经强制一次性授权、有效登录会话、项目与设备隔离、目标地址白名单化以及 Cookie/Host/重定向隔离；随机子域名本身不能作为访问凭证。

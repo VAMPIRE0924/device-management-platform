@@ -1,6 +1,6 @@
 package store
 
-const schemaVersion = 21
+const schemaVersion = 23
 
 var migrations = []string{`
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -322,4 +322,12 @@ SET name = host
 WHERE source = 'discovery' AND name = '未知设备';
 `, `
 ALTER TABLE endpoints DROP COLUMN allow_unknown_ssh_host_key;
+`, `
+ALTER TABLE access_sessions ADD COLUMN auth_session_id TEXT REFERENCES auth_sessions(id) ON DELETE CASCADE;
+ALTER TABLE access_sessions ADD COLUMN grant_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE access_sessions ADD COLUMN grant_exchanged_at TEXT;
+UPDATE access_sessions SET status = 'revoked', ended_at = COALESCE(ended_at, datetime('now')) WHERE status = 'active';
+CREATE INDEX idx_access_sessions_auth ON access_sessions(auth_session_id,status,expires_at);
+`, `
+ALTER TABLE endpoints DROP COLUMN allow_insecure_tls;
 `}

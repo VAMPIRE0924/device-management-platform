@@ -49,7 +49,7 @@ test("keeps formal login, MFA and editable deployment settings", async () => {
 
 test("initializes the first administrator without deployment tokens", async () => {
   const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
-  contains(page, ["创建首位系统管理员", "显示名称", "初始管理员密码（至少 12 位）"]);
+  contains(page, ["创建首位系统管理员", "显示名称", "初始管理员密码（至少 12 位）", "双重认证可在系统设置中启用"]);
   contains(api, ["/api/v1/setup"]);
   assert.doesNotMatch(page, /初始化令牌|setupToken/);
   assert.doesNotMatch(api, /X-Setup-Token|setupToken/);
@@ -93,7 +93,7 @@ test("edits devices atomically with per-service HTTPS and practical SSH settings
   const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
   contains(page, ["api.updateDevice", "endpoints:", "api.createDevices", "事务化导入", "Web 服务入口", "其他服务端口", "TLS 校验主机名", "SSH 主机密钥指纹", "SSH 登录方式", "SSH 私钥文件路径", "密码加密保存且不回显"]);
   for (const removed of ["HTTPS 高级设置", "允许设备自签名证书", "授权凭据引用（可选）", "临时允许未知主机密钥"]) assert.doesNotMatch(page, new RegExp(removed));
-  contains(api, ["tlsServerName", "allowInsecureTls", "credentialConfigured", "sshHostKeyFingerprint", "sshAuthMethod", "sshUsername", "sshKeyPath"]);
+  contains(api, ["tlsServerName", "credentialConfigured", "sshHostKeyFingerprint", "sshAuthMethod", "sshUsername", "sshKeyPath"]);
   assert.doesNotMatch(api, /addEndpoint\(|updateEndpoint\(|deleteEndpoint\(/);
 });
 

@@ -12,6 +12,14 @@ export class APIError extends Error {
 type ErrorEnvelope = { error?: { code?: string; message?: string } };
 
 let csrfToken = typeof window === "undefined" ? "" : window.sessionStorage.getItem("dmp.csrf") || "";
+let lastUserActivityAt = 0;
+
+if (typeof window !== "undefined") {
+  const markUserActivity = () => { lastUserActivityAt = Date.now(); };
+  for (const eventName of ["pointerdown", "keydown", "touchstart"] as const) {
+    window.addEventListener(eventName, markUserActivity, { capture: true, passive: true });
+  }
+}
 
 function csrfCookie(): string {
   if (typeof document === "undefined") return "";
@@ -25,6 +33,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const currentCSRF = csrfToken || csrfCookie();
   if (currentCSRF && init.method && !["GET", "HEAD", "OPTIONS"].includes(init.method)) headers.set("X-CSRF-Token", currentCSRF);
+  if (Date.now() - lastUserActivityAt < 30_000) headers.set("X-DMP-User-Activity", "1");
   const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
   if (!response.ok) {
     let envelope: ErrorEnvelope = {};
@@ -104,6 +113,8 @@ export type APISecuritySettings = {
   httpPort: number;
   httpsPort: number;
   emailCodeTTL: string;
+  authSessionTTL: string;
+  authSessionIdleTTL: string;
   mfaKeyFile: string;
   panelDomain: string;
   accessDomain: string;
@@ -184,7 +195,6 @@ export type APIEndpoint = {
   targetPort: number;
   verificationStatus: string;
   tlsServerName: string;
-  allowInsecureTls: boolean;
   credentialConfigured: boolean;
   sshAuthMethod: "" | "password" | "key";
   sshUsername: string;
@@ -359,6 +369,7 @@ export const api = {
   async resetUserMFA(userId: string) { return request<void>(`/api/v1/users/${encodeURIComponent(userId)}/mfa/reset`, { method: "POST" }); },
   async securitySettings() { return request<APISecuritySettings>("/api/v1/settings/security"); },
   async updateSecuritySettings(input: APISecuritySettings) { return request<APISecuritySettings>("/api/v1/settings/security", { method: "PUT", body: JSON.stringify(input) }); },
+  async restartPanel() { return request<{ status: string }>("/api/v1/system/restart", { method: "POST" }); },
   async policies() { return (await request<{ items: APIAccessPolicy[] }>("/api/v1/access-policies")).items; },
   async createPolicy(input: Record<string, unknown>) { return request<APIAccessPolicy>("/api/v1/access-policies", { method: "POST", body: JSON.stringify(input) }); },
   async updatePolicy(policyId: string, input: Record<string, unknown>) { return request<APIAccessPolicy>(`/api/v1/access-policies/${encodeURIComponent(policyId)}`, { method: "PATCH", body: JSON.stringify(input) }); },

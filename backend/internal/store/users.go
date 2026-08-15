@@ -277,18 +277,18 @@ func (s *Store) CreateAuthSession(ctx context.Context, userID, tokenHash, csrfHa
 	if err != nil {
 		return AuthSession{}, err
 	}
-	return AuthSession{ID: sessionID, User: credential, ExpiresAt: expiresAt.UTC(), CSRFHash: csrfHash}, nil
+	return AuthSession{ID: sessionID, User: credential, ExpiresAt: expiresAt.UTC(), LastSeenAt: now, CSRFHash: csrfHash}, nil
 }
 
 func (s *Store) ResolveAuthSession(ctx context.Context, tokenHash string) (AuthSession, error) {
 	var session AuthSession
 	var enabled, mfaEnabled, passwordChangeRequired int
-	var expiresAt, createdAt, updatedAt string
+	var expiresAt, lastSeenAt, createdAt, updatedAt string
 	err := s.db.QueryRowContext(ctx, `
-SELECT s.id,s.expires_at,s.csrf_hash,u.id,u.username,u.display_name,u.email,u.role,u.enabled,EXISTS(SELECT 1 FROM user_mfa m WHERE m.user_id=u.id),u.password_change_required,u.created_at,u.updated_at
+SELECT s.id,s.expires_at,s.last_seen_at,s.csrf_hash,u.id,u.username,u.display_name,u.email,u.role,u.enabled,EXISTS(SELECT 1 FROM user_mfa m WHERE m.user_id=u.id),u.password_change_required,u.created_at,u.updated_at
 FROM auth_sessions s JOIN users u ON u.id=s.user_id
 WHERE s.token_hash = ? AND s.status = 'active' AND s.expires_at > ?`, tokenHash, time.Now().UTC().Format(time.RFC3339Nano)).Scan(
-		&session.ID, &expiresAt, &session.CSRFHash, &session.User.ID, &session.User.Username, &session.User.DisplayName, &session.User.Email, &session.User.Role, &enabled, &mfaEnabled, &passwordChangeRequired, &createdAt, &updatedAt,
+		&session.ID, &expiresAt, &lastSeenAt, &session.CSRFHash, &session.User.ID, &session.User.Username, &session.User.DisplayName, &session.User.Email, &session.User.Role, &enabled, &mfaEnabled, &passwordChangeRequired, &createdAt, &updatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthSession{}, ErrNotFound
@@ -306,14 +306,22 @@ WHERE s.token_hash = ? AND s.status = 'active' AND s.expires_at > ?`, tokenHash,
 	if err != nil {
 		return AuthSession{}, err
 	}
+	session.LastSeenAt, err = time.Parse(time.RFC3339Nano, lastSeenAt)
+	if err != nil {
+		return AuthSession{}, err
+	}
 	session.User.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	session.User.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	session.User.ProjectIDs, err = s.userProjects(ctx, session.User.ID)
 	if err != nil {
 		return AuthSession{}, err
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE auth_sessions SET last_seen_at = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), session.ID)
 	return session, nil
+}
+
+func (s *Store) TouchAuthSession(ctx context.Context, sessionID string, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE auth_sessions SET last_seen_at = ? WHERE id = ? AND status = 'active'`, now.UTC().Format(time.RFC3339Nano), sessionID)
+	return err
 }
 
 func (s *Store) RevokeAuthSession(ctx context.Context, tokenHash string) error {

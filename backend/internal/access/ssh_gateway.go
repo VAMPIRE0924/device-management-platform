@@ -2,8 +2,6 @@ package access
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +30,7 @@ type SSHGateway struct {
 	routes   routeResolver
 	secrets  SecretResolver
 	timeout  time.Duration
+	idleTTL  time.Duration
 	activeMu sync.Mutex
 	active   map[string]map[uint64]context.CancelFunc
 	revoked  map[string]time.Time
@@ -69,8 +68,12 @@ type storedSSHCredential struct {
 	Passphrase string `json:"passphrase"`
 }
 
-func NewSSHGateway(sessions sessionResolver, routes routeResolver, secrets SecretResolver) *SSHGateway {
-	return &SSHGateway{sessions: sessions, routes: routes, secrets: secrets, timeout: 15 * time.Second, active: map[string]map[uint64]context.CancelFunc{}, revoked: map[string]time.Time{}}
+func NewSSHGateway(sessions sessionResolver, routes routeResolver, secrets SecretResolver, idleTTLs ...time.Duration) *SSHGateway {
+	idleTTL := 15 * time.Minute
+	if len(idleTTLs) > 0 && idleTTLs[0] > 0 {
+		idleTTL = idleTTLs[0]
+	}
+	return &SSHGateway{sessions: sessions, routes: routes, secrets: secrets, timeout: 15 * time.Second, idleTTL: idleTTL, active: map[string]map[uint64]context.CancelFunc{}, revoked: map[string]time.Time{}}
 }
 
 // Revoke immediately terminates every active WebSSH connection for a platform
@@ -139,9 +142,12 @@ func (g *SSHGateway) serveTerminalPage(w http.ResponseWriter, r *http.Request) {
 		gatewayError(w, http.StatusNotFound, "访问会话不存在")
 		return
 	}
-	_, route, err := g.resolveSession(r, token)
-	if err != nil {
-		gatewayError(w, http.StatusGone, "访问会话不存在或已失效")
+	sessionRecord, route, ok := resolveAuthorizedAccess(w, r, g.sessions, token, g.idleTTL, "/access/ssh/"+token)
+	if !ok {
+		return
+	}
+	if sessionRecord.SourceIP != "" && sessionRecord.SourceIP != directSourceIP(r) {
+		gatewayError(w, http.StatusForbidden, "访问会话与当前来源地址不匹配")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -161,9 +167,12 @@ func (g *SSHGateway) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 		gatewayError(w, http.StatusNotFound, "访问会话不存在")
 		return
 	}
-	sessionRecord, route, err := g.resolveSession(r, token)
-	if err != nil {
-		gatewayError(w, http.StatusGone, "访问会话不存在或已失效")
+	sessionRecord, route, ok := resolveAuthorizedAccess(w, r, g.sessions, token, g.idleTTL, "/access/ssh/"+token)
+	if !ok {
+		return
+	}
+	if sessionRecord.SourceIP != "" && sessionRecord.SourceIP != directSourceIP(r) {
+		gatewayError(w, http.StatusForbidden, "访问会话与当前来源地址不匹配")
 		return
 	}
 	if sessionRecord.Mode != "ssh" || route.AccessType != "web_ssh" || route.Protocol != "ssh" {
@@ -310,18 +319,6 @@ func (g *SSHGateway) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-}
-
-func (g *SSHGateway) resolveSession(r *http.Request, token string) (store.AccessSession, store.EndpointRoute, error) {
-	digest := sha256.Sum256([]byte(token))
-	sessionRecord, route, err := g.sessions.ResolveAccessToken(r.Context(), hex.EncodeToString(digest[:]))
-	if err != nil {
-		return store.AccessSession{}, store.EndpointRoute{}, err
-	}
-	if sessionRecord.SourceIP != "" && sessionRecord.SourceIP != directSourceIP(r) {
-		return store.AccessSession{}, store.EndpointRoute{}, errors.New("source IP mismatch")
-	}
-	return sessionRecord, route, nil
 }
 
 func (g *SSHGateway) resolveCredential(ctx context.Context, route store.EndpointRoute, input sshAuthMessage) (storedSSHCredential, error) {

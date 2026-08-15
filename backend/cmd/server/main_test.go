@@ -58,12 +58,15 @@ func TestReadRuntimeTLSDescriptorReadsInheritedFileDirectly(t *testing.T) {
 	}
 	defer file.Close()
 
-	contents, err := readRuntimeTLSDescriptor(strconv.Itoa(duplicatedFD), "certificate")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(contents) != "certificate material" {
-		t.Fatalf("unexpected descriptor contents %q", contents)
+	defer syscall.Close(duplicatedFD)
+	for range 2 {
+		contents, err := readRuntimeTLSDescriptor(strconv.Itoa(duplicatedFD), "certificate")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(contents) != "certificate material" {
+			t.Fatalf("unexpected descriptor contents %q", contents)
+		}
 	}
 }
 
@@ -71,6 +74,33 @@ func TestLoadTLSCertificateRequiresDescriptorPair(t *testing.T) {
 	t.Setenv("DMP_RUNTIME_TLS_CERT_FD", "3")
 	if _, err := loadTLSCertificate("panel", "", "", "DMP_RUNTIME_TLS_CERT_FD", "DMP_RUNTIME_TLS_KEY_FD"); err == nil {
 		t.Fatal("expected incomplete runtime TLS descriptor configuration to fail")
+	}
+}
+
+func TestLoadTLSCertificateDoesNotReuseDescriptorAfterPathChanges(t *testing.T) {
+	openedCertFile, openedKeyFile, _ := writeTestCertificate(t, "opened.example.test")
+	newCertFile, newKeyFile, newSerial := writeTestCertificate(t, "new.example.test")
+	openedCert, err := os.Open(openedCertFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer openedCert.Close()
+	openedKey, err := os.Open(openedKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer openedKey.Close()
+	t.Setenv("DMP_RUNTIME_TLS_CERT_FD", strconv.Itoa(int(openedCert.Fd())))
+	t.Setenv("DMP_RUNTIME_TLS_KEY_FD", strconv.Itoa(int(openedKey.Fd())))
+	t.Setenv("DMP_RUNTIME_TLS_CERT_PATH", openedCertFile)
+	t.Setenv("DMP_RUNTIME_TLS_KEY_PATH", openedKeyFile)
+
+	certificate, err := loadTLSCertificate("panel", newCertFile, newKeyFile, "DMP_RUNTIME_TLS_CERT_FD", "DMP_RUNTIME_TLS_KEY_FD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if certificate == nil || certificate.Leaf == nil || certificate.Leaf.SerialNumber.Cmp(newSerial) != 0 {
+		t.Fatalf("path change reused the old inherited certificate: %#v", certificate)
 	}
 }
 

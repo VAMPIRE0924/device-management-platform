@@ -83,6 +83,8 @@ if [ "$(id -u)" -eq 0 ]; then
             exec 4<"$tls_key_file"
             export DMP_RUNTIME_TLS_CERT_FD=3
             export DMP_RUNTIME_TLS_KEY_FD=4
+            export DMP_RUNTIME_TLS_CERT_PATH="$tls_cert_file"
+            export DMP_RUNTIME_TLS_KEY_PATH="$tls_key_file"
         fi
     fi
 
@@ -100,6 +102,8 @@ if [ "$(id -u)" -eq 0 ]; then
             exec 6<"$access_tls_key_file"
             export DMP_RUNTIME_ACCESS_TLS_CERT_FD=5
             export DMP_RUNTIME_ACCESS_TLS_KEY_FD=6
+            export DMP_RUNTIME_ACCESS_TLS_CERT_PATH="$access_tls_cert_file"
+            export DMP_RUNTIME_ACCESS_TLS_KEY_PATH="$access_tls_key_file"
         fi
     fi
 

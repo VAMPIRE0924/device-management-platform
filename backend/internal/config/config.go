@@ -28,6 +28,8 @@ type Config struct {
 	MFAMethods         []string
 	MFAKeyFile         string
 	EmailCodeTTL       time.Duration
+	AuthSessionTTL     time.Duration
+	AuthSessionIdleTTL time.Duration
 	SMTPHost           string
 	SMTPPort           int
 	SMTPUsername       string
@@ -110,6 +112,14 @@ func Load() (Config, error) {
 	if err != nil || emailCodeTTL < time.Minute || emailCodeTTL > 30*time.Minute {
 		return Config{}, fmt.Errorf("mfa_email_code_ttl must be between 1m and 30m")
 	}
+	authSessionTTL, err := time.ParseDuration(value("DMP_AUTH_SESSION_TTL", "auth_session_ttl", "12h"))
+	if err != nil || authSessionTTL < time.Hour || authSessionTTL > 30*24*time.Hour {
+		return Config{}, fmt.Errorf("auth_session_ttl must be between 1h and 720h")
+	}
+	authSessionIdleTTL, err := time.ParseDuration(value("DMP_AUTH_SESSION_IDLE_TTL", "auth_session_idle_ttl", "15m"))
+	if err != nil || authSessionIdleTTL < 5*time.Minute || authSessionIdleTTL > 24*time.Hour || authSessionIdleTTL > authSessionTTL {
+		return Config{}, fmt.Errorf("auth_session_idle_ttl must be between 5m and 24h and not exceed auth_session_ttl")
+	}
 	cfg := Config{
 		ConfigFile:         configPath,
 		OverrideFile:       overridePath,
@@ -123,6 +133,8 @@ func Load() (Config, error) {
 		MFAMethods:         splitList(value("DMP_MFA_METHODS", "mfa_methods", "totp")),
 		MFAKeyFile:         value("DMP_MFA_KEY_FILE", "mfa_key_file", filepath.Join(filepath.Dir(databasePath), "mfa.key")),
 		EmailCodeTTL:       emailCodeTTL,
+		AuthSessionTTL:     authSessionTTL,
+		AuthSessionIdleTTL: authSessionIdleTTL,
 		SMTPHost:           value("DMP_SMTP_HOST", "smtp_host", ""),
 		SMTPPort:           smtpPort,
 		SMTPUsername:       value("DMP_SMTP_USERNAME", "smtp_username", ""),

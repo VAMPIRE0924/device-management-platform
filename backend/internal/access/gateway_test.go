@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
@@ -22,8 +23,16 @@ type fakeSessionResolver struct {
 	err     error
 }
 
-func (f fakeSessionResolver) ResolveAccessToken(context.Context, string) (store.AccessSession, store.EndpointRoute, error) {
+func (f fakeSessionResolver) ExchangeAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error) {
 	return f.session, f.route, f.err
+}
+
+func (f fakeSessionResolver) ResolveAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error) {
+	return f.session, f.route, f.err
+}
+
+func authorizeGatewayRequest(request *http.Request) {
+	request.AddCookie(&http.Cookie{Name: accessGrantCookie, Value: strings.Repeat("g", 43)})
 }
 
 type fakeRouteResolver struct {
@@ -63,12 +72,14 @@ func TestWebGatewayProxiesThroughAuthenticatedSOCKS(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("/access/web/{token}/{path...}", gateway)
 	request := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/login?x=1", nil)
+	authorizeGatewayRequest(request)
 	request.Header.Set("Origin", "http://platform.example")
 	request.Header.Set("Authorization", "Bearer platform-secret")
 	request.Header.Set("X-CSRF-Token", "platform-csrf")
 	request.Header.Set("X-Forwarded-For", "198.51.100.10")
 	request.Header.Set("X-DMP-Access-Subdomain", "1")
 	request.Header.Set("Cookie", "dmp_session=platform-session; dmp_csrf=platform-csrf; device_session=device-value")
+	authorizeGatewayRequest(request)
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
 	if response.Code != http.StatusFound {
@@ -111,6 +122,7 @@ func TestWebGatewayUsesServerContextForSubdomainIsolation(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("/access/web/{token}/{path...}", gateway)
 	request := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/", nil)
+	authorizeGatewayRequest(request)
 	request = WithSessionSubdomainAccess(request)
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
@@ -147,6 +159,7 @@ func TestWebGatewayRewritesRootPathsInTextResponses(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("/access/web/{token}/{path...}", gateway)
 	request := httptest.NewRequest(http.MethodGet, prefix+"/cgi-bin/luci/", nil)
+	authorizeGatewayRequest(request)
 	request.Header.Set("Accept-Encoding", "gzip, br")
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
@@ -154,7 +167,7 @@ func TestWebGatewayRewritesRootPathsInTextResponses(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	if strings.Contains(upstreamAcceptEncoding, "br") {
-		t.Fatalf("browser Accept-Encoding reached upstream in prefix compatibility mode: %q", upstreamAcceptEncoding)
+		t.Fatalf("browser Accept-Encoding reached upstream in path-prefix mode: %q", upstreamAcceptEncoding)
 	}
 	body := response.Body.String()
 	for _, expected := range []string{
@@ -200,6 +213,7 @@ func TestWebGatewayRejectsDifferentSourceIP(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("/access/web/{token}/{path...}", gateway)
 	request := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/", nil)
+	authorizeGatewayRequest(request)
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
@@ -218,26 +232,25 @@ func TestWebGatewayHTTPSAcceptsPrivateDeviceCertificates(t *testing.T) {
 	port, _ := strconv.Atoi(portText)
 	token := strings.Repeat("c", 43)
 
-	requestThroughGateway := func(legacyFlag bool) *httptest.ResponseRecorder {
+	requestThroughGateway := func() *httptest.ResponseRecorder {
 		gateway := NewWebGateway(
 			fakeSessionResolver{
 				session: store.AccessSession{Mode: "web"},
-				route:   store.EndpointRoute{Protocol: "https", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1, AllowInsecureTLS: legacyFlag},
+				route:   store.EndpointRoute{Protocol: "https", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1},
 			},
 			fakeRouteResolver{route: nodeadapter.SOCKSRoute{Address: socksAddress, Username: "proxy-user", Password: "proxy-pass"}},
 		)
 		mux := http.NewServeMux()
 		mux.Handle("/access/web/{token}/{path...}", gateway)
 		request := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/", nil)
+		authorizeGatewayRequest(request)
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, request)
 		return response
 	}
 
-	for _, legacyFlag := range []bool{false, true} {
-		if response := requestThroughGateway(legacyFlag); response.Code != http.StatusOK || response.Body.String() != "secure-device-ui" {
-			t.Fatalf("private device certificate failed with legacy flag %v: status = %d, body = %q", legacyFlag, response.Code, response.Body.String())
-		}
+	if response := requestThroughGateway(); response.Code != http.StatusOK || response.Body.String() != "secure-device-ui" {
+		t.Fatalf("private device certificate failed: status = %d, body = %q", response.Code, response.Body.String())
 	}
 }
 
@@ -262,6 +275,39 @@ func TestWebGatewayNormalizesBrokenHTTPSRedirectPort(t *testing.T) {
 	rewriteLocation(header, "http", "10.1.1.165", 80, basePrefix, basePrefix)
 	if got := header.Get("Location"); got != basePrefix+"/"+httpsUpgradePath+"/" {
 		t.Fatalf("broken device redirect escaped session: %q", got)
+	}
+}
+
+func TestWebGatewayContainsCrossOriginRedirectsInsideSession(t *testing.T) {
+	for _, prefix := range []string{"", "/access/web/session"} {
+		header := http.Header{"Location": []string{"https://other-device.invalid/login?token=secret"}}
+		rewriteLocation(header, "https", "10.1.1.165", 443, prefix, prefix)
+		if got, want := header.Get("Location"), accessSessionRoot(prefix); got != want {
+			t.Fatalf("external redirect escaped session: got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestWebGatewayDoesNotExposeInternalNetworkErrors(t *testing.T) {
+	token := strings.Repeat("n", 43)
+	gateway := NewWebGateway(
+		fakeSessionResolver{
+			session: store.AccessSession{Mode: "web"},
+			route:   store.EndpointRoute{Protocol: "http", TargetPort: 80, AccessType: "web_proxy", Host: "10.10.10.10", NodeID: "node-1", ClientID: 1},
+		},
+		fakeRouteResolver{route: nodeadapter.SOCKSRoute{Address: "127.0.0.1:1", Username: "proxy-user", Password: "proxy-pass"}},
+	)
+	mux := http.NewServeMux()
+	mux.Handle("/access/web/{token}/{path...}", gateway)
+	request := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/", nil)
+	authorizeGatewayRequest(request)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := strings.TrimSpace(response.Body.String()); got != "内网 Web 服务暂时无法访问" {
+		t.Fatalf("gateway error leaked internal details: %q", got)
 	}
 }
 

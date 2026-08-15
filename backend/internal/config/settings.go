@@ -18,6 +18,8 @@ type PanelSettings struct {
 	MFAEnabled             bool     `json:"mfaEnabled"`
 	MFAMethods             []string `json:"mfaMethods"`
 	EmailCodeTTL           string   `json:"emailCodeTTL"`
+	AuthSessionTTL         string   `json:"authSessionTTL"`
+	AuthSessionIdleTTL     string   `json:"authSessionIdleTTL"`
 	MFAKeyFile             string   `json:"mfaKeyFile"`
 	SMTPHost               string   `json:"smtpHost"`
 	SMTPPort               int      `json:"smtpPort"`
@@ -56,6 +58,12 @@ func NewSettingsManager(active Config) *SettingsManager {
 	}
 	if strings.TrimSpace(active.HTTPSListenAddress) == "" {
 		active.HTTPSListenAddress = "0.0.0.0:443"
+	}
+	if active.AuthSessionTTL == 0 {
+		active.AuthSessionTTL = 12 * time.Hour
+	}
+	if active.AuthSessionIdleTTL == 0 {
+		active.AuthSessionIdleTTL = 15 * time.Minute
 	}
 	return &SettingsManager{active: active}
 }
@@ -112,6 +120,22 @@ func (m *SettingsManager) Save(input PanelSettings) (PanelSettings, error) {
 		return PanelSettings{}, fmt.Errorf("mfa_email_code_ttl must be a duration such as 10m")
 	}
 	candidate.EmailCodeTTL = parsedTTL
+	if strings.TrimSpace(input.AuthSessionTTL) == "" {
+		input.AuthSessionTTL = candidate.AuthSessionTTL.String()
+	}
+	if strings.TrimSpace(input.AuthSessionIdleTTL) == "" {
+		input.AuthSessionIdleTTL = candidate.AuthSessionIdleTTL.String()
+	}
+	parsedSessionTTL, err := time.ParseDuration(strings.TrimSpace(input.AuthSessionTTL))
+	if err != nil {
+		return PanelSettings{}, fmt.Errorf("auth_session_ttl must be a duration such as 12h")
+	}
+	parsedIdleTTL, err := time.ParseDuration(strings.TrimSpace(input.AuthSessionIdleTTL))
+	if err != nil {
+		return PanelSettings{}, fmt.Errorf("auth_session_idle_ttl must be a duration such as 30m")
+	}
+	candidate.AuthSessionTTL = parsedSessionTTL
+	candidate.AuthSessionIdleTTL = parsedIdleTTL
 	candidate.SMTPHost = input.SMTPHost
 	candidate.SMTPPort = input.SMTPPort
 	candidate.SMTPUsername = input.SMTPUsername
@@ -218,6 +242,12 @@ func preserveEnvironmentControlledValues(active, desired Config) Config {
 	if fieldLocked("emailCodeTTL") {
 		desired.EmailCodeTTL = active.EmailCodeTTL
 	}
+	if fieldLocked("authSessionTTL") {
+		desired.AuthSessionTTL = active.AuthSessionTTL
+	}
+	if fieldLocked("authSessionIdleTTL") {
+		desired.AuthSessionIdleTTL = active.AuthSessionIdleTTL
+	}
 	if fieldLocked("smtpHost") {
 		desired.SMTPHost = active.SMTPHost
 	}
@@ -272,6 +302,7 @@ func preserveEnvironmentControlledValues(active, desired Config) Config {
 func panelSettingsFromConfig(cfg Config) PanelSettings {
 	return PanelSettings{
 		MFAEnabled: cfg.MFAEnabled, MFAMethods: append([]string{}, cfg.MFAMethods...), EmailCodeTTL: formatDurationMinutes(cfg.EmailCodeTTL),
+		AuthSessionTTL: formatDurationCompact(cfg.AuthSessionTTL), AuthSessionIdleTTL: formatDurationCompact(cfg.AuthSessionIdleTTL),
 		MFAKeyFile: cfg.MFAKeyFile, SMTPHost: cfg.SMTPHost, SMTPPort: cfg.SMTPPort, SMTPUsername: cfg.SMTPUsername,
 		SMTPPasswordConfigured: cfg.SMTPPassword != "", SMTPConfigured: cfg.SMTPHost != "" && cfg.SMTPFrom != "", SMTPFrom: cfg.SMTPFrom,
 		TLSCertFile: cfg.TLSCertFile, TLSKeyFile: cfg.TLSKeyFile, TLSConfigured: cfg.TLSCertFile != "" && cfg.TLSKeyFile != "",
@@ -302,6 +333,16 @@ func formatDurationMinutes(value time.Duration) string {
 	return strconv.FormatInt(int64(value/time.Minute), 10) + "m"
 }
 
+func formatDurationCompact(value time.Duration) string {
+	if value%time.Hour == 0 {
+		return strconv.FormatInt(int64(value/time.Hour), 10) + "h"
+	}
+	if value%time.Minute == 0 {
+		return strconv.FormatInt(int64(value/time.Minute), 10) + "m"
+	}
+	return value.String()
+}
+
 func applyEditableValues(cfg Config, values map[string]string) Config {
 	if value, ok := values["mfa_enabled"]; ok {
 		cfg.MFAEnabled, _ = strconv.ParseBool(value)
@@ -312,6 +353,16 @@ func applyEditableValues(cfg Config, values map[string]string) Config {
 	if value, ok := values["mfa_email_code_ttl"]; ok {
 		if parsed, err := time.ParseDuration(value); err == nil {
 			cfg.EmailCodeTTL = parsed
+		}
+	}
+	if value, ok := values["auth_session_ttl"]; ok {
+		if parsed, err := time.ParseDuration(value); err == nil {
+			cfg.AuthSessionTTL = parsed
+		}
+	}
+	if value, ok := values["auth_session_idle_ttl"]; ok {
+		if parsed, err := time.ParseDuration(value); err == nil {
+			cfg.AuthSessionIdleTTL = parsed
 		}
 	}
 	if value, ok := values["smtp_host"]; ok {
@@ -376,6 +427,8 @@ func renderOverride(cfg Config, smtpPasswordFile string) string {
 		"mfa_enabled = " + strconv.FormatBool(cfg.MFAEnabled),
 		"mfa_methods = " + strings.Join(cfg.MFAMethods, ","),
 		"mfa_email_code_ttl = " + cfg.EmailCodeTTL.String(),
+		"auth_session_ttl = " + cfg.AuthSessionTTL.String(),
+		"auth_session_idle_ttl = " + cfg.AuthSessionIdleTTL.String(),
 		"smtp_host = " + cfg.SMTPHost,
 		"smtp_port = " + strconv.Itoa(cfg.SMTPPort),
 		"smtp_username = " + cfg.SMTPUsername,
@@ -458,7 +511,8 @@ func normalizedMethods(values []string) []string {
 
 func sameEditableConfig(left, right Config) bool {
 	return left.MFAEnabled == right.MFAEnabled && methodsKey(left.MFAMethods) == methodsKey(right.MFAMethods) &&
-		left.EmailCodeTTL == right.EmailCodeTTL && left.SMTPHost == right.SMTPHost && left.SMTPPort == right.SMTPPort &&
+		left.EmailCodeTTL == right.EmailCodeTTL && left.AuthSessionTTL == right.AuthSessionTTL && left.AuthSessionIdleTTL == right.AuthSessionIdleTTL &&
+		left.SMTPHost == right.SMTPHost && left.SMTPPort == right.SMTPPort &&
 		left.SMTPUsername == right.SMTPUsername && left.SMTPPassword == right.SMTPPassword && left.SMTPFrom == right.SMTPFrom &&
 		left.TLSCertFile == right.TLSCertFile && left.TLSKeyFile == right.TLSKeyFile && left.AccessTLSCertFile == right.AccessTLSCertFile && left.AccessTLSKeyFile == right.AccessTLSKeyFile &&
 		left.AccessHTTPPort == right.AccessHTTPPort && left.AccessHTTPSPort == right.AccessHTTPSPort &&
@@ -468,6 +522,7 @@ func sameEditableConfig(left, right Config) bool {
 
 var editableEnvironment = map[string]string{
 	"mfaEnabled": "DMP_MFA_ENABLED", "mfaMethods": "DMP_MFA_METHODS", "emailCodeTTL": "DMP_MFA_EMAIL_CODE_TTL",
+	"authSessionTTL": "DMP_AUTH_SESSION_TTL", "authSessionIdleTTL": "DMP_AUTH_SESSION_IDLE_TTL",
 	"smtpHost": "DMP_SMTP_HOST", "smtpPort": "DMP_SMTP_PORT", "smtpUsername": "DMP_SMTP_USERNAME",
 	"smtpPassword": "DMP_SMTP_PASSWORD", "smtpFrom": "DMP_SMTP_FROM",
 	"tlsCertFile": "DMP_TLS_CERT_FILE", "tlsKeyFile": "DMP_TLS_KEY_FILE",
@@ -515,6 +570,7 @@ func rejectLockedChanges(active, candidate Config) error {
 	checks := map[string]bool{
 		"mfaEnabled": active.MFAEnabled != candidate.MFAEnabled, "mfaMethods": methodsKey(active.MFAMethods) != methodsKey(candidate.MFAMethods),
 		"emailCodeTTL": active.EmailCodeTTL != candidate.EmailCodeTTL, "smtpHost": active.SMTPHost != candidate.SMTPHost,
+		"authSessionTTL": active.AuthSessionTTL != candidate.AuthSessionTTL, "authSessionIdleTTL": active.AuthSessionIdleTTL != candidate.AuthSessionIdleTTL,
 		"smtpPort": active.SMTPPort != candidate.SMTPPort, "smtpUsername": active.SMTPUsername != candidate.SMTPUsername,
 		"smtpFrom":    active.SMTPFrom != candidate.SMTPFrom,
 		"tlsCertFile": active.TLSCertFile != candidate.TLSCertFile, "tlsKeyFile": active.TLSKeyFile != candidate.TLSKeyFile,

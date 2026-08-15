@@ -22,7 +22,8 @@ import (
 )
 
 type sessionResolver interface {
-	ResolveAccessToken(context.Context, string) (store.AccessSession, store.EndpointRoute, error)
+	ExchangeAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error)
+	ResolveAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error)
 }
 
 type routeResolver interface {
@@ -48,10 +49,15 @@ type WebGateway struct {
 	sessions sessionResolver
 	routes   routeResolver
 	timeout  time.Duration
+	idleTTL  time.Duration
 }
 
-func NewWebGateway(sessions sessionResolver, routes routeResolver) *WebGateway {
-	return &WebGateway{sessions: sessions, routes: routes, timeout: 20 * time.Second}
+func NewWebGateway(sessions sessionResolver, routes routeResolver, idleTTLs ...time.Duration) *WebGateway {
+	idleTTL := 15 * time.Minute
+	if len(idleTTLs) > 0 && idleTTLs[0] > 0 {
+		idleTTL = idleTTLs[0]
+	}
+	return &WebGateway{sessions: sessions, routes: routes, timeout: 20 * time.Second, idleTTL: idleTTL}
 }
 
 func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -60,22 +66,16 @@ func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		gatewayError(w, http.StatusNotFound, "访问会话不存在或已失效")
 		return
 	}
-	digest := sha256.Sum256([]byte(token))
-	session, route, err := g.sessions.ResolveAccessToken(r.Context(), hex.EncodeToString(digest[:]))
-	if errors.Is(err, store.ErrNotFound) {
-		gatewayError(w, http.StatusGone, "访问会话不存在或已失效")
-		return
-	}
-	if err != nil {
-		gatewayError(w, http.StatusBadGateway, "无法校验访问会话")
-		return
-	}
-	if session.Mode != "web" || route.AccessType != "web_proxy" || (route.Protocol != "http" && route.Protocol != "https") {
-		gatewayError(w, http.StatusForbidden, "该会话不是 Web 访问会话")
+	session, route, ok := resolveAuthorizedAccess(w, r, g.sessions, token, g.idleTTL, webAccessCookiePath(r, token))
+	if !ok {
 		return
 	}
 	if session.SourceIP != "" && session.SourceIP != directSourceIP(r) {
 		gatewayError(w, http.StatusForbidden, "访问会话与当前来源地址不匹配")
+		return
+	}
+	if session.Mode != "web" || route.AccessType != "web_proxy" || (route.Protocol != "http" && route.Protocol != "https") {
+		gatewayError(w, http.StatusForbidden, "该会话不是 Web 访问会话")
 		return
 	}
 	socksRoute, err := g.routes.SOCKSRoute(r.Context(), route.NodeID, route.ClientID)
@@ -84,6 +84,53 @@ func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.proxy(w, r, token, route, socksRoute)
+}
+
+const accessGrantCookie = "dmp_access_grant"
+
+func webAccessCookiePath(r *http.Request, token string) string {
+	if usesSessionSubdomain(r) {
+		return "/"
+	}
+	return "/access/web/" + token + "/"
+}
+
+func resolveAuthorizedAccess(w http.ResponseWriter, r *http.Request, sessions sessionResolver, token string, idleTTL time.Duration, cookiePath string) (store.AccessSession, store.EndpointRoute, bool) {
+	tokenDigest := sha256.Sum256([]byte(token))
+	tokenHash := hex.EncodeToString(tokenDigest[:])
+	idleCutoff := time.Now().UTC().Add(-idleTTL)
+	if grant := strings.TrimSpace(r.URL.Query().Get("grant")); validAccessToken(grant) {
+		grantDigest := sha256.Sum256([]byte(grant))
+		session, _, err := sessions.ExchangeAccessGrant(r.Context(), tokenHash, hex.EncodeToString(grantDigest[:]), idleCutoff)
+		if err != nil {
+			gatewayError(w, http.StatusGone, "访问授权不存在、已使用或登录已超时")
+			return store.AccessSession{}, store.EndpointRoute{}, false
+		}
+		http.SetCookie(w, &http.Cookie{Name: accessGrantCookie, Value: grant, Path: cookiePath, HttpOnly: true, Secure: accessRequestUsesHTTPS(r), SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		cleanURL := *r.URL
+		query := cleanURL.Query()
+		query.Del("grant")
+		cleanURL.RawQuery = query.Encode()
+		http.Redirect(w, r, cleanURL.String(), http.StatusSeeOther)
+		return store.AccessSession{}, store.EndpointRoute{}, false
+	}
+	cookie, err := r.Cookie(accessGrantCookie)
+	if err != nil || !validAccessToken(cookie.Value) {
+		gatewayError(w, http.StatusUnauthorized, "需要从平台内重新发起访问")
+		return store.AccessSession{}, store.EndpointRoute{}, false
+	}
+	grantDigest := sha256.Sum256([]byte(cookie.Value))
+	session, route, err := sessions.ResolveAccessGrant(r.Context(), tokenHash, hex.EncodeToString(grantDigest[:]), idleCutoff)
+	if errors.Is(err, store.ErrNotFound) {
+		gatewayError(w, http.StatusGone, "访问会话不存在或已失效")
+		return store.AccessSession{}, store.EndpointRoute{}, false
+	}
+	if err != nil {
+		gatewayError(w, http.StatusBadGateway, "无法校验访问会话")
+		return store.AccessSession{}, store.EndpointRoute{}, false
+	}
+	return session, route, true
 }
 
 func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token string, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) {
@@ -140,10 +187,15 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token string,
 				return err
 			}
 			response.Header.Set("Cache-Control", "no-store")
+			response.Header.Set("Referrer-Policy", "no-referrer")
 			return nil
 		},
 		ErrorHandler: func(writer http.ResponseWriter, _ *http.Request, err error) {
-			gatewayError(writer, http.StatusBadGateway, fmt.Sprintf("内网 Web 服务暂时无法访问：%s", safeProxyError(err)))
+			// Network errors may contain the SOCKS address, private destination or
+			// other deployment details. Keep them in server-side diagnostics only;
+			// the browser receives a stable message without internal topology.
+			_ = err
+			gatewayError(writer, http.StatusBadGateway, "内网 Web 服务暂时无法访问")
 		},
 	}
 	proxy.ServeHTTP(w, r)
@@ -175,8 +227,8 @@ func gatewayUpstream(route store.EndpointRoute, pathValue, basePrefix string, st
 
 const maxRewrittenResponseBytes = 16 << 20
 
-// rewriteTextResponse is the compatibility layer used when a device UI is
-// mounted below /access/web/{token}. Many embedded UIs (including LuCI) emit
+// rewriteTextResponse preserves access-session path isolation when a device UI
+// is mounted below /access/web/{token}. Many embedded UIs (including LuCI) emit
 // origin-root URLs such as /luci-static/... from HTML, JavaScript and CSS. Left
 // untouched those requests escape the access session and hit the control plane.
 // Production deployments should still prefer the configured wildcard access
@@ -259,7 +311,7 @@ func stripControlPlaneHeaders(header http.Header) {
 	header.Del("Cookie")
 	deviceCookies := make([]string, 0)
 	for _, cookie := range cookieRequest.Cookies() {
-		if cookie.Name == "dmp_session" || cookie.Name == "dmp_csrf" || cookie.Name == upstreamSchemeCookie {
+		if cookie.Name == "dmp_session" || cookie.Name == "dmp_csrf" || cookie.Name == upstreamSchemeCookie || cookie.Name == accessGrantCookie {
 			continue
 		}
 		deviceCookies = append(deviceCookies, cookie.String())
@@ -289,6 +341,8 @@ func rewriteBrowserOrigin(header http.Header, targetOrigin string) {
 		if parsed, err := url.Parse(referer); err == nil {
 			parsed.Scheme = parts[0]
 			parsed.Host = parts[1]
+			parsed.RawQuery = ""
+			parsed.Fragment = ""
 			header.Set("Referer", parsed.String())
 		}
 	}
@@ -306,6 +360,7 @@ func rewriteLocation(header http.Header, scheme, targetHost string, targetPort i
 	prefix := responsePrefix
 	if parsed.IsAbs() {
 		if !strings.EqualFold(parsed.Hostname(), targetHost) {
+			header.Set("Location", accessSessionRoot(basePrefix))
 			return
 		}
 		locationPort := defaultURLPort(parsed.Scheme, parsed.Port())
@@ -317,6 +372,7 @@ func rewriteLocation(header http.Header, scheme, targetHost string, targetPort i
 			// without letting the browser escape to the private address.
 			prefix = basePrefix + "/" + httpsUpgradePath
 		} else {
+			header.Set("Location", accessSessionRoot(basePrefix))
 			return
 		}
 	}
@@ -332,6 +388,20 @@ func rewriteLocation(header http.Header, scheme, targetHost string, targetPort i
 		rewritten += "#" + parsed.Fragment
 	}
 	header.Set("Location", rewritten)
+}
+
+func accessSessionRoot(prefix string) string {
+	if prefix == "" {
+		return "/"
+	}
+	return strings.TrimSuffix(prefix, "/") + "/"
+}
+
+func accessRequestUsesHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
 func defaultURLPort(scheme, explicit string) int {
@@ -359,6 +429,9 @@ func rewriteCookies(header http.Header, prefix string) {
 	}
 	header.Del("Set-Cookie")
 	for _, cookie := range cookies {
+		if cookie.Name == "dmp_session" || cookie.Name == "dmp_csrf" || cookie.Name == upstreamSchemeCookie || cookie.Name == accessGrantCookie {
+			continue
+		}
 		cookie.Domain = ""
 		if cookie.Path == "" || cookie.Path == "/" {
 			cookie.Path = prefix + "/"
@@ -384,17 +457,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func safeProxyError(err error) string {
-	if err == nil {
-		return "unknown error"
-	}
-	message := err.Error()
-	if len(message) > 160 {
-		message = message[:160]
-	}
-	return message
 }
 
 func gatewayError(w http.ResponseWriter, status int, message string) {

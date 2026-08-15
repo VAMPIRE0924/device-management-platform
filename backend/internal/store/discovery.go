@@ -88,18 +88,17 @@ func (s *Store) ImportDiscoveryDevice(ctx context.Context, jobID string, input C
 			return Device{}, err
 		}
 		_, err = tx.ExecContext(ctx, `
-INSERT INTO endpoints(id,device_id,name,protocol,target_port,access_type,verification_status,last_verified_at,tls_server_name,allow_insecure_tls,ssh_credential_ref,ssh_host_key_fingerprint,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO endpoints(id,device_id,name,protocol,target_port,access_type,verification_status,last_verified_at,tls_server_name,ssh_credential_ref,ssh_host_key_fingerprint,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(device_id,protocol,target_port) DO UPDATE SET
   name=excluded.name,
   verification_status=CASE WHEN excluded.verification_status='verified' THEN 'verified' ELSE endpoints.verification_status END,
   last_verified_at=COALESCE(excluded.last_verified_at,endpoints.last_verified_at),
   tls_server_name=excluded.tls_server_name,
-  allow_insecure_tls=excluded.allow_insecure_tls,
   ssh_credential_ref=CASE WHEN excluded.ssh_credential_ref='' THEN endpoints.ssh_credential_ref ELSE excluded.ssh_credential_ref END,
   ssh_host_key_fingerprint=excluded.ssh_host_key_fingerprint,
   updated_at=excluded.updated_at`,
-			endpointID, deviceID, endpoint.Name, endpoint.Protocol, endpoint.TargetPort, endpointAccessType(endpoint.Protocol), verification, verifiedAt, endpoint.TLSServerName, endpoint.AllowInsecureTLS, endpoint.CredentialRef, endpoint.SSHHostKeyFingerprint, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+			endpointID, deviceID, endpoint.Name, endpoint.Protocol, endpoint.TargetPort, endpointAccessType(endpoint.Protocol), verification, verifiedAt, endpoint.TLSServerName, endpoint.CredentialRef, endpoint.SSHHostKeyFingerprint, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 		if err != nil {
 			return Device{}, err
 		}

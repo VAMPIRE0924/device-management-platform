@@ -39,6 +39,13 @@ func TestMigrateAndCreateControlPlaneObjects(t *testing.T) {
 	if legacyTunnelPolicyColumns != 0 {
 		t.Fatalf("projects.tunnel_on_demand must be physically removed, found %d column", legacyTunnelPolicyColumns)
 	}
+	var legacyInsecureTLSColumns int
+	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('endpoints') WHERE name='allow_insecure_tls'`).Scan(&legacyInsecureTLSColumns); err != nil {
+		t.Fatal(err)
+	}
+	if legacyInsecureTLSColumns != 0 {
+		t.Fatalf("endpoints.allow_insecure_tls must be physically removed, found %d column", legacyInsecureTLSColumns)
+	}
 	for _, column := range []string{"gateway_mode", "gateway_name", "gateway_status", "runtime_type", "runtime_address"} {
 		var count int
 		if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name=?`, column).Scan(&count); err != nil {

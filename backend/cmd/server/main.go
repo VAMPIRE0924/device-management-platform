@@ -32,11 +32,20 @@ import (
 )
 
 var version = "dev"
+var errRestartRequested = errors.New("panel restart requested")
 
 func main() {
-	if err := run(); err != nil {
-		slog.Error("device management platform stopped", "error", err)
-		os.Exit(1)
+	for {
+		err := run()
+		if errors.Is(err, errRestartRequested) {
+			slog.Info("device management platform reloading saved settings")
+			continue
+		}
+		if err != nil {
+			slog.Error("device management platform stopped", "error", err)
+			os.Exit(1)
+		}
+		return
 	}
 }
 
@@ -121,32 +130,41 @@ func run() error {
 
 	nodes := nodeadapter.New(db, nodeCredentialVault)
 	discoveryManager := discovery.NewManager(db, nodes)
-	sshGateway := access.NewSSHGateway(db, nodes, nodeCredentialVault)
+	sshGateway := access.NewSSHGateway(db, nodes, nodeCredentialVault, cfg.AuthSessionIdleTTL)
 	lifecycleManager := lifecycle.New(db, nodes, 30*time.Second)
+	restartRequested := make(chan struct{}, 1)
 	handler := api.New(api.Dependencies{
-		Store:             db,
-		Nodes:             nodes,
-		Discovery:         discoveryManager,
-		SSHGateway:        sshGateway,
-		UI:                ui.Handler(),
-		MFA:               mfaService,
-		MFAEnabled:        cfg.MFAEnabled,
-		MFAMethods:        cfg.MFAMethods,
-		EmailSender:       emailSender,
-		EmailCodeTTL:      cfg.EmailCodeTTL,
-		TLSConfigured:     cfg.TLSCertFile != "",
-		Settings:          config.NewSettingsManager(cfg),
-		NodeCredentials:   nodeCredentialVault,
-		APIToken:          cfg.APIToken,
-		AccessDomain:      cfg.AccessDomain,
-		AccessScheme:      cfg.AccessScheme,
-		HTTPPort:          portFromAddress(cfg.ListenAddress),
-		HTTPSPort:         portFromAddress(cfg.HTTPSListenAddress),
-		AccessHTTPPort:    cfg.AccessHTTPPort,
-		AccessHTTPSPort:   cfg.AccessHTTPSPort,
-		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
-		Mode:              cfg.Mode,
-		Version:           version,
+		Store:              db,
+		Nodes:              nodes,
+		Discovery:          discoveryManager,
+		SSHGateway:         sshGateway,
+		UI:                 ui.Handler(),
+		MFA:                mfaService,
+		MFAEnabled:         cfg.MFAEnabled,
+		MFAMethods:         cfg.MFAMethods,
+		EmailSender:        emailSender,
+		EmailCodeTTL:       cfg.EmailCodeTTL,
+		AuthSessionTTL:     cfg.AuthSessionTTL,
+		AuthSessionIdleTTL: cfg.AuthSessionIdleTTL,
+		TLSConfigured:      cfg.TLSCertFile != "",
+		Settings:           config.NewSettingsManager(cfg),
+		NodeCredentials:    nodeCredentialVault,
+		APIToken:           cfg.APIToken,
+		AccessDomain:       cfg.AccessDomain,
+		AccessScheme:       cfg.AccessScheme,
+		HTTPPort:           portFromAddress(cfg.ListenAddress),
+		HTTPSPort:          portFromAddress(cfg.HTTPSListenAddress),
+		AccessHTTPPort:     cfg.AccessHTTPPort,
+		AccessHTTPSPort:    cfg.AccessHTTPSPort,
+		TrustedProxyCIDRs:  cfg.TrustedProxyCIDRs,
+		Mode:               cfg.Mode,
+		Version:            version,
+		Restart: func() {
+			select {
+			case restartRequested <- struct{}{}:
+			default:
+			}
+		},
 	})
 	tlsCertificates, err := loadTLSCertificates(cfg)
 	if err != nil {
@@ -196,13 +214,19 @@ func run() error {
 			errCh <- item.server.ListenAndServe()
 		}(managed)
 	}
-	err = <-errCh
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+	select {
+	case <-restartRequested:
+		stop()
+		shutdownServers()
+		return errRestartRequested
+	case err = <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		stop()
+		shutdownServers()
+		return err
 	}
-	stop()
-	shutdownServers()
-	return err
 }
 
 type managedServer struct {
@@ -286,6 +310,22 @@ func loadTLSCertificate(label, certFile, keyFile, certFDEnvironmentVariable, key
 	if !certConfigured && certFile == "" && keyFile == "" {
 		return nil, nil
 	}
+	// The entrypoint may open a root-readable NAS certificate before dropping
+	// privileges. That descriptor is valid only for the path it was opened
+	// from. When a saved setting changes the path, load the new path instead of
+	// silently continuing to serve the old certificate.
+	if certConfigured {
+		certPathVariable := strings.TrimSuffix(certFDEnvironmentVariable, "_FD") + "_PATH"
+		keyPathVariable := strings.TrimSuffix(keyFDEnvironmentVariable, "_FD") + "_PATH"
+		openedCertPath, certPathConfigured := os.LookupEnv(certPathVariable)
+		openedKeyPath, keyPathConfigured := os.LookupEnv(keyPathVariable)
+		if certPathConfigured != keyPathConfigured {
+			return nil, fmt.Errorf("runtime %s TLS certificate and key paths must be configured together", label)
+		}
+		if certPathConfigured && (certFile != openedCertPath || keyFile != openedKeyPath) {
+			certConfigured = false
+		}
+	}
 	var certificate tls.Certificate
 	var err error
 	if certConfigured {
@@ -318,11 +358,23 @@ func readRuntimeTLSDescriptor(rawFD, label string) ([]byte, error) {
 	if err != nil || fd < 3 {
 		return nil, fmt.Errorf("invalid runtime TLS %s descriptor", label)
 	}
-	file := os.NewFile(uintptr(fd), "runtime TLS "+label)
+	// Keep the inherited descriptor open for the lifetime of the process. The
+	// server can reload saved settings without restarting the container, so a
+	// TLS certificate may need to be read more than once. Rewind the duplicate
+	// for every read while leaving the inherited descriptor itself open.
+	duplicatedFD, err := syscall.Dup(int(fd))
+	if err != nil {
+		return nil, fmt.Errorf("duplicate runtime TLS %s descriptor: %w", label, err)
+	}
+	file := os.NewFile(uintptr(duplicatedFD), "runtime TLS "+label)
 	if file == nil {
+		_ = syscall.Close(duplicatedFD)
 		return nil, fmt.Errorf("open runtime TLS %s descriptor", label)
 	}
 	defer file.Close()
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewind runtime TLS %s: %w", label, err)
+	}
 	contents, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("read runtime TLS %s: %w", label, err)

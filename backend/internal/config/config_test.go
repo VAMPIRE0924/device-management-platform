@@ -410,4 +410,7 @@ func TestPanelSettingsSerializesEmptyListsAsArrays(t *testing.T) {
 	if settings.EmailCodeTTL != "10m" {
 		t.Fatalf("email TTL = %q, want a form-selectable value", settings.EmailCodeTTL)
 	}
+	if settings.AuthSessionIdleTTL != "15m" || settings.AuthSessionTTL != "12h" {
+		t.Fatalf("auth TTLs must match form options: idle=%q absolute=%q", settings.AuthSessionIdleTTL, settings.AuthSessionTTL)
+	}
 }

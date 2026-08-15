@@ -207,12 +207,12 @@ func insertDeviceTx(ctx context.Context, tx *sql.Tx, projectID string, input Cre
 			}
 		}
 		accessType := endpointAccessType(endpointInput.Protocol)
-		_, err = tx.ExecContext(ctx, `INSERT INTO endpoints(id,device_id,name,protocol,target_port,access_type,tls_server_name,allow_insecure_tls,ssh_credential_ref,ssh_auth_method,ssh_username,ssh_key_path,ssh_host_key_fingerprint,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			endpointID, deviceID, endpointInput.Name, endpointInput.Protocol, endpointInput.TargetPort, accessType, endpointInput.TLSServerName, endpointInput.AllowInsecureTLS, endpointInput.CredentialRef, endpointInput.SSHAuthMethod, endpointInput.SSHUsername, endpointInput.SSHKeyPath, endpointInput.SSHHostKeyFingerprint, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		_, err = tx.ExecContext(ctx, `INSERT INTO endpoints(id,device_id,name,protocol,target_port,access_type,tls_server_name,ssh_credential_ref,ssh_auth_method,ssh_username,ssh_key_path,ssh_host_key_fingerprint,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			endpointID, deviceID, endpointInput.Name, endpointInput.Protocol, endpointInput.TargetPort, accessType, endpointInput.TLSServerName, endpointInput.CredentialRef, endpointInput.SSHAuthMethod, endpointInput.SSHUsername, endpointInput.SSHKeyPath, endpointInput.SSHHostKeyFingerprint, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 		if err != nil {
 			return Device{}, fmt.Errorf("insert endpoint: %w", err)
 		}
-		endpoints = append(endpoints, DeviceEndpoint{ID: endpointID, Name: endpointInput.Name, Protocol: endpointInput.Protocol, TargetPort: endpointInput.TargetPort, AccessType: accessType, VerificationStatus: "unverified", TLSServerName: endpointInput.TLSServerName, AllowInsecureTLS: endpointInput.AllowInsecureTLS, CredentialConfigured: endpointInput.CredentialRef != "", SSHAuthMethod: endpointInput.SSHAuthMethod, SSHUsername: endpointInput.SSHUsername, SSHKeyPath: endpointInput.SSHKeyPath, SSHHostKeyFingerprint: endpointInput.SSHHostKeyFingerprint})
+		endpoints = append(endpoints, DeviceEndpoint{ID: endpointID, Name: endpointInput.Name, Protocol: endpointInput.Protocol, TargetPort: endpointInput.TargetPort, AccessType: accessType, VerificationStatus: "unverified", TLSServerName: endpointInput.TLSServerName, CredentialConfigured: endpointInput.CredentialRef != "", SSHAuthMethod: endpointInput.SSHAuthMethod, SSHUsername: endpointInput.SSHUsername, SSHKeyPath: endpointInput.SSHKeyPath, SSHHostKeyFingerprint: endpointInput.SSHHostKeyFingerprint})
 	}
 	audit.ResourceID = deviceID
 	if err := insertAudit(ctx, tx, auditID, audit, now); err != nil {
@@ -222,7 +222,7 @@ func insertDeviceTx(ctx context.Context, tx *sql.Tx, projectID string, input Cre
 }
 
 func (s *Store) deviceEndpoints(ctx context.Context, deviceID string) ([]DeviceEndpoint, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,protocol,target_port,access_type,verification_status,last_verified_at,tls_server_name,allow_insecure_tls,ssh_credential_ref,ssh_auth_method,ssh_username,ssh_key_path,ssh_host_key_fingerprint FROM endpoints WHERE device_id = ? ORDER BY created_at`, deviceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,protocol,target_port,access_type,verification_status,last_verified_at,tls_server_name,ssh_credential_ref,ssh_auth_method,ssh_username,ssh_key_path,ssh_host_key_fingerprint FROM endpoints WHERE device_id = ? ORDER BY created_at`, deviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -241,12 +241,10 @@ func (s *Store) deviceEndpoints(ctx context.Context, deviceID string) ([]DeviceE
 func scanDeviceEndpoint(scanner rowScanner) (DeviceEndpoint, error) {
 	var endpoint DeviceEndpoint
 	var lastVerified sql.NullString
-	var allowInsecureTLS int
 	var credentialRef string
-	if err := scanner.Scan(&endpoint.ID, &endpoint.Name, &endpoint.Protocol, &endpoint.TargetPort, &endpoint.AccessType, &endpoint.VerificationStatus, &lastVerified, &endpoint.TLSServerName, &allowInsecureTLS, &credentialRef, &endpoint.SSHAuthMethod, &endpoint.SSHUsername, &endpoint.SSHKeyPath, &endpoint.SSHHostKeyFingerprint); err != nil {
+	if err := scanner.Scan(&endpoint.ID, &endpoint.Name, &endpoint.Protocol, &endpoint.TargetPort, &endpoint.AccessType, &endpoint.VerificationStatus, &lastVerified, &endpoint.TLSServerName, &credentialRef, &endpoint.SSHAuthMethod, &endpoint.SSHUsername, &endpoint.SSHKeyPath, &endpoint.SSHHostKeyFingerprint); err != nil {
 		return DeviceEndpoint{}, err
 	}
-	endpoint.AllowInsecureTLS = allowInsecureTLS == 1
 	endpoint.CredentialConfigured = credentialRef != ""
 	if lastVerified.Valid {
 		value, err := time.Parse(time.RFC3339Nano, lastVerified.String)
@@ -370,13 +368,13 @@ func replaceDeviceEndpointsTx(ctx context.Context, tx *sql.Tx, deviceID string, 
 	for _, endpoint := range desired {
 		accessType := endpointAccessType(endpoint.Protocol)
 		if endpoint.ID != "" {
-			_, err = tx.ExecContext(ctx, `UPDATE endpoints SET name = ?,protocol = ?,target_port = ?,access_type = ?,verification_status = CASE WHEN protocol = ? AND target_port = ? THEN verification_status ELSE 'unverified' END,last_verified_at = CASE WHEN protocol = ? AND target_port = ? THEN last_verified_at ELSE NULL END,tls_server_name = ?,allow_insecure_tls = ?,ssh_credential_ref = CASE WHEN ? = '' THEN ssh_credential_ref ELSE ? END,ssh_auth_method=CASE WHEN ?='' THEN ssh_auth_method ELSE ? END,ssh_username=CASE WHEN ?='' THEN ssh_username ELSE ? END,ssh_key_path=CASE WHEN ?='' AND ?='' THEN ssh_key_path ELSE ? END,ssh_host_key_fingerprint = ?,updated_at = ? WHERE id = ? AND device_id = ?`, endpoint.Name, endpoint.Protocol, endpoint.TargetPort, accessType, endpoint.Protocol, endpoint.TargetPort, endpoint.Protocol, endpoint.TargetPort, endpoint.TLSServerName, endpoint.AllowInsecureTLS, endpoint.CredentialRef, endpoint.CredentialRef, endpoint.SSHAuthMethod, endpoint.SSHAuthMethod, endpoint.SSHUsername, endpoint.SSHUsername, endpoint.SSHAuthMethod, endpoint.SSHKeyPath, endpoint.SSHKeyPath, endpoint.SSHHostKeyFingerprint, now.Format(time.RFC3339Nano), endpoint.ID, deviceID)
+			_, err = tx.ExecContext(ctx, `UPDATE endpoints SET name = ?,protocol = ?,target_port = ?,access_type = ?,verification_status = CASE WHEN protocol = ? AND target_port = ? THEN verification_status ELSE 'unverified' END,last_verified_at = CASE WHEN protocol = ? AND target_port = ? THEN last_verified_at ELSE NULL END,tls_server_name = ?,ssh_credential_ref = CASE WHEN ? = '' THEN ssh_credential_ref ELSE ? END,ssh_auth_method=CASE WHEN ?='' THEN ssh_auth_method ELSE ? END,ssh_username=CASE WHEN ?='' THEN ssh_username ELSE ? END,ssh_key_path=CASE WHEN ?='' AND ?='' THEN ssh_key_path ELSE ? END,ssh_host_key_fingerprint = ?,updated_at = ? WHERE id = ? AND device_id = ?`, endpoint.Name, endpoint.Protocol, endpoint.TargetPort, accessType, endpoint.Protocol, endpoint.TargetPort, endpoint.Protocol, endpoint.TargetPort, endpoint.TLSServerName, endpoint.CredentialRef, endpoint.CredentialRef, endpoint.SSHAuthMethod, endpoint.SSHAuthMethod, endpoint.SSHUsername, endpoint.SSHUsername, endpoint.SSHAuthMethod, endpoint.SSHKeyPath, endpoint.SSHKeyPath, endpoint.SSHHostKeyFingerprint, now.Format(time.RFC3339Nano), endpoint.ID, deviceID)
 		} else {
 			endpointID, idErr := id.New()
 			if idErr != nil {
 				return idErr
 			}
-			_, err = tx.ExecContext(ctx, `INSERT INTO endpoints(id,device_id,name,protocol,target_port,access_type,tls_server_name,allow_insecure_tls,ssh_credential_ref,ssh_auth_method,ssh_username,ssh_key_path,ssh_host_key_fingerprint,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, endpointID, deviceID, endpoint.Name, endpoint.Protocol, endpoint.TargetPort, accessType, endpoint.TLSServerName, endpoint.AllowInsecureTLS, endpoint.CredentialRef, endpoint.SSHAuthMethod, endpoint.SSHUsername, endpoint.SSHKeyPath, endpoint.SSHHostKeyFingerprint, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+			_, err = tx.ExecContext(ctx, `INSERT INTO endpoints(id,device_id,name,protocol,target_port,access_type,tls_server_name,ssh_credential_ref,ssh_auth_method,ssh_username,ssh_key_path,ssh_host_key_fingerprint,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, endpointID, deviceID, endpoint.Name, endpoint.Protocol, endpoint.TargetPort, accessType, endpoint.TLSServerName, endpoint.CredentialRef, endpoint.SSHAuthMethod, endpoint.SSHUsername, endpoint.SSHKeyPath, endpoint.SSHHostKeyFingerprint, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 		}
 		if err != nil {
 			return err

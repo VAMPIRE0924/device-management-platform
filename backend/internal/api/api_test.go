@@ -8,11 +8,14 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,11 +135,53 @@ func testServerWithAccessDomain(t *testing.T, accessDomain string) http.Handler 
 	if err := db.Migrate(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	const browserToken = "browser-test-token"
+	const browserCSRF = "browser-test-csrf"
 	vault, err := secrets.LoadOrCreateNodeCredentialVault(db, filepath.Join(dir, "node-credentials.key"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(Dependencies{Store: db, Nodes: &fakeNodeControl{}, NodeCredentials: vault, Discovery: fakeDiscoveryControl{}, APIToken: "test-token", AccessDomain: accessDomain, AccessScheme: "https", Mode: "pro", Version: "test", MFA: testMFA(t), MFAEnabled: true, MFAMethods: []string{"totp", "email"}, EmailSender: fakeEmailSender{}, EmailCodeTTL: 10 * time.Minute, TLSConfigured: true})
+	handler := New(Dependencies{Store: db, Nodes: &fakeNodeControl{}, NodeCredentials: vault, Discovery: fakeDiscoveryControl{}, APIToken: "test-token", AccessDomain: accessDomain, AccessScheme: "https", Mode: "pro", Version: "test", MFA: testMFA(t), MFAEnabled: true, MFAMethods: []string{"totp", "email"}, EmailSender: fakeEmailSender{}, EmailCodeTTL: 10 * time.Minute, TLSConfigured: true})
+	var browserSessionMu sync.Mutex
+	browserSessionCreated := false
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/access-sessions" {
+			if _, cookieErr := r.Cookie(authCookieName); cookieErr != nil {
+				browserSessionMu.Lock()
+				if !browserSessionCreated {
+					users, listErr := db.ListUsers(r.Context())
+					if listErr != nil {
+						browserSessionMu.Unlock()
+						t.Fatal(listErr)
+					}
+					var admin store.User
+					if len(users) == 0 {
+						passwordHash, hashErr := auth.HashPassword("test administrator password")
+						if hashErr != nil {
+							browserSessionMu.Unlock()
+							t.Fatal(hashErr)
+						}
+						admin, listErr = db.CreateInitialAdmin(r.Context(), store.CreateUserInput{Username: "test-admin", DisplayName: "Test Admin", PasswordHash: passwordHash}, store.AuditInput{Actor: "system", Action: "test.bootstrap", ResourceType: "user", Result: "success"})
+					} else {
+						admin = users[0]
+					}
+					if listErr == nil {
+						_, listErr = db.CreateAuthSession(r.Context(), admin.ID, digestString(browserToken), digestString(browserCSRF), time.Now().Add(time.Hour))
+					}
+					if listErr != nil {
+						browserSessionMu.Unlock()
+						t.Fatal(listErr)
+					}
+					browserSessionCreated = true
+				}
+				browserSessionMu.Unlock()
+				r.Header.Del("Authorization")
+				r.AddCookie(&http.Cookie{Name: authCookieName, Value: browserToken})
+				r.Header.Set("X-CSRF-Token", browserCSRF)
+			}
+		}
+		handler.ServeHTTP(w, r)
+	})
 }
 
 func testMFA(t *testing.T) *auth.MFA {
@@ -249,6 +294,89 @@ func TestHealthAndAuthentication(t *testing.T) {
 	}
 }
 
+func TestAuthSessionIdleTimeoutRevokesSession(t *testing.T) {
+	handler, db, token, sessionID := idleSessionTestServer(t, 15*time.Minute)
+	if err := db.TouchAuthSession(t.Context(), sessionID, time.Now().UTC().Add(-16*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/meta", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: token})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), "session_idle_timeout") {
+		t.Fatalf("idle session status = %d: %s", response.Code, response.Body.String())
+	}
+	if _, err := db.ResolveAuthSession(t.Context(), digestString(token)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("idle auth session was not revoked: %v", err)
+	}
+}
+
+func TestOnlyExplicitBrowserActivityTouchesAuthSession(t *testing.T) {
+	handler, db, token, _ := idleSessionTestServer(t, 15*time.Minute)
+	before, err := db.ResolveAuthSession(t.Context(), digestString(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	background := httptest.NewRequest(http.MethodGet, "/api/v1/meta", nil)
+	background.AddCookie(&http.Cookie{Name: authCookieName, Value: token})
+	backgroundResponse := httptest.NewRecorder()
+	handler.ServeHTTP(backgroundResponse, background)
+	if backgroundResponse.Code != http.StatusOK {
+		t.Fatalf("background request = %d: %s", backgroundResponse.Code, backgroundResponse.Body.String())
+	}
+	afterBackground, err := db.ResolveAuthSession(t.Context(), digestString(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterBackground.LastSeenAt.Equal(before.LastSeenAt) {
+		t.Fatalf("background polling extended session: before=%s after=%s", before.LastSeenAt, afterBackground.LastSeenAt)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	active := httptest.NewRequest(http.MethodGet, "/api/v1/meta", nil)
+	active.AddCookie(&http.Cookie{Name: authCookieName, Value: token})
+	active.Header.Set("X-DMP-User-Activity", "1")
+	activeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(activeResponse, active)
+	if activeResponse.Code != http.StatusOK {
+		t.Fatalf("active request = %d: %s", activeResponse.Code, activeResponse.Body.String())
+	}
+	afterActive, err := db.ResolveAuthSession(t.Context(), digestString(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterActive.LastSeenAt.After(afterBackground.LastSeenAt) {
+		t.Fatalf("explicit browser activity did not extend session: before=%s after=%s", afterBackground.LastSeenAt, afterActive.LastSeenAt)
+	}
+}
+
+func idleSessionTestServer(t *testing.T, idleTTL time.Duration) (http.Handler, *store.Store, string, string) {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "idle-session.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	passwordHash, err := auth.HashPassword("test administrator password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := db.CreateInitialAdmin(t.Context(), store.CreateUserInput{Username: "idle-admin", DisplayName: "Idle Admin", PasswordHash: passwordHash}, store.AuditInput{Actor: "system", Action: "test.bootstrap", ResourceType: "user", Result: "success"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "idle-session-browser-token"
+	session, err := db.CreateAuthSession(t.Context(), admin.ID, digestString(token), digestString("idle-csrf"), time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Dependencies{Store: db, Nodes: &fakeNodeControl{}, Mode: "pro", Version: "test", AuthSessionIdleTTL: idleTTL})
+	return handler, db, token, session.ID
+}
+
 func TestSystemAdminCanPersistSecuritySettingsWithoutSecretDisclosure(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "api.db"))
@@ -302,9 +430,17 @@ func TestTrustedProxySourceOnlyAcceptsConfiguredPeer(t *testing.T) {
 	untrustedRequest := httptest.NewRequest(http.MethodGet, "http://platform.test/", nil)
 	untrustedRequest.RemoteAddr = "192.0.2.9:12345"
 	untrustedRequest.Header.Set("X-Forwarded-For", "198.51.100.99")
+	untrustedRequest.Header.Set("X-Forwarded-Proto", "https")
 	handler.ServeHTTP(httptest.NewRecorder(), untrustedRequest)
 	if source != "192.0.2.9" {
 		t.Fatalf("untrusted proxy spoof was accepted: %q", source)
+	}
+	var forwardedProto string
+	s.trustedProxySource(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		forwardedProto = r.Header.Get("X-Forwarded-Proto")
+	})).ServeHTTP(httptest.NewRecorder(), untrustedRequest)
+	if forwardedProto != "" {
+		t.Fatalf("untrusted forwarded protocol reached authentication: %q", forwardedProto)
 	}
 }
 
@@ -379,16 +515,38 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 		t.Fatalf("create session = %d: %s", sessionResponse.Code, sessionResponse.Body.String())
 	}
 	var session struct {
-		LaunchURL string `json:"launchUrl"`
+		LaunchURL string    `json:"launchUrl"`
+		ExpiresAt time.Time `json:"expiresAt"`
 	}
 	if err := json.Unmarshal(sessionResponse.Body.Bytes(), &session); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(session.LaunchURL, "https://") || !strings.HasSuffix(session.LaunchURL, ".remote.example.test/") {
+	launchURL, err := url.Parse(session.LaunchURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launchURL.Scheme != "https" || !strings.HasSuffix(launchURL.Hostname(), ".remote.example.test") || launchURL.Query().Get("grant") == "" {
 		t.Fatalf("unexpected access-domain URL: %s", session.LaunchURL)
 	}
-	token := strings.TrimSuffix(strings.TrimPrefix(session.LaunchURL, "https://"), ".remote.example.test/")
+	remaining := time.Until(session.ExpiresAt)
+	if remaining < 55*time.Minute || remaining > 61*time.Minute {
+		t.Fatalf("access session expiry %s does not follow the platform login expiry", remaining)
+	}
+	token := strings.TrimSuffix(launchURL.Hostname(), ".remote.example.test")
+	unauthorizedRequest := httptest.NewRequest(http.MethodGet, "https://"+token+".remote.example.test/", nil)
+	unauthorizedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedResponse, unauthorizedRequest)
+	if unauthorizedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("random access subdomain without grant = %d, want 401", unauthorizedResponse.Code)
+	}
+	exchangeRequest := httptest.NewRequest(http.MethodGet, session.LaunchURL, nil)
+	exchangeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(exchangeResponse, exchangeRequest)
+	if exchangeResponse.Code != http.StatusSeeOther || len(exchangeResponse.Result().Cookies()) != 1 {
+		t.Fatalf("grant exchange = %d cookies=%d: %s", exchangeResponse.Code, len(exchangeResponse.Result().Cookies()), exchangeResponse.Body.String())
+	}
 	proxyRequest := httptest.NewRequest(http.MethodGet, "https://"+token+".remote.example.test/", nil)
+	proxyRequest.AddCookie(exchangeResponse.Result().Cookies()[0])
 	proxyResponse := httptest.NewRecorder()
 	handler.ServeHTTP(proxyResponse, proxyRequest)
 	if got := proxyResponse.Header().Get("Permissions-Policy"); got != "" {
@@ -396,6 +554,26 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	}
 	if got := proxyResponse.Header().Get("X-Frame-Options"); got != "" {
 		t.Fatalf("device application inherited control-plane frame policy: %q", got)
+	}
+	reopenedResponse := request(t, handler, http.MethodPost, "/api/v1/access-sessions", map[string]any{"endpointId": device.Endpoints[0].ID, "mode": "web"}, true)
+	if reopenedResponse.Code != http.StatusCreated {
+		t.Fatalf("reopen session = %d: %s", reopenedResponse.Code, reopenedResponse.Body.String())
+	}
+	var reopened struct {
+		LaunchURL string `json:"launchUrl"`
+	}
+	if err := json.Unmarshal(reopenedResponse.Body.Bytes(), &reopened); err != nil {
+		t.Fatal(err)
+	}
+	reopenedURL, err := url.Parse(reopened.LaunchURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopenedURL.Hostname() != launchURL.Hostname() {
+		t.Fatalf("same login and endpoint changed access host: first=%s reopened=%s", launchURL.Hostname(), reopenedURL.Hostname())
+	}
+	if reopenedURL.Query().Get("grant") == launchURL.Query().Get("grant") {
+		t.Fatal("reopened access reused the one-time grant")
 	}
 }
 
@@ -442,6 +620,29 @@ func TestDevelopmentAccessDomainLaunchPreservesLocalPort(t *testing.T) {
 	independentWant := "https://" + strings.Repeat("f", 48) + ".console.example.test:5443/"
 	if independentURL != independentWant {
 		t.Fatalf("independent access port URL = %q, want %q", independentURL, independentWant)
+	}
+}
+
+func TestStableAccessTokenIsScopedToLoginAndEndpoint(t *testing.T) {
+	first, firstHash := stableAccessToken("server-secret", "login-a", "endpoint-a", "web")
+	reopened, reopenedHash := stableAccessToken("server-secret", "login-a", "endpoint-a", "web")
+	if first != reopened || firstHash != reopenedHash {
+		t.Fatal("same login and endpoint must keep a stable access hostname")
+	}
+	for _, changed := range []struct {
+		login, endpoint, mode string
+	}{
+		{login: "login-b", endpoint: "endpoint-a", mode: "web"},
+		{login: "login-a", endpoint: "endpoint-b", mode: "web"},
+		{login: "login-a", endpoint: "endpoint-a", mode: "ssh"},
+	} {
+		token, _ := stableAccessToken("server-secret", changed.login, changed.endpoint, changed.mode)
+		if token == first {
+			t.Fatalf("access hostname was not isolated for %#v", changed)
+		}
+	}
+	if decoded, err := hex.DecodeString(first); err != nil || len(decoded) != 24 {
+		t.Fatalf("stable token is not a valid DNS access label: %q", first)
 	}
 }
 
@@ -543,7 +744,7 @@ func TestCreateNodeAndProject(t *testing.T) {
 		t.Fatalf("create discovery status = %d: %s", discoveryResponse.Code, discoveryResponse.Body.String())
 	}
 	deviceResponse := request(t, handler, http.MethodPost, "/api/v1/projects/"+project.ID+"/devices", map[string]any{
-		"host": "10.10.0.1", "name": "OpenWrt", "deviceType": "network", "vendor": "OpenWrt", "source": "manual", "endpoints": []map[string]any{{"name": "LuCI", "protocol": "https", "targetPort": 9443, "tlsServerName": "router.test", "allowInsecureTls": true}, {"name": "AdGuard Home", "protocol": "http", "targetPort": 3000}, {"name": "设备维护", "protocol": "ssh", "targetPort": 2222, "sshCredential": map[string]any{"method": "password", "username": "root", "password": "ssh-password"}, "sshHostKeyFingerprint": "SHA256:test-host-key"}},
+		"host": "10.10.0.1", "name": "OpenWrt", "deviceType": "network", "vendor": "OpenWrt", "source": "manual", "endpoints": []map[string]any{{"name": "LuCI", "protocol": "https", "targetPort": 9443, "tlsServerName": "router.test"}, {"name": "AdGuard Home", "protocol": "http", "targetPort": 3000}, {"name": "设备维护", "protocol": "ssh", "targetPort": 2222, "sshCredential": map[string]any{"method": "password", "username": "root", "password": "ssh-password"}, "sshHostKeyFingerprint": "SHA256:test-host-key"}},
 	}, true)
 	if deviceResponse.Code != http.StatusCreated || !bytes.Contains(deviceResponse.Body.Bytes(), []byte("AdGuard Home")) {
 		t.Fatalf("create device status = %d: %s", deviceResponse.Code, deviceResponse.Body.String())
@@ -552,7 +753,7 @@ func TestCreateNodeAndProject(t *testing.T) {
 	if err := json.Unmarshal(deviceResponse.Body.Bytes(), &device); err != nil {
 		t.Fatal(err)
 	}
-	if device.Endpoints[0].TLSServerName != "router.test" || !device.Endpoints[0].AllowInsecureTLS || !device.Endpoints[2].CredentialConfigured || device.Endpoints[2].SSHHostKeyFingerprint != "SHA256:test-host-key" {
+	if device.Endpoints[0].TLSServerName != "router.test" || !device.Endpoints[2].CredentialConfigured || device.Endpoints[2].SSHHostKeyFingerprint != "SHA256:test-host-key" {
 		t.Fatalf("endpoint trust configuration was not returned: %#v", device.Endpoints)
 	}
 	verifyResponse := request(t, handler, http.MethodPost, "/api/v1/projects/"+project.ID+"/devices/"+device.ID+"/verify", nil, true)
@@ -625,6 +826,15 @@ func TestCreateNodeAndProject(t *testing.T) {
 	listResponse := request(t, handler, http.MethodGet, "/api/v1/projects", nil, true)
 	if listResponse.Code != http.StatusOK || !bytes.Contains(listResponse.Body.Bytes(), []byte("10.10.0.0/16")) {
 		t.Fatalf("list projects status = %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+	auditResponse := request(t, handler, http.MethodGet, "/api/v1/audit-logs?limit=200", nil, true)
+	if auditResponse.Code != http.StatusOK {
+		t.Fatalf("list audit logs status = %d: %s", auditResponse.Code, auditResponse.Body.String())
+	}
+	for _, secret := range []string{"node-password", "ssh-password"} {
+		if bytes.Contains(auditResponse.Body.Bytes(), []byte(secret)) {
+			t.Fatalf("audit log disclosed submitted credential %q: %s", secret, auditResponse.Body.String())
+		}
 	}
 }
 
@@ -1088,6 +1298,28 @@ func TestTemporaryPolicyScopeAndRouteBoundaries(t *testing.T) {
 	if deviceResponse.Code != http.StatusCreated || json.Unmarshal(deviceResponse.Body.Bytes(), &device) != nil {
 		t.Fatalf("create device = %d: %s", deviceResponse.Code, deviceResponse.Body.String())
 	}
+	otherNodeResponse := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
+		"name": "其他策略节点", "apiUrl": "https://other-node.test:6443", "tlsServerName": "other-node.test", "credential": map[string]any{"type": "session", "username": "admin", "password": "other-node-password"}, "portStart": 27000, "portEnd": 27999,
+	}, true)
+	var otherNode store.Node
+	if otherNodeResponse.Code != http.StatusCreated || json.Unmarshal(otherNodeResponse.Body.Bytes(), &otherNode) != nil {
+		t.Fatalf("create other node = %d: %s", otherNodeResponse.Code, otherNodeResponse.Body.String())
+	}
+	otherProjectResponse := request(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
+		"name": "未授权项目", "nodeId": otherNode.ID, "ownerName": "其他管理员", "clientId": 1,
+	}, true)
+	var otherProject store.Project
+	if otherProjectResponse.Code != http.StatusCreated || json.Unmarshal(otherProjectResponse.Body.Bytes(), &otherProject) != nil {
+		t.Fatalf("create other project = %d: %s", otherProjectResponse.Code, otherProjectResponse.Body.String())
+	}
+	otherProject = configureProjectNetworks(t, handler, otherProject, "10.40.0.0/16")
+	otherDeviceResponse := request(t, handler, http.MethodPost, "/api/v1/projects/"+otherProject.ID+"/devices", map[string]any{
+		"host": "10.40.0.1", "name": "未授权设备", "deviceType": "network", "source": "manual", "endpoints": []map[string]any{{"name": "后台", "protocol": "http", "targetPort": 8080}},
+	}, true)
+	var otherDevice store.Device
+	if otherDeviceResponse.Code != http.StatusCreated || json.Unmarshal(otherDeviceResponse.Body.Bytes(), &otherDevice) != nil {
+		t.Fatalf("create other device = %d: %s", otherDeviceResponse.Code, otherDeviceResponse.Body.String())
+	}
 	userResponse := request(t, handler, http.MethodPost, "/api/v1/users", map[string]any{
 		"username": "temporary-policy", "displayName": "临时用户", "password": "temporary policy password", "role": "temporary", "projectIds": []string{},
 	}, true)
@@ -1136,6 +1368,9 @@ func TestTemporaryPolicyScopeAndRouteBoundaries(t *testing.T) {
 	if response := getAsTemporary("/api/v1/projects/" + project.ID + "/devices"); response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(device.ID)) {
 		t.Fatalf("temporary devices = %d: %s", response.Code, response.Body.String())
 	}
+	if response := getAsTemporary("/api/v1/projects/" + otherProject.ID + "/devices"); response.Code != http.StatusForbidden {
+		t.Fatalf("temporary user crossed project boundary: %d: %s", response.Code, response.Body.String())
+	}
 	if response := getAsTemporary("/api/v1/projects/" + project.ID + "/port-forwards"); response.Code != http.StatusForbidden {
 		t.Fatalf("temporary port forwards status = %d", response.Code)
 	}
@@ -1151,5 +1386,15 @@ func TestTemporaryPolicyScopeAndRouteBoundaries(t *testing.T) {
 	handler.ServeHTTP(sessionResponse, sessionRequest)
 	if sessionResponse.Code != http.StatusCreated {
 		t.Fatalf("temporary web session = %d: %s", sessionResponse.Code, sessionResponse.Body.String())
+	}
+	otherPayload, _ := json.Marshal(map[string]any{"endpointId": otherDevice.Endpoints[0].ID, "mode": "web"})
+	otherSessionRequest := httptest.NewRequest(http.MethodPost, "/api/v1/access-sessions", bytes.NewReader(otherPayload))
+	otherSessionRequest.AddCookie(authCookie)
+	otherSessionRequest.Header.Set("X-CSRF-Token", loginBody.CSRFToken)
+	otherSessionRequest.Header.Set("Content-Type", "application/json")
+	otherSessionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(otherSessionResponse, otherSessionRequest)
+	if otherSessionResponse.Code != http.StatusForbidden {
+		t.Fatalf("temporary user created session for another project: %d: %s", otherSessionResponse.Code, otherSessionResponse.Body.String())
 	}
 }
