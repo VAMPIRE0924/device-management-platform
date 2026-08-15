@@ -4070,6 +4070,33 @@ main {
 .settings-field-grid label.full {
   grid-column: 1 / -1;
 }
+.settings-status-tags {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.settings-certificate-section {
+  grid-column: 1 / -1;
+  padding: 12px 14px;
+  border: 1px solid #dce9e7;
+  border-radius: 9px;
+  background: #f7fbfa;
+}
+.settings-certificate-section > div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.settings-certificate-section strong {
+  color: #20383c;
+  font-size: 12px;
+}
+.settings-certificate-section small {
+  color: var(--muted);
+  font-size: 10px;
+}
 .settings-card .settings-field-grid input,
 .settings-card .settings-field-grid select {
   width: 100%;

@@ -58,6 +58,15 @@ if [ "$(id -u)" -eq 0 ]; then
         tls_key_file=$(config_value tls_key_file "$override_file" "$base_config_file" 2>/dev/null || true)
     fi
 
+    access_tls_cert_file="${DMP_ACCESS_TLS_CERT_FILE:-}"
+    access_tls_key_file="${DMP_ACCESS_TLS_KEY_FILE:-}"
+    if [ -z "$access_tls_cert_file" ]; then
+        access_tls_cert_file=$(config_value access_tls_cert_file "$override_file" "$base_config_file" 2>/dev/null || true)
+    fi
+    if [ -z "$access_tls_key_file" ]; then
+        access_tls_key_file=$(config_value access_tls_key_file "$override_file" "$base_config_file" 2>/dev/null || true)
+    fi
+
     if [ -n "$tls_cert_file" ] || [ -n "$tls_key_file" ]; then
         if [ -z "$tls_cert_file" ] || [ -z "$tls_key_file" ]; then
             echo "fatal: both TLS certificate and private key paths must be configured" >&2
@@ -74,6 +83,23 @@ if [ "$(id -u)" -eq 0 ]; then
             exec 4<"$tls_key_file"
             export DMP_RUNTIME_TLS_CERT_FD=3
             export DMP_RUNTIME_TLS_KEY_FD=4
+        fi
+    fi
+
+    if [ -n "$access_tls_cert_file" ] || [ -n "$access_tls_key_file" ]; then
+        if [ -z "$access_tls_cert_file" ] || [ -z "$access_tls_key_file" ]; then
+            echo "fatal: both access TLS certificate and private key paths must be configured" >&2
+            exit 1
+        fi
+        if ! su-exec platform test -r "$access_tls_cert_file" || ! su-exec platform test -r "$access_tls_key_file"; then
+            if [ ! -r "$access_tls_cert_file" ] || [ ! -r "$access_tls_key_file" ]; then
+                echo "fatal: mounted access TLS certificate or private key is not readable by the container root user" >&2
+                exit 1
+            fi
+            exec 5<"$access_tls_cert_file"
+            exec 6<"$access_tls_key_file"
+            export DMP_RUNTIME_ACCESS_TLS_CERT_FD=5
+            export DMP_RUNTIME_ACCESS_TLS_KEY_FD=6
         fi
     fi
 

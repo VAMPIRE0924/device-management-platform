@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -138,40 +140,29 @@ func run() error {
 		APIToken:          cfg.APIToken,
 		AccessDomain:      cfg.AccessDomain,
 		AccessScheme:      cfg.AccessScheme,
+		HTTPPort:          portFromAddress(cfg.ListenAddress),
+		HTTPSPort:         portFromAddress(cfg.HTTPSListenAddress),
+		AccessHTTPPort:    cfg.AccessHTTPPort,
+		AccessHTTPSPort:   cfg.AccessHTTPSPort,
 		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
 		Mode:              cfg.Mode,
 		Version:           version,
 	})
-	runtimeTLSCertificate, err := loadRuntimeTLSCertificate()
+	tlsCertificates, err := loadTLSCertificates(cfg)
 	if err != nil {
 		return err
 	}
-	tlsConfigured := cfg.TLSCertFile != "" || runtimeTLSCertificate != nil
-	httpServer := &http.Server{
-		Addr:              cfg.ListenAddress,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       90 * time.Second,
-	}
-	servers := []*http.Server{httpServer}
+	tlsConfigured := len(tlsCertificates) > 0
+	servers := []managedServer{{name: "panel HTTP", server: newApplicationServer(cfg.ListenAddress, handler, nil)}}
 	if tlsConfigured {
-		httpsServer := &http.Server{
-			Addr:              cfg.HTTPSListenAddress,
-			Handler:           handler,
-			ReadHeaderTimeout: 10 * time.Second,
-			ReadTimeout:       30 * time.Second,
-			WriteTimeout:      30 * time.Second,
-			IdleTimeout:       90 * time.Second,
+		servers = append(servers, managedServer{name: "panel HTTPS", tls: true, server: newApplicationServer(cfg.HTTPSListenAddress, handler, tlsCertificates)})
+	}
+	if cfg.AccessHTTPPort != 0 {
+		accessHandler := accessOnlyHandler(handler, cfg.AccessDomain)
+		servers = append(servers, managedServer{name: "access HTTP", server: newApplicationServer(addressWithPort(cfg.ListenAddress, cfg.AccessHTTPPort), accessHandler, nil)})
+		if tlsConfigured {
+			servers = append(servers, managedServer{name: "access HTTPS", tls: true, server: newApplicationServer(addressWithPort(cfg.HTTPSListenAddress, cfg.AccessHTTPSPort), accessHandler, tlsCertificates)})
 		}
-		if runtimeTLSCertificate != nil {
-			httpsServer.TLSConfig = &tls.Config{
-				MinVersion:   tls.VersionTLS12,
-				Certificates: []tls.Certificate{*runtimeTLSCertificate},
-			}
-		}
-		servers = append(servers, httpsServer)
 	}
 
 	shutdownContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -182,9 +173,9 @@ func run() error {
 		shutdownOnce.Do(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			for _, server := range servers {
-				if err := server.Shutdown(ctx); err != nil {
-					slog.Error("graceful shutdown failed", "address", server.Addr, "error", err)
+			for _, managed := range servers {
+				if err := managed.server.Shutdown(ctx); err != nil {
+					slog.Error("graceful shutdown failed", "address", managed.server.Addr, "error", err)
 				}
 			}
 		})
@@ -195,16 +186,15 @@ func run() error {
 	}()
 
 	errCh := make(chan error, len(servers))
-	slog.Info("device management platform HTTP listening", "address", cfg.ListenAddress, "mode", cfg.Mode, "version", version)
-	go func() { errCh <- httpServer.ListenAndServe() }()
-	if tlsConfigured {
-		httpsServer := servers[1]
-		slog.Info("device management platform HTTPS listening", "address", cfg.HTTPSListenAddress, "mode", cfg.Mode, "version", version)
-		certFile, keyFile := cfg.TLSCertFile, cfg.TLSKeyFile
-		if runtimeTLSCertificate != nil {
-			certFile, keyFile = "", ""
-		}
-		go func() { errCh <- httpsServer.ListenAndServeTLS(certFile, keyFile) }()
+	for _, managed := range servers {
+		slog.Info("device management platform listener started", "listener", managed.name, "address", managed.server.Addr, "mode", cfg.Mode, "version", version)
+		go func(item managedServer) {
+			if item.tls {
+				errCh <- item.server.ListenAndServeTLS("", "")
+				return
+			}
+			errCh <- item.server.ListenAndServe()
+		}(managed)
 	}
 	err = <-errCh
 	if errors.Is(err, http.ErrServerClosed) {
@@ -215,26 +205,110 @@ func run() error {
 	return err
 }
 
-func loadRuntimeTLSCertificate() (*tls.Certificate, error) {
-	certFD, certConfigured := os.LookupEnv("DMP_RUNTIME_TLS_CERT_FD")
-	keyFD, keyConfigured := os.LookupEnv("DMP_RUNTIME_TLS_KEY_FD")
-	if certConfigured != keyConfigured {
-		return nil, fmt.Errorf("runtime TLS certificate and key descriptors must be configured together")
+type managedServer struct {
+	name   string
+	server *http.Server
+	tls    bool
+}
+
+func newApplicationServer(address string, handler http.Handler, certificates []tls.Certificate) *http.Server {
+	server := &http.Server{
+		Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second,
 	}
-	if !certConfigured {
+	if len(certificates) > 0 {
+		server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: certificates}
+	}
+	return server
+}
+
+func portFromAddress(address string) int {
+	_, rawPort, err := net.SplitHostPort(address)
+	if err != nil {
+		return 0
+	}
+	port, _ := strconv.Atoi(rawPort)
+	return port
+}
+
+func addressWithPort(address string, port int) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = "0.0.0.0"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func accessOnlyHandler(application http.Handler, accessDomain string) http.Handler {
+	suffix := "." + strings.ToLower(strings.TrimSpace(accessDomain))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+			host = parsedHost
+		}
+		if suffix == "." || !strings.HasSuffix(strings.ToLower(strings.TrimSuffix(host, ".")), suffix) {
+			http.NotFound(w, r)
+			return
+		}
+		application.ServeHTTP(w, r)
+	})
+}
+
+func loadTLSCertificates(cfg config.Config) ([]tls.Certificate, error) {
+	pairs := []struct {
+		label                     string
+		certFile, keyFile         string
+		certFDEnvironmentVariable string
+		keyFDEnvironmentVariable  string
+	}{
+		{label: "panel", certFile: cfg.TLSCertFile, keyFile: cfg.TLSKeyFile, certFDEnvironmentVariable: "DMP_RUNTIME_TLS_CERT_FD", keyFDEnvironmentVariable: "DMP_RUNTIME_TLS_KEY_FD"},
+		{label: "access", certFile: cfg.AccessTLSCertFile, keyFile: cfg.AccessTLSKeyFile, certFDEnvironmentVariable: "DMP_RUNTIME_ACCESS_TLS_CERT_FD", keyFDEnvironmentVariable: "DMP_RUNTIME_ACCESS_TLS_KEY_FD"},
+	}
+	certificates := make([]tls.Certificate, 0, len(pairs))
+	for _, pair := range pairs {
+		certificate, err := loadTLSCertificate(pair.label, pair.certFile, pair.keyFile, pair.certFDEnvironmentVariable, pair.keyFDEnvironmentVariable)
+		if err != nil {
+			return nil, err
+		}
+		if certificate != nil {
+			certificates = append(certificates, *certificate)
+		}
+	}
+	return certificates, nil
+}
+
+func loadTLSCertificate(label, certFile, keyFile, certFDEnvironmentVariable, keyFDEnvironmentVariable string) (*tls.Certificate, error) {
+	certFD, certConfigured := os.LookupEnv(certFDEnvironmentVariable)
+	keyFD, keyConfigured := os.LookupEnv(keyFDEnvironmentVariable)
+	if certConfigured != keyConfigured {
+		return nil, fmt.Errorf("runtime %s TLS certificate and key descriptors must be configured together", label)
+	}
+	if !certConfigured && certFile == "" && keyFile == "" {
 		return nil, nil
 	}
-	certPEM, err := readRuntimeTLSDescriptor(certFD, "certificate")
-	if err != nil {
-		return nil, err
+	var certificate tls.Certificate
+	var err error
+	if certConfigured {
+		certPEM, readErr := readRuntimeTLSDescriptor(certFD, label+" certificate")
+		if readErr != nil {
+			return nil, readErr
+		}
+		keyPEM, readErr := readRuntimeTLSDescriptor(keyFD, label+" private key")
+		if readErr != nil {
+			return nil, readErr
+		}
+		certificate, err = tls.X509KeyPair(certPEM, keyPEM)
+	} else {
+		certificate, err = tls.LoadX509KeyPair(certFile, keyFile)
 	}
-	keyPEM, err := readRuntimeTLSDescriptor(keyFD, "private key")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load %s TLS certificate: %w", label, err)
 	}
-	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("load mounted TLS certificate: %w", err)
+	if certificate.Leaf == nil && len(certificate.Certificate) > 0 {
+		certificate.Leaf, err = x509.ParseCertificate(certificate.Certificate[0])
+		if err != nil {
+			return nil, fmt.Errorf("parse %s TLS certificate: %w", label, err)
+		}
 	}
 	return &certificate, nil
 }

@@ -127,6 +127,10 @@ type Dependencies struct {
 	APIToken          string
 	AccessDomain      string
 	AccessScheme      string
+	HTTPPort          int
+	HTTPSPort         int
+	AccessHTTPPort    int
+	AccessHTTPSPort   int
 	TrustedProxyCIDRs []string
 	Mode              string
 	Version           string
@@ -161,6 +165,10 @@ type server struct {
 	apiToken          string
 	accessDomain      string
 	accessScheme      string
+	httpPort          int
+	httpsPort         int
+	accessHTTPPort    int
+	accessHTTPSPort   int
 	mode              string
 	version           string
 	trustedProxyCIDRs []netip.Prefix
@@ -197,7 +205,7 @@ type apiError struct {
 }
 
 func New(deps Dependencies) http.Handler {
-	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, accessDomain: strings.ToLower(deps.AccessDomain), accessScheme: deps.AccessScheme, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials}
+	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, accessDomain: strings.ToLower(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials}
 	if s.emailCodeTTL == 0 {
 		s.emailCodeTTL = 10 * time.Minute
 	}
@@ -1415,7 +1423,17 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 	}
 	launchURL := "/access/web/" + token + "/"
 	if input.Mode == "web" && s.accessDomain != "" {
-		launchURL = webAccessLaunchURL(r, s.accessScheme, s.accessDomain, s.mode, token)
+		configuredPort := s.accessHTTPPort
+		panelPort := s.httpPort
+		if s.accessScheme == "https" {
+			configuredPort = s.accessHTTPSPort
+			panelPort = s.httpsPort
+		}
+		reusePanelPorts := configuredPort == 0
+		if reusePanelPorts {
+			configuredPort = panelPort
+		}
+		launchURL = webAccessLaunchURL(r, s.accessScheme, s.accessDomain, s.mode, token, configuredPort, reusePanelPorts)
 	}
 	if input.Mode == "ssh" {
 		launchURL = "/access/ssh/" + token
@@ -1423,15 +1441,31 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"sessionId": session.ID, "launchUrl": launchURL, "expiresAt": session.ExpiresAt})
 }
 
-func webAccessLaunchURL(r *http.Request, scheme, accessDomain, mode, token string) string {
+func webAccessLaunchURL(r *http.Request, scheme, accessDomain, mode, token string, configuredPort int, reusePanelPorts bool) string {
 	authority := token + "." + accessDomain
-	// Local wildcard domains run the production binary on a high loopback port.
-	// Preserve that port so *.localhost exercises exactly the same one-session,
-	// one-origin routing model as a deployed wildcard DNS domain.
-	if mode == "dev" || accessDomain == "localhost" || strings.HasSuffix(accessDomain, ".localhost") || strings.HasSuffix(accessDomain, ".127.0.0.1.nip.io") {
+	// Preserve an explicitly addressed port when the request protocol matches the
+	// configured access protocol. This is required when the panel and its wildcard
+	// Web sessions are exposed directly on a non-default HTTPS port.
+	requestSchemeMatches := (scheme == "https" && requestUsesHTTPS(r)) || (scheme == "http" && !requestUsesHTTPS(r))
+	if reusePanelPorts && requestSchemeMatches {
 		if _, port, err := net.SplitHostPort(r.Host); err == nil && port != "" {
 			authority = net.JoinHostPort(authority, port)
 		}
+		return scheme + "://" + authority + "/"
+	}
+	localAccess := mode == "dev" || accessDomain == "localhost" || strings.HasSuffix(accessDomain, ".localhost") || strings.HasSuffix(accessDomain, ".127.0.0.1.nip.io")
+	if reusePanelPorts && localAccess {
+		if _, port, err := net.SplitHostPort(r.Host); err == nil && port != "" {
+			authority = net.JoinHostPort(authority, port)
+			return scheme + "://" + authority + "/"
+		}
+	}
+	defaultPort := 80
+	if scheme == "https" {
+		defaultPort = 443
+	}
+	if configuredPort != 0 && configuredPort != defaultPort {
+		authority = net.JoinHostPort(authority, strconv.Itoa(configuredPort))
 	}
 	return scheme + "://" + authority + "/"
 }

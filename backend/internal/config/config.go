@@ -36,6 +36,10 @@ type Config struct {
 	SMTPTLSMode        string
 	TLSCertFile        string
 	TLSKeyFile         string
+	AccessTLSCertFile  string
+	AccessTLSKeyFile   string
+	AccessHTTPPort     int
+	AccessHTTPSPort    int
 	PanelDomain        string
 	AccessDomain       string
 	AccessScheme       string
@@ -94,6 +98,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	accessHTTPPort, err := parseOptionalPort(value("DMP_ACCESS_HTTP_PORT", "access_http_port", "0"), "access_http_port")
+	if err != nil {
+		return Config{}, err
+	}
+	accessHTTPSPort, err := parseOptionalPort(value("DMP_ACCESS_HTTPS_PORT", "access_https_port", "0"), "access_https_port")
+	if err != nil {
+		return Config{}, err
+	}
 	emailCodeTTL, err := time.ParseDuration(value("DMP_MFA_EMAIL_CODE_TTL", "mfa_email_code_ttl", "10m"))
 	if err != nil || emailCodeTTL < time.Minute || emailCodeTTL > 30*time.Minute {
 		return Config{}, fmt.Errorf("mfa_email_code_ttl must be between 1m and 30m")
@@ -119,6 +131,10 @@ func Load() (Config, error) {
 		SMTPTLSMode:        smtpTLSModeForPort(smtpPort),
 		TLSCertFile:        value("DMP_TLS_CERT_FILE", "tls_cert_file", ""),
 		TLSKeyFile:         value("DMP_TLS_KEY_FILE", "tls_key_file", ""),
+		AccessTLSCertFile:  value("DMP_ACCESS_TLS_CERT_FILE", "access_tls_cert_file", ""),
+		AccessTLSKeyFile:   value("DMP_ACCESS_TLS_KEY_FILE", "access_tls_key_file", ""),
+		AccessHTTPPort:     accessHTTPPort,
+		AccessHTTPSPort:    accessHTTPSPort,
 		PanelDomain:        strings.ToLower(strings.Trim(value("DMP_PANEL_DOMAIN", "panel_domain", ""), ".")),
 		AccessDomain:       strings.ToLower(strings.Trim(value("DMP_ACCESS_DOMAIN", "access_domain", ""), ".")),
 		AccessScheme:       strings.ToLower(value("DMP_ACCESS_SCHEME", "access_scheme", "https")),
@@ -180,8 +196,33 @@ func (cfg Config) validate() error {
 	if httpPort == httpsPort {
 		return fmt.Errorf("listen_addr and https_listen_addr must use different ports")
 	}
+	if (cfg.AccessHTTPPort == 0) != (cfg.AccessHTTPSPort == 0) {
+		return fmt.Errorf("access_http_port and access_https_port must both be zero for reuse or both be configured")
+	}
+	if cfg.AccessHTTPPort != 0 {
+		if cfg.AccessDomain == "" {
+			return fmt.Errorf("access_domain is required when independent access ports are configured")
+		}
+		if cfg.AccessHTTPPort == cfg.AccessHTTPSPort {
+			return fmt.Errorf("access_http_port and access_https_port must use different ports")
+		}
+		panelHTTPPort, _ := strconv.Atoi(httpPort)
+		panelHTTPSPort, _ := strconv.Atoi(httpsPort)
+		if cfg.AccessHTTPPort == panelHTTPPort || cfg.AccessHTTPPort == panelHTTPSPort || cfg.AccessHTTPSPort == panelHTTPPort || cfg.AccessHTTPSPort == panelHTTPSPort {
+			return fmt.Errorf("independent access ports cannot conflict with panel HTTP or HTTPS ports")
+		}
+	}
 	if (cfg.TLSCertFile == "") != (cfg.TLSKeyFile == "") {
 		return fmt.Errorf("tls_cert_file and tls_key_file must be configured together")
+	}
+	if (cfg.AccessTLSCertFile == "") != (cfg.AccessTLSKeyFile == "") {
+		return fmt.Errorf("access_tls_cert_file and access_tls_key_file must be configured together")
+	}
+	if cfg.AccessTLSCertFile != "" && cfg.TLSCertFile == "" {
+		return fmt.Errorf("panel TLS certificate must be configured before an access TLS certificate")
+	}
+	if cfg.AccessTLSCertFile != "" && cfg.AccessDomain == "" {
+		return fmt.Errorf("access_domain is required when an access TLS certificate is configured")
 	}
 	allowedMethods := map[string]bool{"totp": true, "email": true}
 	seen := map[string]bool{}
@@ -348,4 +389,11 @@ func parsePort(value, name string) (int, error) {
 		return 0, fmt.Errorf("%s must be between 1 and 65535", name)
 	}
 	return parsed, nil
+}
+
+func parseOptionalPort(value, name string) (int, error) {
+	if strings.TrimSpace(value) == "" || strings.TrimSpace(value) == "0" {
+		return 0, nil
+	}
+	return parsePort(value, name)
 }

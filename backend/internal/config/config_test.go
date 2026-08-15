@@ -127,6 +127,47 @@ func TestProductionAccessDomainRequiresHTTPS(t *testing.T) {
 	}
 }
 
+func TestAccessTLSCertificateRequiresCompleteConfiguration(t *testing.T) {
+	base := Config{
+		Mode: "dev", ListenAddress: "127.0.0.1:80", HTTPSListenAddress: "127.0.0.1:443",
+		DatabasePath: "test.db", MFAKeyFile: "mfa.key", MFAMethods: []string{"totp"},
+		EmailCodeTTL: 10 * time.Minute, SMTPPort: 587, AccessScheme: "https",
+		TLSCertFile: "panel.pem", TLSKeyFile: "panel.key", AccessDomain: "remote.example.test",
+	}
+	incomplete := base
+	incomplete.AccessTLSCertFile = "access.pem"
+	if err := incomplete.validate(); err == nil || !strings.Contains(err.Error(), "configured together") {
+		t.Fatalf("incomplete access TLS pair error = %v", err)
+	}
+	withoutPanel := base
+	withoutPanel.TLSCertFile, withoutPanel.TLSKeyFile = "", ""
+	withoutPanel.AccessTLSCertFile, withoutPanel.AccessTLSKeyFile = "access.pem", "access.key"
+	if err := withoutPanel.validate(); err == nil || !strings.Contains(err.Error(), "panel TLS certificate") {
+		t.Fatalf("access TLS without panel certificate error = %v", err)
+	}
+	withoutDomain := base
+	withoutDomain.AccessDomain = ""
+	withoutDomain.AccessTLSCertFile, withoutDomain.AccessTLSKeyFile = "access.pem", "access.key"
+	if err := withoutDomain.validate(); err == nil || !strings.Contains(err.Error(), "access_domain") {
+		t.Fatalf("access TLS without domain error = %v", err)
+	}
+	independent := base
+	independent.AccessHTTPPort, independent.AccessHTTPSPort = 8080, 8443
+	if err := independent.validate(); err != nil {
+		t.Fatalf("valid independent access ports rejected: %v", err)
+	}
+	incompletePorts := base
+	incompletePorts.AccessHTTPPort = 8080
+	if err := incompletePorts.validate(); err == nil || !strings.Contains(err.Error(), "both be zero") {
+		t.Fatalf("incomplete independent access ports error = %v", err)
+	}
+	conflictingPorts := base
+	conflictingPorts.AccessHTTPPort, conflictingPorts.AccessHTTPSPort = 80, 8443
+	if err := conflictingPorts.validate(); err == nil || !strings.Contains(err.Error(), "cannot conflict") {
+		t.Fatalf("conflicting independent access ports error = %v", err)
+	}
+}
+
 func TestProductionLocalWildcardDomainAllowsHTTPAcceptance(t *testing.T) {
 	t.Setenv("DMP_MODE", "pro")
 	t.Setenv("DMP_API_TOKEN", "api-token-0123456789abcdef0123456789")
@@ -206,7 +247,9 @@ smtp_from = Old <old@example.test>
 	updated, err := manager.Save(PanelSettings{
 		MFAEnabled: true, MFAMethods: []string{"email", "totp"}, EmailCodeTTL: "8m", MFAKeyFile: cfg.MFAKeyFile,
 		SMTPHost: "smtp.example.test", SMTPPort: 587, SMTPUsername: "notifier@example.test", SMTPPassword: "smtp-test-password",
-		SMTPFrom: "设备管理平台 <notifier@example.test>", HTTPPort: 18080, HTTPSPort: 18443, AccessDomain: "remote.example.test",
+		SMTPFrom: "设备管理平台 <notifier@example.test>", TLSCertFile: "/cert/panel.pem", TLSKeyFile: "/cert/panel.key",
+		AccessTLSCertFile: "/cert/access.pem", AccessTLSKeyFile: "/cert/access.key", HTTPPort: 18080, HTTPSPort: 18443,
+		ReusePanelPorts: false, AccessHTTPPort: 28080, AccessHTTPSPort: 28443, AccessDomain: "remote.example.test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -225,7 +268,7 @@ smtp_from = Old <old@example.test>
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reloaded.MFAEnabled || reloaded.SMTPHost != "smtp.example.test" || reloaded.SMTPPassword != "smtp-test-password" || reloaded.ListenAddress != "127.0.0.1:18080" || reloaded.HTTPSListenAddress != "0.0.0.0:18443" || reloaded.AccessDomain != "remote.example.test" || reloaded.AccessScheme != "https" {
+	if !reloaded.MFAEnabled || reloaded.SMTPHost != "smtp.example.test" || reloaded.SMTPPassword != "smtp-test-password" || reloaded.ListenAddress != "127.0.0.1:18080" || reloaded.HTTPSListenAddress != "0.0.0.0:18443" || reloaded.AccessDomain != "remote.example.test" || reloaded.AccessScheme != "https" || reloaded.AccessTLSCertFile != "/cert/access.pem" || reloaded.AccessTLSKeyFile != "/cert/access.key" || reloaded.AccessHTTPPort != 28080 || reloaded.AccessHTTPSPort != 28443 {
 		t.Fatalf("web override did not survive reload: %#v", reloaded)
 	}
 	if NewSettingsManager(reloaded).Current().RestartRequired {
@@ -312,6 +355,28 @@ func TestEnvironmentLockedMethodsUseSetEquality(t *testing.T) {
 	settings.MFAMethods = []string{"email", "totp"}
 	if _, err := NewSettingsManager(cfg).Save(settings); err != nil {
 		t.Fatalf("method order should not override an environment-controlled set: %v", err)
+	}
+}
+
+func TestEnvironmentControlledAccessPortsOverrideStaleWebSettings(t *testing.T) {
+	dir := t.TempDir()
+	overridePath := filepath.Join(dir, "settings.override.conf")
+	if err := os.WriteFile(overridePath, []byte("access_http_port = 0\naccess_https_port = 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DMP_CONFIG_FILE", filepath.Join(dir, "missing.conf"))
+	t.Setenv("DMP_SETTINGS_OVERRIDE_FILE", overridePath)
+	t.Setenv("DMP_DATA_DIR", dir)
+	t.Setenv("DMP_ACCESS_DOMAIN", "remote.example.test")
+	t.Setenv("DMP_ACCESS_HTTP_PORT", "28080")
+	t.Setenv("DMP_ACCESS_HTTPS_PORT", "28443")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := NewSettingsManager(cfg).Current()
+	if settings.RestartRequired || settings.ReusePanelPorts || settings.AccessHTTPPort != 28080 || settings.AccessHTTPSPort != 28443 {
+		t.Fatalf("environment-controlled ports were replaced by stale overrides: %#v", settings)
 	}
 }
 

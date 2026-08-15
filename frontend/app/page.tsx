@@ -5705,9 +5705,14 @@ function SettingsView({
                 <h2>访问端口、证书与域名</h2>
                 <p>分别配置 HTTP、HTTPS、面板地址和 Web 会话泛域名</p>
               </div>
-              <Tag tone={draft.tlsConfigured ? "green" : "gray"}>
-                {draft.tlsConfigured ? "已配置证书" : "未配置证书"}
-              </Tag>
+              <div className="settings-status-tags">
+                <Tag tone={draft.tlsConfigured ? "green" : "gray"}>
+                  {draft.tlsConfigured ? "面板证书已配置" : "面板证书未配置"}
+                </Tag>
+                <Tag tone={draft.accessTlsConfigured ? "green" : "gray"}>
+                  {draft.accessTlsConfigured ? "反代证书已配置" : "反代证书未配置"}
+                </Tag>
+              </div>
             </div>
             <div className="settings-field-grid">
               <label>
@@ -5738,30 +5743,13 @@ function SettingsView({
                 />
                 <small>默认 443，配置证书后启用</small>
               </label>
-              <label>
-                证书文件路径
-                <input
-                  disabled={locked("tlsCertFile")}
-                  value={draft.tlsCertFile}
-                  onChange={(event) =>
-                    patch({ tlsCertFile: event.target.value })
-                  }
-                  placeholder="/run/secrets/platform_tls_cert"
-                />
-              </label>
-              <label>
-                私钥文件路径
-                <input
-                  disabled={locked("tlsKeyFile")}
-                  value={draft.tlsKeyFile}
-                  onChange={(event) =>
-                    patch({ tlsKeyFile: event.target.value })
-                  }
-                  placeholder="/run/secrets/platform_tls_key"
-                />
-                <small>只保存文件路径，不读取或显示私钥</small>
-              </label>
-              <label>
+              <div className="settings-certificate-section full">
+                <div>
+                  <strong>面板访问</strong>
+                  <small>用于面板地址的 HTTPS 证书</small>
+                </div>
+              </div>
+              <label className="full">
                 面板地址
                 <input
                   disabled={locked("panelDomain")}
@@ -5778,6 +5766,35 @@ function SettingsView({
                 <small>仅填写域名，不填协议和路径</small>
               </label>
               <label>
+                面板证书文件路径
+                <input
+                  disabled={locked("tlsCertFile")}
+                  value={draft.tlsCertFile}
+                  onChange={(event) =>
+                    patch({ tlsCertFile: event.target.value })
+                  }
+                  placeholder="/run/secrets/platform_tls_cert"
+                />
+              </label>
+              <label>
+                面板私钥文件路径
+                <input
+                  disabled={locked("tlsKeyFile")}
+                  value={draft.tlsKeyFile}
+                  onChange={(event) =>
+                    patch({ tlsKeyFile: event.target.value })
+                  }
+                  placeholder="/run/secrets/platform_tls_key"
+                />
+                <small>只保存容器内文件路径，不显示私钥</small>
+              </label>
+              <div className="settings-certificate-section full">
+                <div>
+                  <strong>Web 反代访问</strong>
+                  <small>用于每个 Web 会话的独立子域名</small>
+                </div>
+              </div>
+              <label className="full">
                 反代地址
                 <div className="domain-prefix-input">
                   <span>*.</span>
@@ -5793,6 +5810,85 @@ function SettingsView({
                   />
                 </div>
                 <small>每个 Web 访问会话使用独立子域名</small>
+              </label>
+              <label className="full">
+                反代端口
+                <select
+                  disabled={locked("reusePanelPorts")}
+                  value={draft.reusePanelPorts ? "reuse" : "independent"}
+                  onChange={(event) => {
+                    const reuse = event.target.value === "reuse";
+                    patch({
+                      reusePanelPorts: reuse,
+                      accessHttpPort: reuse
+                        ? 0
+                        : draft.accessHttpPort || 8080,
+                      accessHttpsPort: reuse
+                        ? 0
+                        : draft.accessHttpsPort || 8443,
+                    });
+                  }}
+                >
+                  <option value="reuse">复用面板 HTTP / HTTPS 端口</option>
+                  <option value="independent">独立设置反代端口</option>
+                </select>
+                <small>
+                  {draft.reusePanelPorts
+                    ? `当前复用 ${draft.httpPort} / ${draft.httpsPort}`
+                    : "平台将额外监听下方两个端口"}
+                </small>
+              </label>
+              {!draft.reusePanelPorts && (
+                <>
+                  <label>
+                    反代 HTTP 端口
+                    <input
+                      disabled={locked("accessHttpPort")}
+                      type="number"
+                      min="1"
+                      max="65535"
+                      value={draft.accessHttpPort}
+                      onChange={(event) =>
+                        patch({ accessHttpPort: Number(event.target.value) })
+                      }
+                    />
+                    <small>不能与面板或反代 HTTPS 端口重复</small>
+                  </label>
+                  <label>
+                    反代 HTTPS 端口
+                    <input
+                      disabled={locked("accessHttpsPort")}
+                      type="number"
+                      min="1"
+                      max="65535"
+                      value={draft.accessHttpsPort}
+                      onChange={(event) =>
+                        patch({ accessHttpsPort: Number(event.target.value) })
+                      }
+                    />
+                    <small>会用于生成 Web 会话 HTTPS 地址</small>
+                  </label>
+                </>
+              )}
+              <label>
+                反代证书文件路径
+                <input
+                  disabled={locked("accessTlsCertFile")}
+                  value={draft.accessTlsCertFile}
+                  onChange={(event) => patch({ accessTlsCertFile: event.target.value })}
+                  placeholder="/run/secrets/platform_access_tls_cert"
+                />
+                <small>应包含反代泛域名，例如 *.admin.example.com</small>
+              </label>
+              <label>
+                反代私钥文件路径
+                <input
+                  disabled={locked("accessTlsKeyFile")}
+                  value={draft.accessTlsKeyFile}
+                  onChange={(event) => patch({ accessTlsKeyFile: event.target.value })}
+                  placeholder="/run/secrets/platform_access_tls_key"
+                />
+                <small>留空时由面板证书兜底；域名不同时必须单独配置</small>
               </label>
             </div>
           </section>

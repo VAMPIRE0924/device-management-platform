@@ -1,13 +1,13 @@
 # Docker 正式部署
 
-本文适用于 `vampirerune/device-management-platform:v1.0.5`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
+本文适用于 `vampirerune/device-management-platform:v1.0.6`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
 
 ## 最简 Compose
 
 ```yaml
 services:
   platform:
-    image: vampirerune/device-management-platform:v1.0.5
+    image: vampirerune/device-management-platform:v1.0.6
     container_name: device-management-platform
     restart: unless-stopped
     volumes:
@@ -42,11 +42,14 @@ docker compose logs --tail=100 platform
 
 在“系统设置”中分开配置：
 
-- 证书文件路径与私钥文件路径；
-- 面板地址，例如 `admin.example.com`；
-- 反代地址，例如 `*.admin.example.com`，界面中的 `*.` 为固定前缀。
+- 面板地址、面板证书和私钥路径；
+- 反代地址，例如 `*.admin.example.com`，界面中的 `*.` 为固定前缀；
+- 反代泛域名的证书和私钥路径。若面板证书已覆盖该泛域名，可留空复用；
+- 反代端口默认复用面板 HTTP/HTTPS 端口，也可成对配置独立端口。
 
-证书文件需要通过额外 volume 只读挂载到容器内，然后在系统设置中填写容器内路径。平台可直接使用群晖 root-only 证书挂载，无需放宽宿主机权限。保存端口或证书设置后重启容器：
+证书文件需要通过 volume 只读挂载到容器内，再在系统设置中填容器内路径。两套证书可位于同一挂载目录的不同子目录，也可分别挂载。平台可直接读取群晖 root-only 挂载，不修改、复制或放宽宿主机证书权限。
+
+复用同一 HTTPS 端口时，平台根据 TLS SNI 为面板域名和反代子域名选择对应证书。保存端口或证书设置后重启容器：
 
 ```bash
 docker compose restart platform
@@ -74,7 +77,7 @@ docker compose up -d
 docker compose ps
 ```
 
-`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.5` 这类完整版本号。
+`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.6` 这类完整版本号。
 
 ## 常见问题
 

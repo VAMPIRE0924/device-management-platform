@@ -11,7 +11,7 @@
 - 平台控制 SOCKS 通道启停，远程访问时自动启动；NPS 负责空闲关闭。
 - 按项目配置多个扫描网段与端口，发现 HTTP、HTTPS、SSH 等内网服务。
 - 每台设备可配置多个 Web 服务，HTTPS 参数按服务独立保存。
-- 基于独立泛域名代理 Web 服务，支持 Cookie、重定向、动态接口和 WebSocket。
+- 基于独立泛域名代理 Web 服务，支持独立反代证书、可选独立端口、Cookie、重定向、动态接口和 WebSocket。
 - WebSSH 支持保存的密码或本地密钥，也支持单次临时凭据。
 - 提供用户权限、访问策略、运行监控、操作审计、MFA、备份和恢复。
 
@@ -40,7 +40,7 @@ Compose 不设置宿主机 `ports` 映射。容器默认监听 HTTP 80；在系�
 ## 镜像
 
 ```bash
-docker pull vampirerune/device-management-platform:v1.0.5
+docker pull vampirerune/device-management-platform:v1.0.6
 ```
 
 已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，不要长期依赖 `latest`。
@@ -57,10 +57,10 @@ docker pull vampirerune/device-management-platform:v1.0.5
 
 ```bash
 docker build \
-  --build-arg VERSION=v1.0.5 \
+  --build-arg VERSION=v1.0.6 \
   --build-arg VCS_REF="$(git rev-parse HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -t device-management-platform:v1.0.5 .
+  -t device-management-platform:v1.0.6 .
 ```
 
 仓库未声明开源许可证。未经许可，不授予复制、修改或再分发权利。

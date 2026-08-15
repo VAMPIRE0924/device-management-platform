@@ -12,6 +12,8 @@ certificate_volume="platform-certificate-data-$run_id"
 primary_port="${DMP_CONTAINER_ACCEPTANCE_PORT:-18090}"
 https_port="${DMP_CONTAINER_HTTPS_PORT:-18490}"
 restored_port="${DMP_CONTAINER_RESTORE_PORT:-18091}"
+access_http_port="${DMP_CONTAINER_ACCESS_HTTP_PORT:-18092}"
+access_https_port="${DMP_CONTAINER_ACCESS_HTTPS_PORT:-18492}"
 artifact_dir=$(mktemp -d /tmp/device-management-platform-container-acceptance.XXXXXX)
 
 cleanup() {
@@ -34,13 +36,17 @@ else
 fi
 docker volume create "$primary_volume" >/dev/null
 docker volume create "$certificate_volume" >/dev/null
-mkdir -p "$artifact_dir/certificate-source"
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=localhost' \
-  -keyout "$artifact_dir/certificate-source/privkey.pem" -out "$artifact_dir/certificate-source/fullchain.pem" >/dev/null 2>&1
+mkdir -p "$artifact_dir/certificate-source/panel" "$artifact_dir/certificate-source/access"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=panel.container.example.test' \
+  -addext 'subjectAltName=DNS:panel.container.example.test' \
+  -keyout "$artifact_dir/certificate-source/panel/privkey.pem" -out "$artifact_dir/certificate-source/panel/fullchain.pem" >/dev/null 2>&1
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=*.container-remote.example.test' \
+  -addext 'subjectAltName=DNS:*.container-remote.example.test' \
+  -keyout "$artifact_dir/certificate-source/access/privkey.pem" -out "$artifact_dir/certificate-source/access/fullchain.pem" >/dev/null 2>&1
 docker run --rm --entrypoint sh -v "$certificate_volume:/cert" -v "$artifact_dir/certificate-source:/source:ro" "$image" -c \
-  'cp /source/fullchain.pem /cert/fullchain.pem && cp /source/privkey.pem /cert/privkey.pem && chown root:root /cert /cert/*.pem && chmod 0700 /cert && chmod 0600 /cert/*.pem'
+  'mkdir -p /cert/panel /cert/access && cp /source/panel/*.pem /cert/panel/ && cp /source/access/*.pem /cert/access/ && chown -R root:root /cert && chmod 0700 /cert /cert/panel /cert/access && chmod 0600 /cert/panel/*.pem /cert/access/*.pem'
 certificate_digest=$(docker run --rm --entrypoint sh -v "$certificate_volume:/cert:ro" "$image" -c \
-  'sha256sum /cert/fullchain.pem /cert/privkey.pem')
+  'sha256sum /cert/panel/fullchain.pem /cert/panel/privkey.pem /cert/access/fullchain.pem /cert/access/privkey.pem')
 docker run -d --name "$primary" --restart no --security-opt no-new-privileges:true \
   -p "127.0.0.1:$primary_port:80" -v "$primary_volume:/data" "$image" >/dev/null
 
@@ -79,7 +85,7 @@ curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/meta" | gre
 
 settings_response="$artifact_dir/settings.json"
 curl -fsS -X PUT -H "Authorization: Bearer $api_token" -H 'Content-Type: application/json' \
-  -d '{"mfaEnabled":false,"mfaMethods":["totp"],"emailCodeTTL":"10m","mfaKeyFile":"/data/mfa.key","smtpHost":"","smtpPort":587,"smtpUsername":"","smtpPassword":"container-settings-test-secret","smtpFrom":"","tlsCertFile":"/cert/fullchain.pem","tlsKeyFile":"/cert/privkey.pem","httpPort":80,"httpsPort":443,"accessDomain":"container-remote.example.test"}' \
+  -d '{"mfaEnabled":false,"mfaMethods":["totp"],"emailCodeTTL":"10m","mfaKeyFile":"/data/mfa.key","smtpHost":"","smtpPort":587,"smtpUsername":"","smtpPassword":"container-settings-test-secret","smtpFrom":"","tlsCertFile":"/cert/panel/fullchain.pem","tlsKeyFile":"/cert/panel/privkey.pem","accessTlsCertFile":"/cert/access/fullchain.pem","accessTlsKeyFile":"/cert/access/privkey.pem","httpPort":80,"httpsPort":443,"reusePanelPorts":true,"accessHttpPort":0,"accessHttpsPort":0,"panelDomain":"panel.container.example.test","accessDomain":"container-remote.example.test"}' \
   "$primary_url/api/v1/settings/security" -o "$settings_response"
 grep -q '"restartRequired":true' "$settings_response"
 if grep -q 'container-settings-test-secret' "$settings_response"; then
@@ -96,21 +102,37 @@ docker stop -t 15 "$primary" >/dev/null
 docker rm "$primary" >/dev/null
 docker run -d --name "$primary" --restart no --security-opt no-new-privileges:true \
   -p "127.0.0.1:$primary_port:80" -p "127.0.0.1:$https_port:443" \
+  -p "127.0.0.1:$access_http_port:28080" -p "127.0.0.1:$access_https_port:28443" \
+  -e DMP_ACCESS_HTTP_PORT=28080 -e DMP_ACCESS_HTTPS_PORT=28443 \
   -v "$primary_volume:/data" -v "$certificate_volume:/cert:ro" "$image" >/dev/null
 wait_ready "$primary_url"
-curl -kfsS "https://127.0.0.1:$https_port/health/ready" | grep -q '"status":"ready"'
+curl -fsS --resolve "panel.container.example.test:$https_port:127.0.0.1" \
+  --cacert "$artifact_dir/certificate-source/panel/fullchain.pem" \
+  "https://panel.container.example.test:$https_port/health/ready" | grep -q '"status":"ready"'
+curl -sS --resolve "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.container-remote.example.test:$https_port:127.0.0.1" \
+  --cacert "$artifact_dir/certificate-source/access/fullchain.pem" \
+  "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.container-remote.example.test:$https_port/" -o /dev/null
+curl -sS -H 'Host: cccccccccccccccccccccccccccccccccccccccccccccccc.container-remote.example.test' \
+  "http://127.0.0.1:$access_http_port/" -o /dev/null
+test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: panel.container.example.test' "http://127.0.0.1:$access_http_port/")" = "404"
+curl -sS --resolve "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.container-remote.example.test:$access_https_port:127.0.0.1" \
+  --cacert "$artifact_dir/certificate-source/access/fullchain.pem" \
+  "https://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.container-remote.example.test:$access_https_port/" -o /dev/null
 test "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/cert"}}{{.RW}}{{end}}{{end}}' "$primary")" = "false"
-docker exec "$primary" sh -c 'su-exec platform test ! -r /cert/fullchain.pem && test ! -e /data/runtime-tls && test ! -e /run/device-management-platform/tls'
-test "$(docker run --rm --entrypoint sh -v "$certificate_volume:/cert:ro" "$image" -c 'sha256sum /cert/fullchain.pem /cert/privkey.pem')" = "$certificate_digest"
+docker exec "$primary" sh -c 'su-exec platform test ! -r /cert/panel/fullchain.pem && su-exec platform test ! -r /cert/access/fullchain.pem && test ! -e /data/runtime-tls && test ! -e /run/device-management-platform/tls'
+test "$(docker run --rm --entrypoint sh -v "$certificate_volume:/cert:ro" "$image" -c 'sha256sum /cert/panel/fullchain.pem /cert/panel/privkey.pem /cert/access/fullchain.pem /cert/access/privkey.pem')" = "$certificate_digest"
 test "$(docker exec "$primary" sh -c 'cat /data/api.token')" = "$api_token"
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/nodes" | grep -q '容器持久化验收节点'
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessDomain":"container-remote.example.test"'
+curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessTlsConfigured":true'
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"restartRequired":false'
+curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessHttpPort":28080'
+curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessHttpsPort":28443'
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"smtpPasswordConfigured":true'
 https_headers="$artifact_dir/https-login-headers.txt"
-curl -kfsS -D "$https_headers" -X POST -H 'Content-Type: application/json' \
+curl -fsS --resolve "panel.container.example.test:$https_port:127.0.0.1" --cacert "$artifact_dir/certificate-source/panel/fullchain.pem" -D "$https_headers" -X POST -H 'Content-Type: application/json' \
   -d '{"username":"container-admin","password":"container-admin-password"}' \
-  "https://127.0.0.1:$https_port/api/v1/auth/login" >/dev/null
+  "https://panel.container.example.test:$https_port/api/v1/auth/login" >/dev/null
 test "$(grep -ic '^Set-Cookie:.*; Secure' "$https_headers")" = "2"
 
 curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/data/backup" -o "$artifact_dir/backup.db"

@@ -269,7 +269,7 @@ func TestSystemAdminCanPersistSecuritySettingsWithoutSecretDisclosure(t *testing
 	response := request(t, handler, http.MethodPut, "/api/v1/settings/security", map[string]any{
 		"mfaEnabled": true, "mfaMethods": []string{"totp", "email"}, "emailCodeTTL": "10m", "mfaKeyFile": cfg.MFAKeyFile,
 		"smtpHost": "smtp.example.test", "smtpPort": 587, "smtpUsername": "notifier@example.test", "smtpPassword": "smtp-api-test-secret",
-		"smtpFrom": "设备管理平台 <notifier@example.test>", "tlsCertFile": "", "tlsKeyFile": "", "httpPort": 80, "httpsPort": 443, "accessDomain": "remote.example.test",
+		"smtpFrom": "设备管理平台 <notifier@example.test>", "tlsCertFile": "", "tlsKeyFile": "", "accessTlsCertFile": "", "accessTlsKeyFile": "", "httpPort": 80, "httpsPort": 443, "reusePanelPorts": true, "accessHttpPort": 0, "accessHttpsPort": 0, "accessDomain": "remote.example.test",
 	}, true)
 	if response.Code != http.StatusOK {
 		t.Fatalf("save settings = %d: %s", response.Code, response.Body.String())
@@ -401,28 +401,47 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 
 func TestDevelopmentAccessDomainLaunchPreservesLocalPort(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:3000/api/v1/access-sessions", nil)
-	launchURL := webAccessLaunchURL(request, "http", "localhost", "dev", strings.Repeat("a", 48))
+	launchURL := webAccessLaunchURL(request, "http", "localhost", "dev", strings.Repeat("a", 48), 3000, true)
 	want := "http://" + strings.Repeat("a", 48) + ".localhost:3000/"
 	if launchURL != want {
 		t.Fatalf("launch URL = %q, want %q", launchURL, want)
 	}
 
-	productionURL := webAccessLaunchURL(request, "https", "remote.example.test", "pro", strings.Repeat("b", 48))
+	productionURL := webAccessLaunchURL(request, "https", "remote.example.test", "pro", strings.Repeat("b", 48), 443, true)
 	productionWant := "https://" + strings.Repeat("b", 48) + ".remote.example.test/"
 	if productionURL != productionWant {
 		t.Fatalf("production launch URL = %q, want %q", productionURL, productionWant)
 	}
 
-	localProductionURL := webAccessLaunchURL(request, "http", "admin.platform.localhost", "pro", strings.Repeat("c", 48))
+	customHTTPSRequest := httptest.NewRequest(http.MethodPost, "https://console.example.test:4043/api/v1/access-sessions", nil)
+	customHTTPSURL := webAccessLaunchURL(customHTTPSRequest, "https", "console.example.test", "pro", strings.Repeat("e", 48), 4043, true)
+	customHTTPSWant := "https://" + strings.Repeat("e", 48) + ".console.example.test:4043/"
+	if customHTTPSURL != customHTTPSWant {
+		t.Fatalf("custom HTTPS launch URL = %q, want %q", customHTTPSURL, customHTTPSWant)
+	}
+	proxiedHTTPSRequest := httptest.NewRequest(http.MethodPost, "https://console.example.test/api/v1/access-sessions", nil)
+	proxiedHTTPSURL := webAccessLaunchURL(proxiedHTTPSRequest, "https", "console.example.test", "pro", strings.Repeat("a", 48), 4043, true)
+	proxiedHTTPSWant := "https://" + strings.Repeat("a", 48) + ".console.example.test/"
+	if proxiedHTTPSURL != proxiedHTTPSWant {
+		t.Fatalf("default external HTTPS launch URL = %q, want %q", proxiedHTTPSURL, proxiedHTTPSWant)
+	}
+
+	localProductionURL := webAccessLaunchURL(request, "http", "admin.platform.localhost", "pro", strings.Repeat("c", 48), 3000, true)
 	localProductionWant := "http://" + strings.Repeat("c", 48) + ".admin.platform.localhost:3000/"
 	if localProductionURL != localProductionWant {
 		t.Fatalf("local production launch URL = %q, want %q", localProductionURL, localProductionWant)
 	}
 
-	localDNSURL := webAccessLaunchURL(request, "http", "admin.platform.127.0.0.1.nip.io", "pro", strings.Repeat("d", 48))
+	localDNSURL := webAccessLaunchURL(request, "http", "admin.platform.127.0.0.1.nip.io", "pro", strings.Repeat("d", 48), 3000, true)
 	localDNSWant := "http://" + strings.Repeat("d", 48) + ".admin.platform.127.0.0.1.nip.io:3000/"
 	if localDNSURL != localDNSWant {
 		t.Fatalf("local wildcard DNS launch URL = %q, want %q", localDNSURL, localDNSWant)
+	}
+
+	independentURL := webAccessLaunchURL(customHTTPSRequest, "https", "console.example.test", "pro", strings.Repeat("f", 48), 5443, false)
+	independentWant := "https://" + strings.Repeat("f", 48) + ".console.example.test:5443/"
+	if independentURL != independentWant {
+		t.Fatalf("independent access port URL = %q, want %q", independentURL, independentWant)
 	}
 }
 

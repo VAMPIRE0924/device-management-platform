@@ -30,6 +30,12 @@ type PanelSettings struct {
 	TLSCertFile            string   `json:"tlsCertFile"`
 	TLSKeyFile             string   `json:"tlsKeyFile"`
 	TLSConfigured          bool     `json:"tlsConfigured"`
+	AccessTLSCertFile      string   `json:"accessTlsCertFile"`
+	AccessTLSKeyFile       string   `json:"accessTlsKeyFile"`
+	AccessTLSConfigured    bool     `json:"accessTlsConfigured"`
+	ReusePanelPorts        bool     `json:"reusePanelPorts"`
+	AccessHTTPPort         int      `json:"accessHttpPort"`
+	AccessHTTPSPort        int      `json:"accessHttpsPort"`
 	HTTPPort               int      `json:"httpPort"`
 	HTTPSPort              int      `json:"httpsPort"`
 	PanelDomain            string   `json:"panelDomain"`
@@ -77,6 +83,8 @@ func (m *SettingsManager) Save(input PanelSettings) (PanelSettings, error) {
 	input.SMTPFrom = strings.TrimSpace(input.SMTPFrom)
 	input.TLSCertFile = strings.TrimSpace(input.TLSCertFile)
 	input.TLSKeyFile = strings.TrimSpace(input.TLSKeyFile)
+	input.AccessTLSCertFile = strings.TrimSpace(input.AccessTLSCertFile)
+	input.AccessTLSKeyFile = strings.TrimSpace(input.AccessTLSKeyFile)
 	input.PanelDomain = strings.ToLower(strings.Trim(strings.TrimSpace(input.PanelDomain), "."))
 	input.AccessDomain = strings.ToLower(strings.Trim(strings.TrimSpace(input.AccessDomain), "."))
 	if input.MFAKeyFile != "" && strings.TrimSpace(input.MFAKeyFile) != m.active.MFAKeyFile {
@@ -85,7 +93,8 @@ func (m *SettingsManager) Save(input PanelSettings) (PanelSettings, error) {
 	for name, value := range map[string]string{
 		"emailCodeTTL": input.EmailCodeTTL, "smtpHost": input.SMTPHost, "smtpUsername": input.SMTPUsername,
 		"smtpFrom": input.SMTPFrom, "tlsCertFile": input.TLSCertFile,
-		"tlsKeyFile": input.TLSKeyFile, "panelDomain": input.PanelDomain, "accessDomain": input.AccessDomain,
+		"tlsKeyFile": input.TLSKeyFile, "accessTlsCertFile": input.AccessTLSCertFile, "accessTlsKeyFile": input.AccessTLSKeyFile,
+		"panelDomain": input.PanelDomain, "accessDomain": input.AccessDomain,
 	} {
 		if strings.ContainsAny(value, "\r\n") {
 			return PanelSettings{}, fmt.Errorf("%s cannot contain line breaks", name)
@@ -110,6 +119,15 @@ func (m *SettingsManager) Save(input PanelSettings) (PanelSettings, error) {
 	candidate.SMTPTLSMode = smtpTLSModeForPort(input.SMTPPort)
 	candidate.TLSCertFile = input.TLSCertFile
 	candidate.TLSKeyFile = input.TLSKeyFile
+	candidate.AccessTLSCertFile = input.AccessTLSCertFile
+	candidate.AccessTLSKeyFile = input.AccessTLSKeyFile
+	if input.ReusePanelPorts || (input.AccessHTTPPort == 0 && input.AccessHTTPSPort == 0) {
+		candidate.AccessHTTPPort = 0
+		candidate.AccessHTTPSPort = 0
+	} else {
+		candidate.AccessHTTPPort = input.AccessHTTPPort
+		candidate.AccessHTTPSPort = input.AccessHTTPSPort
+	}
 	if input.HTTPPort < 1 || input.HTTPPort > 65535 || input.HTTPSPort < 1 || input.HTTPSPort > 65535 {
 		return PanelSettings{}, fmt.Errorf("HTTP and HTTPS ports must be between 1 and 65535")
 	}
@@ -182,6 +200,72 @@ func (m *SettingsManager) desiredConfig() Config {
 	if values, err := readConfigFile(m.active.OverrideFile); err == nil && len(values) > 0 {
 		desired = applyEditableValues(desired, values)
 	}
+	return preserveEnvironmentControlledValues(m.active, desired)
+}
+
+// The override file may contain values written before a deployment started
+// controlling the same setting through an environment variable. Keep the
+// running environment authoritative when presenting or saving pending settings;
+// otherwise the UI reports a false restart requirement and can rewrite stale
+// values back into the override file.
+func preserveEnvironmentControlledValues(active, desired Config) Config {
+	if fieldLocked("mfaEnabled") {
+		desired.MFAEnabled = active.MFAEnabled
+	}
+	if fieldLocked("mfaMethods") {
+		desired.MFAMethods = append([]string{}, active.MFAMethods...)
+	}
+	if fieldLocked("emailCodeTTL") {
+		desired.EmailCodeTTL = active.EmailCodeTTL
+	}
+	if fieldLocked("smtpHost") {
+		desired.SMTPHost = active.SMTPHost
+	}
+	if fieldLocked("smtpPort") {
+		desired.SMTPPort = active.SMTPPort
+		desired.SMTPTLSMode = active.SMTPTLSMode
+	}
+	if fieldLocked("smtpUsername") {
+		desired.SMTPUsername = active.SMTPUsername
+	}
+	if fieldLocked("smtpPassword") {
+		desired.SMTPPassword = active.SMTPPassword
+	}
+	if fieldLocked("smtpFrom") {
+		desired.SMTPFrom = active.SMTPFrom
+	}
+	if fieldLocked("tlsCertFile") {
+		desired.TLSCertFile = active.TLSCertFile
+	}
+	if fieldLocked("tlsKeyFile") {
+		desired.TLSKeyFile = active.TLSKeyFile
+	}
+	if fieldLocked("accessTlsCertFile") {
+		desired.AccessTLSCertFile = active.AccessTLSCertFile
+	}
+	if fieldLocked("accessTlsKeyFile") {
+		desired.AccessTLSKeyFile = active.AccessTLSKeyFile
+	}
+	if fieldLocked("reusePanelPorts") || fieldLocked("accessHttpPort") || fieldLocked("accessHttpsPort") {
+		desired.AccessHTTPPort = active.AccessHTTPPort
+		desired.AccessHTTPSPort = active.AccessHTTPSPort
+	}
+	if fieldLocked("httpPort") {
+		desired.ListenAddress = active.ListenAddress
+	}
+	if fieldLocked("httpsPort") {
+		desired.HTTPSListenAddress = active.HTTPSListenAddress
+	}
+	if fieldLocked("panelDomain") {
+		desired.PanelDomain = active.PanelDomain
+	}
+	if fieldLocked("accessDomain") {
+		desired.AccessDomain = active.AccessDomain
+		desired.AccessScheme = active.AccessScheme
+	}
+	if strings.TrimSpace(os.Getenv("DMP_ACCESS_SCHEME")) != "" {
+		desired.AccessScheme = active.AccessScheme
+	}
 	return desired
 }
 
@@ -190,7 +274,10 @@ func panelSettingsFromConfig(cfg Config) PanelSettings {
 		MFAEnabled: cfg.MFAEnabled, MFAMethods: append([]string{}, cfg.MFAMethods...), EmailCodeTTL: formatDurationMinutes(cfg.EmailCodeTTL),
 		MFAKeyFile: cfg.MFAKeyFile, SMTPHost: cfg.SMTPHost, SMTPPort: cfg.SMTPPort, SMTPUsername: cfg.SMTPUsername,
 		SMTPPasswordConfigured: cfg.SMTPPassword != "", SMTPConfigured: cfg.SMTPHost != "" && cfg.SMTPFrom != "", SMTPFrom: cfg.SMTPFrom,
-		TLSCertFile: cfg.TLSCertFile, TLSKeyFile: cfg.TLSKeyFile, TLSConfigured: cfg.TLSCertFile != "" && cfg.TLSKeyFile != "", HTTPPort: listenPort(cfg.ListenAddress), HTTPSPort: listenPort(cfg.HTTPSListenAddress), PanelDomain: cfg.PanelDomain, AccessDomain: cfg.AccessDomain,
+		TLSCertFile: cfg.TLSCertFile, TLSKeyFile: cfg.TLSKeyFile, TLSConfigured: cfg.TLSCertFile != "" && cfg.TLSKeyFile != "",
+		AccessTLSCertFile: cfg.AccessTLSCertFile, AccessTLSKeyFile: cfg.AccessTLSKeyFile, AccessTLSConfigured: cfg.AccessTLSCertFile != "" && cfg.AccessTLSKeyFile != "",
+		ReusePanelPorts: cfg.AccessHTTPPort == 0 && cfg.AccessHTTPSPort == 0, AccessHTTPPort: cfg.AccessHTTPPort, AccessHTTPSPort: cfg.AccessHTTPSPort,
+		HTTPPort: listenPort(cfg.ListenAddress), HTTPSPort: listenPort(cfg.HTTPSListenAddress), PanelDomain: cfg.PanelDomain, AccessDomain: cfg.AccessDomain,
 	}
 }
 
@@ -248,6 +335,18 @@ func applyEditableValues(cfg Config, values map[string]string) Config {
 	if value, ok := values["tls_key_file"]; ok {
 		cfg.TLSKeyFile = value
 	}
+	if value, ok := values["access_tls_cert_file"]; ok {
+		cfg.AccessTLSCertFile = value
+	}
+	if value, ok := values["access_tls_key_file"]; ok {
+		cfg.AccessTLSKeyFile = value
+	}
+	if value, ok := values["access_http_port"]; ok {
+		cfg.AccessHTTPPort, _ = parseOptionalPort(value, "access_http_port")
+	}
+	if value, ok := values["access_https_port"]; ok {
+		cfg.AccessHTTPSPort, _ = parseOptionalPort(value, "access_https_port")
+	}
 	if value, ok := values["listen_addr"]; ok {
 		cfg.ListenAddress = value
 	}
@@ -284,6 +383,10 @@ func renderOverride(cfg Config, smtpPasswordFile string) string {
 		"smtp_from = " + cfg.SMTPFrom,
 		"tls_cert_file = " + cfg.TLSCertFile,
 		"tls_key_file = " + cfg.TLSKeyFile,
+		"access_tls_cert_file = " + cfg.AccessTLSCertFile,
+		"access_tls_key_file = " + cfg.AccessTLSKeyFile,
+		"access_http_port = " + strconv.Itoa(cfg.AccessHTTPPort),
+		"access_https_port = " + strconv.Itoa(cfg.AccessHTTPSPort),
 		"listen_addr = " + cfg.ListenAddress,
 		"https_listen_addr = " + cfg.HTTPSListenAddress,
 		"panel_domain = " + cfg.PanelDomain,
@@ -357,7 +460,9 @@ func sameEditableConfig(left, right Config) bool {
 	return left.MFAEnabled == right.MFAEnabled && methodsKey(left.MFAMethods) == methodsKey(right.MFAMethods) &&
 		left.EmailCodeTTL == right.EmailCodeTTL && left.SMTPHost == right.SMTPHost && left.SMTPPort == right.SMTPPort &&
 		left.SMTPUsername == right.SMTPUsername && left.SMTPPassword == right.SMTPPassword && left.SMTPFrom == right.SMTPFrom &&
-		left.TLSCertFile == right.TLSCertFile && left.TLSKeyFile == right.TLSKeyFile && left.ListenAddress == right.ListenAddress && left.HTTPSListenAddress == right.HTTPSListenAddress && left.PanelDomain == right.PanelDomain &&
+		left.TLSCertFile == right.TLSCertFile && left.TLSKeyFile == right.TLSKeyFile && left.AccessTLSCertFile == right.AccessTLSCertFile && left.AccessTLSKeyFile == right.AccessTLSKeyFile &&
+		left.AccessHTTPPort == right.AccessHTTPPort && left.AccessHTTPSPort == right.AccessHTTPSPort &&
+		left.ListenAddress == right.ListenAddress && left.HTTPSListenAddress == right.HTTPSListenAddress && left.PanelDomain == right.PanelDomain &&
 		left.AccessDomain == right.AccessDomain && left.AccessScheme == right.AccessScheme
 }
 
@@ -365,14 +470,24 @@ var editableEnvironment = map[string]string{
 	"mfaEnabled": "DMP_MFA_ENABLED", "mfaMethods": "DMP_MFA_METHODS", "emailCodeTTL": "DMP_MFA_EMAIL_CODE_TTL",
 	"smtpHost": "DMP_SMTP_HOST", "smtpPort": "DMP_SMTP_PORT", "smtpUsername": "DMP_SMTP_USERNAME",
 	"smtpPassword": "DMP_SMTP_PASSWORD", "smtpFrom": "DMP_SMTP_FROM",
-	"tlsCertFile": "DMP_TLS_CERT_FILE", "tlsKeyFile": "DMP_TLS_KEY_FILE", "panelDomain": "DMP_PANEL_DOMAIN", "accessDomain": "DMP_ACCESS_DOMAIN",
+	"tlsCertFile": "DMP_TLS_CERT_FILE", "tlsKeyFile": "DMP_TLS_KEY_FILE",
+	"accessTlsCertFile": "DMP_ACCESS_TLS_CERT_FILE", "accessTlsKeyFile": "DMP_ACCESS_TLS_KEY_FILE",
+	"reusePanelPorts": "DMP_ACCESS_HTTP_PORT,DMP_ACCESS_HTTPS_PORT", "accessHttpPort": "DMP_ACCESS_HTTP_PORT", "accessHttpsPort": "DMP_ACCESS_HTTPS_PORT",
+	"panelDomain": "DMP_PANEL_DOMAIN", "accessDomain": "DMP_ACCESS_DOMAIN",
 	"httpPort": "DMP_LISTEN_ADDR", "httpsPort": "DMP_HTTPS_LISTEN_ADDR",
 }
 
 func environmentLockedFields() []string {
 	locked := []string{}
 	for field, envName := range editableEnvironment {
-		if strings.TrimSpace(os.Getenv(envName)) != "" {
+		lockedByEnvironment := false
+		for _, candidate := range strings.Split(envName, ",") {
+			if strings.TrimSpace(os.Getenv(candidate)) != "" {
+				lockedByEnvironment = true
+				break
+			}
+		}
+		if lockedByEnvironment {
 			locked = append(locked, field)
 		}
 	}
@@ -403,6 +518,9 @@ func rejectLockedChanges(active, candidate Config) error {
 		"smtpPort": active.SMTPPort != candidate.SMTPPort, "smtpUsername": active.SMTPUsername != candidate.SMTPUsername,
 		"smtpFrom":    active.SMTPFrom != candidate.SMTPFrom,
 		"tlsCertFile": active.TLSCertFile != candidate.TLSCertFile, "tlsKeyFile": active.TLSKeyFile != candidate.TLSKeyFile,
+		"accessTlsCertFile": active.AccessTLSCertFile != candidate.AccessTLSCertFile, "accessTlsKeyFile": active.AccessTLSKeyFile != candidate.AccessTLSKeyFile,
+		"reusePanelPorts": (active.AccessHTTPPort == 0 && active.AccessHTTPSPort == 0) != (candidate.AccessHTTPPort == 0 && candidate.AccessHTTPSPort == 0),
+		"accessHttpPort":  active.AccessHTTPPort != candidate.AccessHTTPPort, "accessHttpsPort": active.AccessHTTPSPort != candidate.AccessHTTPSPort,
 		"httpPort": active.ListenAddress != candidate.ListenAddress, "httpsPort": active.HTTPSListenAddress != candidate.HTTPSListenAddress,
 		"panelDomain": active.PanelDomain != candidate.PanelDomain, "accessDomain": active.AccessDomain != candidate.AccessDomain,
 	}
