@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,63 @@ import (
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
+
+type touchSessionResolver struct {
+	fakeSessionResolver
+	mu      sync.Mutex
+	touches int
+	err     error
+}
+
+func (r *touchSessionResolver) TouchAccessSession(context.Context, string, time.Time, time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.touches++
+	return r.err
+}
+
+func TestWebSSHActivityControlsIdleLifetime(t *testing.T) {
+	resolver := &touchSessionResolver{}
+	gateway := NewSSHGateway(resolver, fakeRouteResolver{}, nil, 80*time.Millisecond)
+	gateway.touchTTL = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(t.Context())
+	activity := make(chan struct{}, 1)
+	go gateway.monitorSSHActivity(ctx, cancel, "active-session", activity)
+	time.Sleep(10 * time.Millisecond)
+	activity <- struct{}{}
+	select {
+	case <-ctx.Done():
+		t.Fatal("active WebSSH session closed before its idle timeout")
+	case <-time.After(40 * time.Millisecond):
+	}
+	resolver.mu.Lock()
+	touches := resolver.touches
+	resolver.mu.Unlock()
+	if touches != 1 {
+		t.Fatalf("persisted WebSSH activity = %d, want 1", touches)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("idle WebSSH session was not canceled")
+	}
+}
+
+func TestWebSSHActivityCannotReviveRevokedSession(t *testing.T) {
+	resolver := &touchSessionResolver{err: store.ErrNotFound}
+	gateway := NewSSHGateway(resolver, fakeRouteResolver{}, nil, time.Second)
+	gateway.touchTTL = time.Millisecond
+	ctx, cancel := context.WithCancel(t.Context())
+	activity := make(chan struct{}, 1)
+	go gateway.monitorSSHActivity(ctx, cancel, "revoked-session", activity)
+	time.Sleep(2 * time.Millisecond)
+	activity <- struct{}{}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("revoked WebSSH session remained active after touch rejection")
+	}
+}
 
 func TestWebSSHGatewayConnectsThroughSOCKS(t *testing.T) {
 	sshAddress, fingerprint := startTestSSHServer(t, "root", "secret")

@@ -127,15 +127,18 @@ wait_ready "$primary_url"
 curl -fsS --resolve "panel.container.example.test:$https_port:127.0.0.1" \
   --cacert "$artifact_dir/certificate-source/panel/fullchain.pem" \
   "https://panel.container.example.test:$https_port/health/ready" | grep -q '"status":"ready"'
-curl -sS --resolve "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.container-remote.example.test:$https_port:127.0.0.1" \
+access_route_one="device-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+access_route_two="device-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+access_route_three="device-cccccccccccccccccccccccccccccccc"
+test "$(curl -sS -o /dev/null -w '%{http_code}' --resolve "$access_route_one.container-remote.example.test:$https_port:127.0.0.1" \
   --cacert "$artifact_dir/certificate-source/access/fullchain.pem" \
-  "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.container-remote.example.test:$https_port/" -o /dev/null
-curl -sS -H 'Host: cccccccccccccccccccccccccccccccccccccccccccccccc.container-remote.example.test' \
-  "http://127.0.0.1:$access_http_port/" -o /dev/null
+  "https://$access_route_one.container-remote.example.test:$https_port/")" = "401"
+test "$(curl -sS -o /dev/null -w '%{http_code}' -H "Host: $access_route_three.container-remote.example.test" \
+  "http://127.0.0.1:$access_http_port/")" = "401"
 test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: panel.container.example.test' "http://127.0.0.1:$access_http_port/")" = "404"
-curl -sS --resolve "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.container-remote.example.test:$access_https_port:127.0.0.1" \
+test "$(curl -sS -o /dev/null -w '%{http_code}' --resolve "$access_route_two.container-remote.example.test:$access_https_port:127.0.0.1" \
   --cacert "$artifact_dir/certificate-source/access/fullchain.pem" \
-  "https://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.container-remote.example.test:$access_https_port/" -o /dev/null
+  "https://$access_route_two.container-remote.example.test:$access_https_port/")" = "401"
 test "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/cert"}}{{.RW}}{{end}}{{end}}' "$primary")" = "false"
 docker exec "$primary" sh -c 'su-exec platform test ! -r /cert/panel/fullchain.pem && su-exec platform test ! -r /cert/access/fullchain.pem && test ! -e /data/runtime-tls && test ! -e /run/device-management-platform/tls'
 test "$(docker run --rm --entrypoint sh -v "$certificate_volume:/cert:ro" "$image" -c 'sha256sum /cert/panel/fullchain.pem /cert/panel/privkey.pem /cert/access/fullchain.pem /cert/access/privkey.pem')" = "$certificate_digest"

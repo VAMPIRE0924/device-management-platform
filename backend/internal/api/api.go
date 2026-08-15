@@ -1467,14 +1467,15 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadGateway, "managed_tunnel_unavailable", "远程访问前无法启动托管通道", nil)
 		return
 	}
-	// A Web route is stable only inside the current authenticated login and for
-	// one endpoint. Reopening rotates the one-time grant and invalidates the old
-	// access authorization without creating bursts of unrelated subdomains.
-	// The route label remains routing information only; it never authorizes a
-	// request without the host-scoped grant cookie.
+	// A Web route is stable for one user and one endpoint, including across
+	// platform logins. Reopening rotates the one-time grant and invalidates the
+	// old access authorization without creating bursts of unrelated subdomains.
+	// Different users still receive different browser origins so device cookies
+	// cannot cross user boundaries. The route label remains routing information
+	// only; it never authorizes a request without the host-scoped grant cookie.
 	var token, tokenHash string
 	if input.Mode == "web" {
-		token, tokenHash = stableWebRouteToken(current.AuthSessionID, route.EndpointID)
+		token, tokenHash = stableWebRouteToken(current.UserID, route.EndpointID)
 	} else {
 		token, tokenHash, err = newAccessToken()
 		if err != nil {
@@ -1519,9 +1520,10 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 		launchURL += "?grant=" + url.QueryEscape(grant)
 	} else {
 		// The fragment never leaves the browser in the HTTP request, access log or
-		// Referer header. The Web gateway exchanges it with a same-origin POST and
-		// stores the result in an HttpOnly, host-scoped cookie.
-		launchURL += "#grant=" + grant
+		// Referer header. A dedicated authorization path always processes a newly
+		// issued grant, even when this stable route already has an older access
+		// cookie from a previous launch.
+		launchURL = strings.TrimSuffix(launchURL, "/") + "/.dmp/authorize#grant=" + grant
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"sessionId": session.ID, "launchUrl": launchURL, "expiresAt": session.ExpiresAt})
 }
@@ -1957,8 +1959,8 @@ func newAccessToken() (string, string, error) {
 	return token, hex.EncodeToString(digest[:]), nil
 }
 
-func stableWebRouteToken(authSessionID, endpointID string) (string, string) {
-	digest := sha256.Sum256([]byte("web-route\x00" + authSessionID + "\x00" + endpointID))
+func stableWebRouteToken(userID, endpointID string) (string, string) {
+	digest := sha256.Sum256([]byte("web-route\x00" + userID + "\x00" + endpointID))
 	token := "device-" + hex.EncodeToString(digest[:16])
 	tokenDigest := sha256.Sum256([]byte(token))
 	return token, hex.EncodeToString(tokenDigest[:])
@@ -3237,21 +3239,15 @@ func (s *server) accessDomainRouting(next http.Handler) http.Handler {
 }
 
 func validAccessRouteLabel(token string) bool {
-	if strings.HasPrefix(token, "device-") {
-		encoded := strings.TrimPrefix(token, "device-")
-		if len(encoded) != 32 {
-			return false
-		}
-		_, err := hex.DecodeString(encoded)
-		return err == nil && encoded == strings.ToLower(encoded)
-	}
-	// Keep already-issued v1.0.8 links routable until their authorization
-	// naturally expires during a rolling upgrade.
-	if len(token) != 48 {
+	if !strings.HasPrefix(token, "device-") {
 		return false
 	}
-	_, err := hex.DecodeString(token)
-	return err == nil && token == strings.ToLower(token)
+	encoded := strings.TrimPrefix(token, "device-")
+	if len(encoded) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(encoded)
+	return err == nil && encoded == strings.ToLower(encoded)
 }
 
 func (s *server) securityHeaders(next http.Handler) http.Handler {

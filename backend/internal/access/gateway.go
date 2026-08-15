@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
@@ -29,6 +30,10 @@ type sessionResolver interface {
 
 type routeResolver interface {
 	SOCKSRoute(context.Context, string, int) (nodeadapter.SOCKSRoute, error)
+}
+
+type managedTunnelRestarter interface {
+	SetManagedTunnel(context.Context, string, int, bool) error
 }
 
 type sessionSubdomainContextKey struct{}
@@ -51,6 +56,12 @@ type WebGateway struct {
 	routes   routeResolver
 	timeout  time.Duration
 	idleTTL  time.Duration
+	// Transports are shared per endpoint and SOCKS route. Creating one transport
+	// per asset request leaves a separate idle connection pool behind and causes
+	// connection and memory growth on Web applications with many resources.
+	transportsMu sync.Mutex
+	transports   map[string]proxyTransportEntry
+	restartMu    sync.Mutex
 }
 
 func NewWebGateway(sessions sessionResolver, routes routeResolver, idleTTLs ...time.Duration) *WebGateway {
@@ -58,7 +69,7 @@ func NewWebGateway(sessions sessionResolver, routes routeResolver, idleTTLs ...t
 	if len(idleTTLs) > 0 && idleTTLs[0] > 0 {
 		idleTTL = idleTTLs[0]
 	}
-	return &WebGateway{sessions: sessions, routes: routes, timeout: 20 * time.Second, idleTTL: idleTTL}
+	return &WebGateway{sessions: sessions, routes: routes, timeout: 20 * time.Second, idleTTL: idleTTL, transports: make(map[string]proxyTransportEntry)}
 }
 
 func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -67,16 +78,14 @@ func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		gatewayError(w, http.StatusNotFound, "访问会话不存在或已失效")
 		return
 	}
-	pathValue := strings.TrimPrefix(r.PathValue("path"), "/")
-	if pathValue == webGrantExchangePath {
+	pathValue := webRequestPath(r, token)
+	switch pathValue {
+	case webGrantAuthorizePath:
+		serveGrantBootstrap(w, r)
+		return
+	case webGrantExchangePath:
 		g.exchangeGrant(w, r, token, webAccessCookiePath(r, token))
 		return
-	}
-	if pathValue == "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
-		if _, err := r.Cookie(accessGrantCookie); err != nil {
-			serveGrantBootstrap(w, r)
-			return
-		}
 	}
 	session, route, ok := resolveAuthorizedAccess(w, r, g.sessions, token, g.idleTTL)
 	if !ok {
@@ -95,10 +104,11 @@ func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		gatewayError(w, http.StatusBadGateway, "无法获取项目通道路由")
 		return
 	}
-	g.proxy(w, r, token, route, socksRoute)
+	g.proxy(w, r, token, pathValue, route, socksRoute)
 }
 
 const accessGrantCookie = "dmp_access_grant"
+const webGrantAuthorizePath = ".dmp/authorize"
 const webGrantExchangePath = ".dmp/session"
 
 type webGrantRequest struct {
@@ -136,21 +146,51 @@ func (g *WebGateway) exchangeGrant(w http.ResponseWriter, r *http.Request, token
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: accessGrantCookie, Value: grant, Path: cookiePath, HttpOnly: true, Secure: accessRequestUsesHTTPS(r), SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
+	// A previous visit may have followed a device HTTP -> HTTPS redirect. Do not
+	// let that short-lived upstream choice leak into a newly authorized visit.
+	clearUpstreamSchemeCookies(w, r, cookiePath)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func clearUpstreamSchemeCookies(w http.ResponseWriter, r *http.Request, cookiePath string) {
+	paths := []string{cookiePath}
+	// Older releases stored this marker at the origin root. Expire that legacy
+	// cookie as well so a newly opened HTTP endpoint cannot inherit an obsolete
+	// HTTPS upgrade from an earlier visit.
+	if cookiePath != "/" {
+		paths = append(paths, "/")
+	}
+	for _, path := range paths {
+		http.SetCookie(w, &http.Cookie{
+			Name:     upstreamSchemeCookie,
+			Value:    "",
+			Path:     path,
+			HttpOnly: true,
+			Secure:   accessRequestUsesHTTPS(r),
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   -1,
+			Expires:  time.Unix(1, 0),
+		})
+	}
+}
+
 func serveGrantBootstrap(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+		gatewayError(w, http.StatusMethodNotAllowed, "访问授权入口仅支持 GET")
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
-	w.WriteHeader(http.StatusUnauthorized)
+	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
 		return
 	}
-	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>正在建立安全访问</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{max-width:32rem;padding:2rem;text-align:center}</style><main><p id="status">需要从平台内重新发起访问</p></main><script>(()=>{const match=/^#grant=([0-9a-f]{48})$/.exec(location.hash);if(!match)return;const status=document.getElementById('status');status.textContent='正在建立安全访问…';const endpoint=location.pathname.replace(/\/?$/,'/')+'.dmp/session';fetch(endpoint,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({grant:match[1]})}).then(response=>{if(!response.ok)throw new Error('exchange failed');history.replaceState(null,'',location.pathname+location.search);location.reload()}).catch(()=>{history.replaceState(null,'',location.pathname+location.search);status.textContent='访问授权已失效，请返回平台重新打开'})})();</script></html>`)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>正在建立安全访问</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{max-width:32rem;padding:2rem;text-align:center}</style><main><p id="status">正在建立安全访问…</p></main><script>(()=>{const match=/^#grant=([0-9a-f]{48})$/.exec(location.hash);const status=document.getElementById('status');if(!match){status.textContent='访问授权无效，请返回平台重新打开';return}const suffix='/.dmp/authorize';const path=location.pathname;const root=path.endsWith(suffix)?path.slice(0,-suffix.length)+'/':'/';const endpoint=path.endsWith(suffix)?path.slice(0,-'authorize'.length)+'session':root+'.dmp/session';fetch(endpoint,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({grant:match[1]})}).then(response=>{if(!response.ok)throw new Error('exchange failed');history.replaceState(null,'',root+location.search);location.replace(root+location.search)}).catch(()=>{history.replaceState(null,'',root+location.search);status.textContent='访问授权已失效，请返回平台重新打开'})})();</script></html>`)
 }
 
 func webAccessCookiePath(r *http.Request, token string) string {
@@ -158,6 +198,18 @@ func webAccessCookiePath(r *http.Request, token string) string {
 		return "/"
 	}
 	return "/access/web/" + token + "/"
+}
+
+// webRequestPath derives the upstream path from the rewritten request URL.
+// Access-domain routing changes URL.Path before the request reaches ServeMux;
+// using that canonical path also keeps the gateway independent from stale path
+// values on cloned requests created by outer middleware.
+func webRequestPath(r *http.Request, token string) string {
+	prefix := "/access/web/" + token + "/"
+	if strings.HasPrefix(r.URL.Path, prefix) {
+		return strings.TrimPrefix(r.URL.Path, prefix)
+	}
+	return strings.TrimPrefix(r.PathValue("path"), "/")
 }
 
 func resolveAuthorizedAccessWithURLGrant(w http.ResponseWriter, r *http.Request, sessions sessionResolver, token string, idleTTL time.Duration, cookiePath string) (store.AccessSession, store.EndpointRoute, bool) {
@@ -205,7 +257,7 @@ func resolveAuthorizedAccess(w http.ResponseWriter, r *http.Request, sessions se
 	return session, route, true
 }
 
-func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token string, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) {
+func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, requestPath string, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) {
 	basePrefix := "/access/web/" + token
 	if usesSessionSubdomain(r) {
 		basePrefix = ""
@@ -214,27 +266,18 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token string,
 	if cookie, err := r.Cookie(upstreamSchemeCookie); err == nil && cookie.Value == "https" {
 		stickyHTTPS = true
 	}
-	upstreamScheme, upstreamPort, upstreamPath, responsePrefix := gatewayUpstream(route, r.PathValue("path"), basePrefix, stickyHTTPS)
+	upstreamScheme, upstreamPort, upstreamPath, responsePrefix := gatewayUpstream(route, requestPath, basePrefix, stickyHTTPS)
 	targetAuthority := net.JoinHostPort(route.Host, strconv.Itoa(upstreamPort))
-	transport := &http.Transport{
-		DialContext:           (SOCKSDialer{ProxyAddress: socksRoute.Address, Username: socksRoute.Username, Password: socksRoute.Password, Timeout: g.timeout}).DialContext,
-		ForceAttemptHTTP2:     false,
-		MaxIdleConns:          32,
-		IdleConnTimeout:       45 * time.Second,
-		TLSHandshakeTimeout:   12 * time.Second,
-		ResponseHeaderTimeout: g.timeout,
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			ServerName: firstNonEmpty(route.TLSServerName, route.Host),
-			// Customer-device administration pages commonly use private CAs or
-			// self-signed certificates. The project SOCKS route still constrains
-			// the destination; browser users never connect to the device directly.
-			InsecureSkipVerify: upstreamScheme == "https",
-		},
+	upstreamHost := route.Host
+	if upstreamScheme == "https" && strings.TrimSpace(route.TLSServerName) != "" {
+		upstreamHost = strings.TrimSpace(route.TLSServerName)
 	}
+	upstreamAuthority := net.JoinHostPort(upstreamHost, strconv.Itoa(upstreamPort))
+	transport := g.proxyTransport(token, route, socksRoute)
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
-		Director: func(request *http.Request) {
+		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
+			request := proxyRequest.Out
 			stripControlPlaneHeaders(request.Header)
 			// Path-prefix access needs textual response rewriting. Removing the
 			// browser's Accept-Encoding lets net/http transparently decompress the
@@ -246,15 +289,19 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token string,
 			request.URL.Host = targetAuthority
 			request.URL.Path = upstreamPath
 			request.URL.RawPath = ""
-			request.Host = targetAuthority
-			rewriteBrowserOrigin(request.Header, upstreamScheme+"://"+targetAuthority)
+			// Dial the stored private destination while preserving the configured
+			// logical TLS host for SNI, HTTP virtual-host routing and origin checks.
+			request.Host = upstreamAuthority
+			rewriteBrowserOrigin(request.Header, upstreamScheme+"://"+upstreamAuthority)
 		},
 		ModifyResponse: func(response *http.Response) error {
-			if route.Protocol == "http" && upstreamScheme == "https" {
-				response.Header.Add("Set-Cookie", (&http.Cookie{Name: upstreamSchemeCookie, Value: "https", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 300}).String())
-			}
-			rewriteLocation(response.Header, upstreamScheme, route.Host, upstreamPort, basePrefix, responsePrefix)
+			rewriteLocation(response.Header, upstreamScheme, route.Host, upstreamPort, basePrefix, responsePrefix, route.TLSServerName)
+			// Rewrite upstream cookies first. That function intentionally discards
+			// names reserved by the platform, so the trusted gateway marker must be
+			// appended afterwards instead of being mistaken for an injected device
+			// cookie and removed again.
 			rewriteCookies(response.Header, responsePrefix)
+			appendTrustedUpstreamSchemeCookie(response.Header, r, token, route.Protocol, upstreamScheme)
 			if err := rewriteTextResponse(response, responsePrefix); err != nil {
 				return err
 			}
@@ -271,6 +318,118 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token string,
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func appendTrustedUpstreamSchemeCookie(header http.Header, r *http.Request, token, routeProtocol, upstreamScheme string) {
+	if routeProtocol != "http" || upstreamScheme != "https" {
+		return
+	}
+	header.Add("Set-Cookie", (&http.Cookie{
+		Name:     upstreamSchemeCookie,
+		Value:    "https",
+		Path:     webAccessCookiePath(r, token),
+		HttpOnly: true,
+		Secure:   accessRequestUsesHTTPS(r),
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   300,
+	}).String())
+}
+
+type proxyTransportConfig struct {
+	protocol   string
+	host       string
+	targetPort int
+	tlsName    string
+	socksAddr  string
+	socksUser  string
+	socksPass  string
+}
+
+type proxyTransportEntry struct {
+	config    proxyTransportConfig
+	transport *http.Transport
+	lastUsed  time.Time
+}
+
+func (g *WebGateway) proxyTransport(token string, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) *http.Transport {
+	config := proxyTransportConfig{
+		protocol:   route.Protocol,
+		host:       route.Host,
+		targetPort: route.TargetPort,
+		tlsName:    route.TLSServerName,
+		socksAddr:  socksRoute.Address,
+		socksUser:  socksRoute.Username,
+		socksPass:  socksRoute.Password,
+	}
+	endpointSlot := route.EndpointID
+	if endpointSlot == "" {
+		endpointSlot = route.Protocol + "://" + net.JoinHostPort(route.Host, strconv.Itoa(route.TargetPort))
+	}
+	// Keep upstream connection pools inside one browser access origin. Some
+	// legacy device UIs use connection-bound authentication, so sharing a TCP
+	// connection between two users would defeat cookie and hostname isolation.
+	slot := token + "\x00" + endpointSlot
+	g.transportsMu.Lock()
+	defer g.transportsMu.Unlock()
+	now := time.Now().UTC()
+	for key, entry := range g.transports {
+		if now.Sub(entry.lastUsed) > g.idleTTL {
+			entry.transport.CloseIdleConnections()
+			delete(g.transports, key)
+		}
+	}
+	if cached, ok := g.transports[slot]; ok && cached.config == config {
+		cached.lastUsed = now
+		g.transports[slot] = cached
+		return cached.transport
+	}
+	dialer := SOCKSDialer{ProxyAddress: socksRoute.Address, Username: socksRoute.Username, Password: socksRoute.Password, Timeout: g.timeout}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			connection, err := dialer.DialContext(ctx, network, address)
+			if err == nil || !errors.Is(err, errSOCKSProxyUnavailable) {
+				return connection, err
+			}
+			// NPS persistently stops a managed SOCKS listener after 30 minutes
+			// without flow changes. A still-authorized platform session should
+			// lazily resume that listener once, then retry the original dial.
+			if restartErr := g.restartManagedTunnel(ctx, route.NodeID, route.ClientID); restartErr != nil {
+				return nil, err
+			}
+			return dialer.DialContext(ctx, network, address)
+		},
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          128,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       45 * time.Second,
+		TLSHandshakeTimeout:   12 * time.Second,
+		ResponseHeaderTimeout: g.timeout,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: firstNonEmpty(route.TLSServerName, route.Host),
+			// Customer-device administration pages commonly use private CAs or
+			// self-signed certificates. The destination remains fixed by the stored
+			// endpoint and project SOCKS route; browsers never dial it directly.
+			InsecureSkipVerify: true, //nolint:gosec -- fixed private endpoint over authenticated project SOCKS
+		},
+	}
+	if previous, ok := g.transports[slot]; ok {
+		previous.transport.CloseIdleConnections()
+	}
+	g.transports[slot] = proxyTransportEntry{config: config, transport: transport, lastUsed: now}
+	return transport
+}
+
+func (g *WebGateway) restartManagedTunnel(ctx context.Context, nodeID string, clientID int) error {
+	controller, ok := g.routes.(managedTunnelRestarter)
+	if !ok {
+		return errors.New("managed tunnel restart is unavailable")
+	}
+	// Asset bursts after an idle close can otherwise issue many concurrent NPS
+	// start requests. SetManagedTunnel is idempotent, so serialize only recovery.
+	g.restartMu.Lock()
+	defer g.restartMu.Unlock()
+	return controller.SetManagedTunnel(ctx, nodeID, clientID, true)
 }
 
 const httpsUpgradePath = ".dmp-upstream/https"
@@ -420,7 +579,7 @@ func rewriteBrowserOrigin(header http.Header, targetOrigin string) {
 	}
 }
 
-func rewriteLocation(header http.Header, scheme, targetHost string, targetPort int, basePrefix, responsePrefix string) {
+func rewriteLocation(header http.Header, scheme, targetHost string, targetPort int, basePrefix, responsePrefix string, trustedAliases ...string) {
 	location := header.Get("Location")
 	if location == "" {
 		return
@@ -431,7 +590,14 @@ func rewriteLocation(header http.Header, scheme, targetHost string, targetPort i
 	}
 	prefix := responsePrefix
 	if parsed.IsAbs() {
-		if !strings.EqualFold(parsed.Hostname(), targetHost) {
+		trustedHost := strings.EqualFold(parsed.Hostname(), targetHost)
+		for _, alias := range trustedAliases {
+			if strings.TrimSpace(alias) != "" && strings.EqualFold(parsed.Hostname(), strings.TrimSpace(alias)) {
+				trustedHost = true
+				break
+			}
+		}
+		if !trustedHost {
 			header.Set("Location", accessSessionRoot(basePrefix))
 			return
 		}

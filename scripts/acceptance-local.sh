@@ -53,7 +53,7 @@ test "$unknown" = "404"
 
 curl -fsS -H "Authorization: Bearer $api_token" "$acceptance_url/api/v1/data/backup" -o "$acceptance_dir/backup.db"
 test "$(sqlite3 "$acceptance_dir/backup.db" 'pragma integrity_check;')" = "ok"
-test "$(sqlite3 "$acceptance_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "21"
+test "$(sqlite3 "$acceptance_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "24"
 
 stop_server
 server_pid=""

@@ -124,6 +124,15 @@ func testServer(t *testing.T) http.Handler {
 	return testServerWithAccessDomain(t, "")
 }
 
+func namedCookie(cookies []*http.Cookie, name string) *http.Cookie {
+	for _, cookie := range cookies {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+	return nil
+}
+
 func testServerWithAccessDomain(t *testing.T, accessDomain string) http.Handler {
 	t.Helper()
 	dir := t.TempDir()
@@ -528,6 +537,9 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	if launchURL.Scheme != "https" || !strings.HasSuffix(launchURL.Hostname(), ".remote.example.test") || !strings.HasPrefix(launchURL.Fragment, "grant=") || launchURL.RawQuery != "" {
 		t.Fatalf("unexpected access-domain URL: %s", session.LaunchURL)
 	}
+	if launchURL.Path != "/.dmp/authorize" {
+		t.Fatalf("Web launch must use the dedicated authorization endpoint: %s", session.LaunchURL)
+	}
 	grant := strings.TrimPrefix(launchURL.Fragment, "grant=")
 	if decoded, decodeErr := hex.DecodeString(grant); decodeErr != nil || len(decoded) != 24 {
 		t.Fatalf("launch fragment does not contain a valid one-time grant: %q", launchURL.Fragment)
@@ -554,7 +566,8 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	exchangeRequest.Header.Set("Origin", "https://"+launchURL.Host)
 	exchangeResponse := httptest.NewRecorder()
 	handler.ServeHTTP(exchangeResponse, exchangeRequest)
-	if exchangeResponse.Code != http.StatusNoContent || len(exchangeResponse.Result().Cookies()) != 1 {
+	accessCookie := namedCookie(exchangeResponse.Result().Cookies(), "dmp_access_grant")
+	if exchangeResponse.Code != http.StatusNoContent || accessCookie == nil {
 		t.Fatalf("grant exchange = %d cookies=%d: %s", exchangeResponse.Code, len(exchangeResponse.Result().Cookies()), exchangeResponse.Body.String())
 	}
 	replayRequest := httptest.NewRequest(http.MethodPost, "https://"+launchURL.Host+"/.dmp/session", strings.NewReader(`{"grant":"`+grant+`"}`))
@@ -566,7 +579,7 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 		t.Fatalf("one-time Web grant was replayable: status=%d cookies=%d", replayResponse.Code, len(replayResponse.Result().Cookies()))
 	}
 	proxyRequest := httptest.NewRequest(http.MethodGet, "https://"+token+".remote.example.test/", nil)
-	proxyRequest.AddCookie(exchangeResponse.Result().Cookies()[0])
+	proxyRequest.AddCookie(accessCookie)
 	proxyResponse := httptest.NewRecorder()
 	handler.ServeHTTP(proxyResponse, proxyRequest)
 	if got := proxyResponse.Header().Get("Permissions-Policy"); got != "" {
@@ -595,12 +608,40 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	if reopenedURL.Fragment == launchURL.Fragment {
 		t.Fatal("reopened access reused the one-time grant")
 	}
+	// A stable Web hostname retains the previous host-scoped cookie. Opening a
+	// new launch URL must reach the authorization page before that stale cookie
+	// is resolved, then replace it through the one-time grant exchange.
+	reopenBootstrapRequest := httptest.NewRequest(http.MethodGet, reopenedURL.Scheme+"://"+reopenedURL.Host+reopenedURL.EscapedPath(), nil)
+	reopenBootstrapRequest.AddCookie(accessCookie)
+	reopenBootstrapResponse := httptest.NewRecorder()
+	handler.ServeHTTP(reopenBootstrapResponse, reopenBootstrapRequest)
+	if reopenBootstrapResponse.Code != http.StatusOK || !strings.Contains(reopenBootstrapResponse.Body.String(), ".dmp/session") {
+		t.Fatalf("reopen bootstrap with stale cookie at %s = %d: %s", reopenedURL.String(), reopenBootstrapResponse.Code, reopenBootstrapResponse.Body.String())
+	}
+	reopenedGrant := strings.TrimPrefix(reopenedURL.Fragment, "grant=")
+	reopenExchangeRequest := httptest.NewRequest(http.MethodPost, "https://"+reopenedURL.Host+"/.dmp/session", strings.NewReader(`{"grant":"`+reopenedGrant+`"}`))
+	reopenExchangeRequest.Header.Set("Content-Type", "application/json")
+	reopenExchangeRequest.Header.Set("Origin", "https://"+reopenedURL.Host)
+	reopenExchangeRequest.AddCookie(accessCookie)
+	reopenExchangeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(reopenExchangeResponse, reopenExchangeRequest)
+	reopenedAccessCookie := namedCookie(reopenExchangeResponse.Result().Cookies(), "dmp_access_grant")
+	if reopenExchangeResponse.Code != http.StatusNoContent || reopenedAccessCookie == nil {
+		t.Fatalf("reopen grant exchange = %d cookies=%d: %s", reopenExchangeResponse.Code, len(reopenExchangeResponse.Result().Cookies()), reopenExchangeResponse.Body.String())
+	}
 	rotatedRequest := httptest.NewRequest(http.MethodGet, "https://"+token+".remote.example.test/", nil)
-	rotatedRequest.AddCookie(exchangeResponse.Result().Cookies()[0])
+	rotatedRequest.AddCookie(accessCookie)
 	rotatedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(rotatedResponse, rotatedRequest)
 	if rotatedResponse.Code != http.StatusGone {
 		t.Fatalf("previous grant remained usable after reopening: status=%d", rotatedResponse.Code)
+	}
+	refreshedRequest := httptest.NewRequest(http.MethodGet, "https://"+token+".remote.example.test/", nil)
+	refreshedRequest.AddCookie(reopenedAccessCookie)
+	refreshedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(refreshedResponse, refreshedRequest)
+	if refreshedResponse.Code == http.StatusUnauthorized || refreshedResponse.Code == http.StatusGone || refreshedResponse.Code == http.StatusForbidden {
+		t.Fatalf("new grant did not authorize reopened Web route: status=%d body=%s", refreshedResponse.Code, refreshedResponse.Body.String())
 	}
 	activeResponse := request(t, handler, http.MethodGet, "/api/v1/access-sessions", nil, true)
 	if activeResponse.Code != http.StatusOK {
@@ -614,6 +655,25 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	}
 	if len(active.Items) != 1 || active.Items[0].ID == "" {
 		t.Fatalf("reopening must rotate one logical session, got %#v", active.Items)
+	}
+}
+
+func TestStableWebRouteIsScopedToUserAndEndpoint(t *testing.T) {
+	first, firstHash := stableWebRouteToken("user-one", "endpoint-one")
+	reopened, reopenedHash := stableWebRouteToken("user-one", "endpoint-one")
+	if first != reopened || firstHash != reopenedHash {
+		t.Fatal("the same user and endpoint must keep one stable Web route")
+	}
+	otherUser, _ := stableWebRouteToken("user-two", "endpoint-one")
+	if otherUser == first {
+		t.Fatal("different users must not share a Web route origin")
+	}
+	otherEndpoint, _ := stableWebRouteToken("user-one", "endpoint-two")
+	if otherEndpoint == first {
+		t.Fatal("different endpoints must not share a Web route origin")
+	}
+	if !validAccessRouteLabel(first) {
+		t.Fatalf("stable Web route is not a valid access label: %q", first)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
+	"github.com/coder/websocket"
 )
 
 type fakeSessionResolver struct {
@@ -45,14 +46,18 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("/access/web/{token}/{path...}", gateway)
 
-	bootstrapRequest := httptest.NewRequest(http.MethodGet, "https://access.example/access/web/"+token+"/", nil)
+	bootstrapRequest := httptest.NewRequest(http.MethodGet, "https://access.example/access/web/"+token+"/.dmp/authorize", nil)
+	// Reopening a stable route leaves the previous host-scoped cookie in the
+	// browser. The dedicated authorization endpoint must still process the new
+	// fragment instead of attempting to proxy with the stale cookie.
+	bootstrapRequest.AddCookie(&http.Cookie{Name: accessGrantCookie, Value: strings.Repeat("c", 48)})
 	bootstrapResponse := httptest.NewRecorder()
 	mux.ServeHTTP(bootstrapResponse, bootstrapRequest)
-	if bootstrapResponse.Code != http.StatusUnauthorized {
+	if bootstrapResponse.Code != http.StatusOK {
 		t.Fatalf("bootstrap status = %d: %s", bootstrapResponse.Code, bootstrapResponse.Body.String())
 	}
 	body := bootstrapResponse.Body.String()
-	if !strings.Contains(body, "location.hash") || !strings.Contains(body, ".dmp/session") || strings.Contains(body, "?grant=") {
+	if !strings.Contains(body, "location.hash") || !strings.Contains(body, ".dmp/session") || !strings.Contains(body, ".dmp/authorize") || strings.Contains(body, "?grant=") {
 		t.Fatalf("bootstrap does not use fragment-to-POST exchange: %s", body)
 	}
 
@@ -64,11 +69,24 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 		t.Fatalf("exchange status = %d: %s", exchangeResponse.Code, exchangeResponse.Body.String())
 	}
 	cookies := exchangeResponse.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != accessGrantCookie || cookies[0].Value != grant || !cookies[0].HttpOnly || !cookies[0].Secure {
+	var accessCookie *http.Cookie
+	var clearedSchemePaths []string
+	for _, cookie := range cookies {
+		if cookie.Name == accessGrantCookie {
+			accessCookie = cookie
+		}
+		if cookie.Name == upstreamSchemeCookie && cookie.MaxAge < 0 {
+			clearedSchemePaths = append(clearedSchemePaths, cookie.Path)
+		}
+	}
+	if accessCookie == nil || accessCookie.Value != grant || !accessCookie.HttpOnly || !accessCookie.Secure {
 		t.Fatalf("exchange cookie = %#v", cookies)
 	}
-	if cookies[0].Path != "/access/web/"+token+"/" {
-		t.Fatalf("exchange cookie path = %q", cookies[0].Path)
+	if accessCookie.Path != "/access/web/"+token+"/" {
+		t.Fatalf("exchange cookie path = %q", accessCookie.Path)
+	}
+	if got := strings.Join(clearedSchemePaths, ","); got != "/access/web/"+token+"/,/" {
+		t.Fatalf("cleared scheme cookie paths = %q", got)
 	}
 
 	foreignOriginRequest := httptest.NewRequest(http.MethodPost, "https://access.example/access/web/"+token+"/.dmp/session", strings.NewReader(`{"grant":"`+grant+`"}`))
@@ -80,12 +98,48 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	}
 }
 
+func TestWebGatewayReusesTransportForSameEndpointRoute(t *testing.T) {
+	gateway := NewWebGateway(fakeSessionResolver{}, fakeRouteResolver{})
+	route := store.EndpointRoute{EndpointID: "endpoint-1", Protocol: "https", Host: "10.0.0.8", TLSServerName: "router.lan"}
+	socksRoute := nodeadapter.SOCKSRoute{Address: "127.0.0.1:1080", Username: "user", Password: "pass"}
+	first := gateway.proxyTransport("user-one", route, socksRoute)
+	second := gateway.proxyTransport("user-one", route, socksRoute)
+	if first != second {
+		t.Fatal("same access origin and endpoint created more than one transport")
+	}
+	if first == gateway.proxyTransport("user-two", route, socksRoute) {
+		t.Fatal("different access origins shared an upstream connection pool")
+	}
+	rotated := socksRoute
+	rotated.Password = "new-pass"
+	if first == gateway.proxyTransport("user-one", route, rotated) {
+		t.Fatal("rotated SOCKS credentials reused the previous transport")
+	}
+}
+
 type fakeRouteResolver struct {
 	route nodeadapter.SOCKSRoute
 }
 
 func (f fakeRouteResolver) SOCKSRoute(context.Context, string, int) (nodeadapter.SOCKSRoute, error) {
 	return f.route, nil
+}
+
+type restartingRouteResolver struct {
+	fakeRouteResolver
+	mu        sync.Mutex
+	restarts  int
+	onRestart func() error
+}
+
+func (r *restartingRouteResolver) SetManagedTunnel(context.Context, string, int, bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.restarts++
+	if r.onRestart != nil {
+		return r.onRestart()
+	}
+	return nil
 }
 
 func TestWebGatewayProxiesThroughAuthenticatedSOCKS(t *testing.T) {
@@ -145,6 +199,110 @@ func TestWebGatewayProxiesThroughAuthenticatedSOCKS(t *testing.T) {
 	}
 	if cookie := response.Header().Get("Set-Cookie"); !strings.Contains(cookie, "Path=/access/web/"+token+"/") || !strings.Contains(cookie, "HttpOnly") {
 		t.Fatalf("cookie was not scoped to session: %q", cookie)
+	}
+}
+
+func TestWebGatewayRestartsIdleManagedSOCKSOnce(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "resumed")
+	}))
+	defer upstream.Close()
+	upstreamAddress := strings.TrimPrefix(upstream.URL, "http://")
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socksAddress := reserved.Addr().String()
+	_ = reserved.Close()
+	resolver := &restartingRouteResolver{fakeRouteResolver: fakeRouteResolver{route: nodeadapter.SOCKSRoute{Address: socksAddress, Username: "proxy-user", Password: "proxy-pass"}}}
+	resolver.onRestart = func() error {
+		listener, listenErr := net.Listen("tcp", socksAddress)
+		if listenErr != nil {
+			return listenErr
+		}
+		serveForwardingSOCKS(t, listener, upstreamAddress, "proxy-user", "proxy-pass")
+		resolver.onRestart = nil
+		return nil
+	}
+	host, portText, _ := net.SplitHostPort(upstreamAddress)
+	port, _ := strconv.Atoi(portText)
+	token := strings.Repeat("i", 43)
+	gateway := NewWebGateway(
+		fakeSessionResolver{session: store.AccessSession{Mode: "web"}, route: store.EndpointRoute{EndpointID: "idle-endpoint", Protocol: "http", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1}},
+		resolver,
+	)
+	mux := http.NewServeMux()
+	mux.Handle("/access/web/{token}/{path...}", gateway)
+	request := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/", nil)
+	authorizeGatewayRequest(request)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "resumed" {
+		t.Fatalf("resumed gateway response = %d %q", response.Code, response.Body.String())
+	}
+	resolver.mu.Lock()
+	restarts := resolver.restarts
+	resolver.mu.Unlock()
+	if restarts != 1 {
+		t.Fatalf("managed SOCKS restarts = %d, want 1", restarts)
+	}
+}
+
+func TestWebGatewayProxiesWebSocketThroughAuthenticatedSOCKS(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer connection.CloseNow()
+		messageType, message, err := connection.Read(r.Context())
+		if err != nil {
+			return
+		}
+		_ = connection.Write(r.Context(), messageType, append([]byte("device:"), message...))
+	}))
+	defer upstream.Close()
+	upstreamAddress := strings.TrimPrefix(upstream.URL, "http://")
+	socksAddress := startForwardingSOCKS(t, upstreamAddress, "proxy-user", "proxy-pass")
+	host, portText, _ := net.SplitHostPort(upstreamAddress)
+	port, _ := strconv.Atoi(portText)
+	token := strings.Repeat("w", 43)
+	gateway := NewWebGateway(
+		fakeSessionResolver{
+			session: store.AccessSession{Mode: "web"},
+			route:   store.EndpointRoute{EndpointID: "websocket-endpoint", Protocol: "http", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1},
+		},
+		fakeRouteResolver{route: nodeadapter.SOCKSRoute{Address: socksAddress, Username: "proxy-user", Password: "proxy-pass"}},
+	)
+	mux := http.NewServeMux()
+	mux.Handle("/access/web/{token}/{path...}", gateway)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	connection, response, err := websocket.Dial(
+		ctx,
+		"ws"+strings.TrimPrefix(server.URL, "http")+"/access/web/"+token+"/socket",
+		&websocket.DialOptions{HTTPHeader: http.Header{"Cookie": []string{accessGrantCookie + "=" + strings.Repeat("g", 43)}}},
+	)
+	if err != nil {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		t.Fatalf("dial gateway websocket: %v (status %d)", err, status)
+	}
+	defer connection.CloseNow()
+	if err := connection.Write(ctx, websocket.MessageText, []byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	messageType, message, err := connection.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.MessageText || string(message) != "device:ping" {
+		t.Fatalf("websocket response = %d %q", messageType, message)
 	}
 }
 
@@ -267,7 +425,9 @@ func TestWebGatewayRejectsDifferentSourceIP(t *testing.T) {
 }
 
 func TestWebGatewayHTTPSAcceptsPrivateDeviceCertificates(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var upstreamHost string
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHost = r.Host
 		_, _ = io.WriteString(w, "secure-device-ui")
 	}))
 	defer upstream.Close()
@@ -281,7 +441,7 @@ func TestWebGatewayHTTPSAcceptsPrivateDeviceCertificates(t *testing.T) {
 		gateway := NewWebGateway(
 			fakeSessionResolver{
 				session: store.AccessSession{Mode: "web"},
-				route:   store.EndpointRoute{Protocol: "https", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1},
+				route:   store.EndpointRoute{Protocol: "https", TargetPort: port, AccessType: "web_proxy", Host: host, TLSServerName: "device.internal.example", NodeID: "node-1", ClientID: 1},
 			},
 			fakeRouteResolver{route: nodeadapter.SOCKSRoute{Address: socksAddress, Username: "proxy-user", Password: "proxy-pass"}},
 		)
@@ -297,6 +457,9 @@ func TestWebGatewayHTTPSAcceptsPrivateDeviceCertificates(t *testing.T) {
 	if response := requestThroughGateway(); response.Code != http.StatusOK || response.Body.String() != "secure-device-ui" {
 		t.Fatalf("private device certificate failed: status = %d, body = %q", response.Code, response.Body.String())
 	}
+	if want := net.JoinHostPort("device.internal.example", portText); upstreamHost != want {
+		t.Fatalf("TLS virtual host = %q, want %q", upstreamHost, want)
+	}
 }
 
 func TestWebGatewayKeepsHTTPToHTTPSRedirectInsideSession(t *testing.T) {
@@ -311,6 +474,35 @@ func TestWebGatewayKeepsHTTPToHTTPSRedirectInsideSession(t *testing.T) {
 	scheme, port, path, responsePrefix := gatewayUpstream(store.EndpointRoute{Protocol: "http", TargetPort: 80}, httpsUpgradePath+"/console", basePrefix, false)
 	if scheme != "https" || port != 443 || path != "/console" || responsePrefix != basePrefix+"/"+httpsUpgradePath {
 		t.Fatalf("upgraded route = %q %d %q %q", scheme, port, path, responsePrefix)
+	}
+}
+
+func TestWebGatewayKeepsTrustedHTTPSMarkerAfterRewritingDeviceCookies(t *testing.T) {
+	token := strings.Repeat("m", 43)
+	prefix := "/access/web/" + token
+	header := http.Header{}
+	header.Add("Set-Cookie", "device_session=ok; Path=/; HttpOnly")
+	// A device must not be able to inject a platform-reserved routing marker.
+	header.Add("Set-Cookie", upstreamSchemeCookie+"=http; Path=/")
+	rewriteCookies(header, prefix)
+
+	request := httptest.NewRequest(http.MethodGet, "https://access.example"+prefix+"/"+httpsUpgradePath+"/", nil)
+	appendTrustedUpstreamSchemeCookie(header, request, token, "http", "https")
+
+	var deviceCookie, schemeCookie *http.Cookie
+	for _, cookie := range (&http.Response{Header: header}).Cookies() {
+		switch cookie.Name {
+		case "device_session":
+			deviceCookie = cookie
+		case upstreamSchemeCookie:
+			schemeCookie = cookie
+		}
+	}
+	if deviceCookie == nil || deviceCookie.Path != prefix+"/" || !deviceCookie.HttpOnly {
+		t.Fatalf("rewritten device cookie = %#v", deviceCookie)
+	}
+	if schemeCookie == nil || schemeCookie.Value != "https" || schemeCookie.Path != prefix+"/" || !schemeCookie.HttpOnly || !schemeCookie.Secure {
+		t.Fatalf("trusted HTTPS marker = %#v", schemeCookie)
 	}
 }
 
@@ -362,6 +554,12 @@ func startForwardingSOCKS(t *testing.T, upstreamAddress, username, password stri
 	if err != nil {
 		t.Fatal(err)
 	}
+	serveForwardingSOCKS(t, listener, upstreamAddress, username, password)
+	return listener.Addr().String()
+}
+
+func serveForwardingSOCKS(t *testing.T, listener net.Listener, upstreamAddress, username, password string) {
+	t.Helper()
 	var connections sync.WaitGroup
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -393,7 +591,6 @@ func startForwardingSOCKS(t *testing.T, upstreamAddress, username, password stri
 			}()
 		}
 	}()
-	return listener.Addr().String()
 }
 
 func acceptSOCKSHandshake(conn net.Conn, username, password string) bool {

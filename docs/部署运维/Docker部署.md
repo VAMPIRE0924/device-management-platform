@@ -1,13 +1,13 @@
 # Docker 正式部署
 
-本文适用于 `vampirerune/device-management-platform:v1.0.9`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
+本文适用于 `vampirerune/device-management-platform:v1.0.10`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
 
 ## 最简 Compose
 
 ```yaml
 services:
   platform:
-    image: vampirerune/device-management-platform:v1.0.9
+    image: vampirerune/device-management-platform:v1.0.10
     container_name: device-management-platform
     restart: unless-stopped
     volumes:
@@ -75,7 +75,7 @@ docker compose up -d
 docker compose ps
 ```
 
-`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.9` 这类完整版本号。
+`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.10` 这类完整版本号。
 
 ## 常见问题
 
@@ -96,4 +96,4 @@ v1.0.4 起，登录 Cookie 会按实际访问协议自动设置：HTTP 不带 `S
 
 ### 为什么反代地址偶尔被 Chrome 标记为“危险网站”
 
-这是 Chrome Safe Browsing 的站点声誉或内容判定页面，不是 TLS 证书错误。v1.0.9 已避免在快速重复打开时为同一服务不断生成新子域名；同一登录会话的同一入口使用稳定路由域名，重新打开时只轮换授权。已被 Google 标记的旧随机主机不会因升级立即清除历史标记；若新的稳定入口仍触发警告，请在 Google Search Console 的“安全性问题”中申请复核。
+这是 Chrome Safe Browsing 的站点声誉或内容判定页面，不是 TLS 证书错误。v1.0.10 已避免在快速重复打开或重新登录时为同一用户的同一服务不断生成新子域名；重新打开时只轮换一次性授权。已被 Google 标记的旧随机主机不会因升级立即清除历史标记；若新的稳定入口仍触发警告，请在 Google Search Console 的“安全性问题”中申请复核。

@@ -25,12 +25,19 @@ type SecretResolver interface {
 	Resolve(context.Context, string) (string, error)
 }
 
+type accessSessionToucher interface {
+	TouchAccessSession(context.Context, string, time.Time, time.Time) error
+}
+
+const sshActivityPersistInterval = 30 * time.Second
+
 type SSHGateway struct {
 	sessions sessionResolver
 	routes   routeResolver
 	secrets  SecretResolver
 	timeout  time.Duration
 	idleTTL  time.Duration
+	touchTTL time.Duration
 	activeMu sync.Mutex
 	active   map[string]map[uint64]context.CancelFunc
 	revoked  map[string]time.Time
@@ -73,7 +80,7 @@ func NewSSHGateway(sessions sessionResolver, routes routeResolver, secrets Secre
 	if len(idleTTLs) > 0 && idleTTLs[0] > 0 {
 		idleTTL = idleTTLs[0]
 	}
-	return &SSHGateway{sessions: sessions, routes: routes, secrets: secrets, timeout: 15 * time.Second, idleTTL: idleTTL, active: map[string]map[uint64]context.CancelFunc{}, revoked: map[string]time.Time{}}
+	return &SSHGateway{sessions: sessions, routes: routes, secrets: secrets, timeout: 15 * time.Second, idleTTL: idleTTL, touchTTL: sshActivityPersistInterval, active: map[string]map[uint64]context.CancelFunc{}, revoked: map[string]time.Time{}}
 }
 
 // Revoke immediately terminates every active WebSSH connection for a platform
@@ -215,6 +222,13 @@ func (g *SSHGateway) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 	target := net.JoinHostPort(route.Host, strconv.Itoa(route.TargetPort))
 	dialer := SOCKSDialer{ProxyAddress: socksRoute.Address, Username: socksRoute.Username, Password: socksRoute.Password, Timeout: g.timeout}
 	networkConn, err := dialer.DialContext(ctx, "tcp", target)
+	if errors.Is(err, errSOCKSProxyUnavailable) {
+		if controller, ok := g.routes.(managedTunnelRestarter); ok {
+			if restartErr := controller.SetManagedTunnel(ctx, route.NodeID, route.ClientID, true); restartErr == nil {
+				networkConn, err = dialer.DialContext(ctx, "tcp", target)
+			}
+		}
+	}
 	if err != nil {
 		_ = wsjson.Write(ctx, conn, sshServerMessage{Type: "error", Code: "target_unreachable", Message: "SSH 目标暂时不可达"})
 		return
@@ -257,6 +271,14 @@ func (g *SSHGateway) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 	if err := wsjson.Write(ctx, conn, sshServerMessage{Type: "ready", Message: "SSH 终端已连接"}); err != nil {
 		return
 	}
+	activity := make(chan struct{}, 1)
+	signalActivity := func() {
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+	}
+	go g.monitorSSHActivity(ctx, cancel, sessionRecord.ID, activity)
 	output := make(chan []byte, 32)
 	var outputReaders sync.WaitGroup
 	readOutput := func(reader io.Reader) {
@@ -265,6 +287,7 @@ func (g *SSHGateway) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 		for {
 			count, err := reader.Read(buffer)
 			if count > 0 {
+				signalActivity()
 				chunk := append([]byte(nil), buffer[:count]...)
 				select {
 				case output <- chunk:
@@ -292,6 +315,7 @@ func (g *SSHGateway) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 			if err := wsjson.Read(ctx, conn, &message); err != nil {
 				return
 			}
+			signalActivity()
 			switch message.Type {
 			case "input":
 				_, _ = io.WriteString(stdin, message.Data)
@@ -317,6 +341,46 @@ func (g *SSHGateway) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			_ = conn.Close(websocket.StatusPolicyViolation, "访问会话已撤销或过期")
 			return
+		}
+	}
+}
+
+func (g *SSHGateway) monitorSSHActivity(ctx context.Context, cancel context.CancelFunc, sessionID string, activity <-chan struct{}) {
+	idleTimer := time.NewTimer(g.idleTTL)
+	defer idleTimer.Stop()
+	lastPersisted := time.Now().UTC()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-idleTimer.C:
+			cancel()
+			return
+		case <-activity:
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(g.idleTTL)
+			now := time.Now().UTC()
+			if now.Sub(lastPersisted) < g.touchTTL {
+				continue
+			}
+			toucher, ok := g.sessions.(accessSessionToucher)
+			if !ok {
+				lastPersisted = now
+				continue
+			}
+			touchCtx, touchCancel := context.WithTimeout(ctx, 5*time.Second)
+			err := toucher.TouchAccessSession(touchCtx, sessionID, now, now.Add(-g.idleTTL))
+			touchCancel()
+			if err != nil {
+				cancel()
+				return
+			}
+			lastPersisted = now
 		}
 	}
 }

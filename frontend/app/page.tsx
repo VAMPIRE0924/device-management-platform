@@ -1,10 +1,16 @@
 import {
+  Children,
+  type ChangeEvent,
   type Dispatch,
   FormEvent,
+  isValidElement,
+  type ReactNode,
+  type SelectHTMLAttributes,
   type SetStateAction,
   useEffect,
   useId,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -523,6 +529,133 @@ function HelpTip({ text }: { text: string }) {
   );
 }
 
+type SelectOption = {
+  value: string;
+  label: ReactNode;
+  disabled: boolean;
+};
+
+function optionText(node: ReactNode): string {
+  return Children.toArray(node)
+    .map((item) =>
+      typeof item === "string" || typeof item === "number" ? String(item) : "",
+    )
+    .join("")
+    .trim();
+}
+
+function selectOptions(children: ReactNode): SelectOption[] {
+  const options: SelectOption[] = [];
+  Children.forEach(children, (child) => {
+    if (!isValidElement<{ value?: string | number; disabled?: boolean; children?: ReactNode }>(child)) return;
+    if (child.type !== "option") return;
+    const label = child.props.children;
+    options.push({
+      value: String(child.props.value ?? optionText(label)),
+      label,
+      disabled: Boolean(child.props.disabled),
+    });
+  });
+  return options;
+}
+
+function UnifiedSelect({
+  children,
+  className = "",
+  value,
+  defaultValue,
+  disabled,
+  onChange,
+  name,
+  form,
+  required,
+  id,
+  "aria-label": ariaLabel,
+}: SelectHTMLAttributes<HTMLSelectElement>) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const options = useMemo(() => selectOptions(children), [children]);
+  const [internalValue, setInternalValue] = useState(() =>
+    String(
+      defaultValue ??
+        options.find((option) => !option.disabled)?.value ??
+        "",
+    ),
+  );
+	const uncontrolledValue = options.some((option) => option.value === internalValue)
+		? internalValue
+		: options.find((option) => !option.disabled)?.value ?? "";
+	const selectedValue = String(value ?? uncontrolledValue);
+	const selected = options.find((option) => option.value === selectedValue);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [open]);
+
+  const choose = (nextValue: string) => {
+    if (value === undefined) setInternalValue(nextValue);
+    onChange?.({
+      currentTarget: { value: nextValue },
+      target: { value: nextValue },
+    } as unknown as ChangeEvent<HTMLSelectElement>);
+    setOpen(false);
+  };
+
+  return (
+    <div
+      ref={rootRef}
+      className={`unified-select ${className}`.trim()}
+      data-disabled={disabled ? "true" : undefined}
+    >
+      {name && !disabled && (
+        <input type="hidden" name={name} form={form} value={selectedValue} />
+      )}
+      <button
+        id={id}
+        type="button"
+        className="unified-select-control"
+        disabled={disabled}
+        aria-label={ariaLabel}
+        aria-required={required || undefined}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
+          if (event.key === "ArrowDown") setOpen(true);
+        }}
+      >
+        <span className={selectedValue ? "" : "placeholder"}>
+          {selected?.label ?? "请选择"}
+        </span>
+        <i aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="unified-select-menu" role="listbox">
+          {options.map((option) => (
+            <button
+              type="button"
+              role="option"
+              key={option.value}
+              disabled={option.disabled}
+              aria-selected={option.value === selectedValue}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => choose(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EmptyState({
   title,
   detail,
@@ -647,7 +780,7 @@ function PaginationFooter({
         </span>
         <label>
           每页显示
-          <select
+          <UnifiedSelect
             aria-label="每页显示条数"
             value={pageSize}
             onChange={(event) => {
@@ -658,7 +791,7 @@ function PaginationFooter({
             <option value={10}>10</option>
             <option value={20}>20</option>
             <option value={50}>50</option>
-          </select>
+          </UnifiedSelect>
           {noun}
         </label>
       </div>
@@ -3321,7 +3454,7 @@ function SocksView({
                 placeholder="搜索项目、节点、Client ID 或地址"
               />
             </div>
-            <select
+            <UnifiedSelect
               value={statusFilter}
               onChange={(event) => {
                 setStatusFilter(event.target.value as typeof statusFilter);
@@ -3331,7 +3464,7 @@ function SocksView({
               <option value="all">全部状态</option>
               <option value="running">运行中</option>
               <option value="stopped">已关闭</option>
-            </select>
+            </UnifiedSelect>
             <Tag tone="green">{visibleRows.length} 个结果</Tag>
           </div>
         </div>
@@ -4661,7 +4794,7 @@ function AccessPortal({
             placeholder="搜索设备、IP、项目或服务"
           />
         </div>
-        <select
+        <UnifiedSelect
           value={projectFilter}
           onChange={(event) => {
             setProjectFilter(event.target.value);
@@ -4672,7 +4805,7 @@ function AccessPortal({
           {authorizedProjects.map((project) => (
             <option key={project.code}>{project.name}</option>
           ))}
-        </select>
+        </UnifiedSelect>
         <span>{visible.length} 台匹配设备</span>
       </div>
       {visible.length ? (
@@ -4832,7 +4965,7 @@ function Workspace({
                 placeholder="搜索设备或 IP"
               />
             </div>
-            <select
+            <UnifiedSelect
               aria-label="设备状态"
               value={onlyOnline ? "online" : "all"}
               onChange={(event) => {
@@ -4842,7 +4975,7 @@ function Workspace({
             >
               <option value="all">全部状态</option>
               <option value="online">仅在线</option>
-            </select>
+            </UnifiedSelect>
           </div>
         </div>
         {visibleDevices.length ? (
@@ -5137,7 +5270,7 @@ function NodesView({
             placeholder="搜索节点名称、地址或 TLS 主机名"
           />
         </div>
-        <select
+        <UnifiedSelect
           value={statusFilter}
           onChange={(event) => {
             setStatusFilter(event.target.value);
@@ -5147,7 +5280,7 @@ function NodesView({
           <option>全部状态</option>
           <option>可用</option>
           <option>维护中</option>
-        </select>
+        </UnifiedSelect>
         <span>共 {visibleNodes.length} 个节点</span>
       </div>
       {visibleNodes.length ? (
@@ -5328,7 +5461,7 @@ function ProjectsView({
             placeholder="搜索项目名称、编号、节点或负责人"
           />
         </div>
-        <select
+        <UnifiedSelect
           aria-label="Client 状态"
           value={clientStatusFilter}
           onChange={(event) => {
@@ -5341,7 +5474,7 @@ function ProjectsView({
           <option>全部</option>
           <option>在线</option>
           <option>离线</option>
-        </select>
+        </UnifiedSelect>
         <span>共 {visibleProjects.length} 个项目</span>
       </div>
       {visibleProjects.length ? (
@@ -5630,7 +5763,7 @@ function SettingsView({
             <div className="settings-field-grid">
               <label>
                 闲置自动退出
-                <select
+                <UnifiedSelect
                   disabled={locked("authSessionIdleTTL")}
                   value={draft.authSessionIdleTTL}
                   onChange={(event) => patch({ authSessionIdleTTL: event.target.value })}
@@ -5640,12 +5773,12 @@ function SettingsView({
                   <option value="30m">30 分钟</option>
                   <option value="1h">1 小时</option>
                   <option value="2h">2 小时</option>
-                </select>
+                </UnifiedSelect>
                 <small>连续无操作达到该时间后必须重新登录</small>
               </label>
               <label>
                 最长登录时长
-                <select
+                <UnifiedSelect
                   disabled={locked("authSessionTTL")}
                   value={draft.authSessionTTL}
                   onChange={(event) => patch({ authSessionTTL: event.target.value })}
@@ -5654,12 +5787,12 @@ function SettingsView({
                   <option value="12h">12 小时（默认）</option>
                   <option value="24h">24 小时</option>
                   <option value="168h">7 天</option>
-                </select>
+                </UnifiedSelect>
                 <small>即使持续操作，达到上限后也会重新登录</small>
               </label>
               <label>
                 邮箱验证码有效期
-                <select
+                <UnifiedSelect
                   disabled={locked("emailCodeTTL")}
                   value={draft.emailCodeTTL}
                   onChange={(event) =>
@@ -5670,7 +5803,7 @@ function SettingsView({
                   <option value="10m">10 分钟</option>
                   <option value="15m">15 分钟</option>
                   <option value="30m">30 分钟</option>
-                </select>
+                </UnifiedSelect>
               </label>
               <label>
                 加密主密钥文件
@@ -5896,7 +6029,7 @@ function SettingsView({
               </label>
               <label className="full">
                 反代端口
-                <select
+                <UnifiedSelect
                   disabled={locked("reusePanelPorts")}
                   value={draft.reusePanelPorts ? "reuse" : "independent"}
                   onChange={(event) => {
@@ -5914,7 +6047,7 @@ function SettingsView({
                 >
                   <option value="reuse">复用面板 HTTP / HTTPS 端口</option>
                   <option value="independent">独立设置反代端口</option>
-                </select>
+                </UnifiedSelect>
                 <small>
                   {draft.reusePanelPorts
                     ? `当前复用 ${draft.httpPort} / ${draft.httpsPort}`
@@ -6365,7 +6498,7 @@ function DiscoveryView({
                   }}
                   placeholder="例如：AdGuard Home"
                 />
-                <select
+                <UnifiedSelect
                   aria-label={`${item.name} 协议探针`}
                   disabled={active}
                   value={item.protocol}
@@ -6393,7 +6526,7 @@ function DiscoveryView({
                   <option value="mysql">MySQL</option>
                   <option value="postgresql">PostgreSQL</option>
                   <option value="tcp">TCP Banner</option>
-                </select>
+                </UnifiedSelect>
                 <input
                   aria-label={`${item.name} 扫描端口`}
                   disabled={active}
@@ -6663,7 +6796,7 @@ function DiscoveryView({
                           })
                         }
                       />
-                      <select
+                      <UnifiedSelect
                         aria-label={`${service.name} 服务类型`}
                         value={service.protocol}
                         disabled={locked || !service.selected}
@@ -6681,7 +6814,7 @@ function DiscoveryView({
                         <option value="mysql">MySQL</option>
                         <option value="postgresql">PostgreSQL</option>
                         <option value="tcp">自定义 TCP</option>
-                      </select>
+                      </UnifiedSelect>
                       <input
                         aria-label={`${service.name} 目标端口`}
                         type="number"
@@ -7008,13 +7141,13 @@ function ProjectSettingsModal({
           </label>
           <label>
             负责人
-            <select name="owner" required defaultValue={project.owner}>
+            <UnifiedSelect name="owner" required defaultValue={project.owner}>
               {[...new Set([project.owner, ...userNames])]
                 .filter(Boolean)
                 .map((owner) => (
                   <option key={owner}>{owner}</option>
                 ))}
-            </select>
+            </UnifiedSelect>
           </label>
           <label>
             接入节点
@@ -7281,7 +7414,7 @@ function PortForwardModal({
                 设备服务{" "}
                 <HelpTip text="先在内网设备中登记服务名称、协议和实际目标端口，再在此选择，避免重复手输内网地址。" />
               </span>
-              <select
+              <UnifiedSelect
                 name="endpointId"
                 required
                 defaultValue={defaultEndpointId}
@@ -7296,11 +7429,11 @@ function PortForwardModal({
                     {endpoint.port}）
                   </option>
                 ))}
-              </select>
+              </UnifiedSelect>
             </label>
             <label>
               端口分配方式
-              <select
+              <UnifiedSelect
                 value={allocation}
                 onChange={(event) =>
                   setAllocation(event.target.value as "auto" | "manual")
@@ -7308,7 +7441,7 @@ function PortForwardModal({
               >
                 <option value="auto">从节点端口池自动分配</option>
                 <option value="manual">指定节点端口</option>
-              </select>
+              </UnifiedSelect>
             </label>
             <label>
               公网端口
@@ -7326,7 +7459,7 @@ function PortForwardModal({
             </label>
             <label>
               有效期
-              <select
+              <UnifiedSelect
                 value={expiry}
                 onChange={(event) =>
                   setExpiry(event.target.value as typeof expiry)
@@ -7336,7 +7469,7 @@ function PortForwardModal({
                 <option value="day">24 小时</option>
                 <option value="week">7 天</option>
                 <option value="custom">自定义到期时间</option>
-              </select>
+              </UnifiedSelect>
             </label>
             <label>
               自定义到期
@@ -7486,20 +7619,20 @@ function CreateProjectModal({
             <span className="field-label-help">
               负责人 <HelpTip text="负责该项目日常管理的平台用户。" />
             </span>
-            <select name="ownerName" required defaultValue="">
+            <UnifiedSelect name="ownerName" required defaultValue="">
               <option value="" disabled>
                 请选择负责人
               </option>
               {userNames.map((name) => (
                 <option key={name}>{name}</option>
               ))}
-            </select>
+            </UnifiedSelect>
           </label>
           <label>
             <span className="field-label-help">
               接入节点 <HelpTip text="选择 Client 和 SOCKS 代理所在的节点。" />
             </span>
-            <select
+            <UnifiedSelect
               name="nodeId"
               required
               value={nodeId}
@@ -7517,20 +7650,14 @@ function CreateProjectModal({
                     {node.name}
                   </option>
                 ))}
-            </select>
+            </UnifiedSelect>
           </label>
           <div className="form-field full project-client-field">
             <span className="field-label-help">
               Client{" "}
               <HelpTip text="可以从节点 Client 列表选择，也可以直接输入 Client ID；后台会核对同 ID 的 Client 与 SOCKS 代理。" />
             </span>
-            <input
-              name="clientId"
-              type="text"
-              inputMode="numeric"
-              pattern="[1-9][0-9]*"
-              list="project-client-options"
-              required
+            <ClientCombobox
               value={clientIdInput}
               disabled={!nodeId || loadingClients}
               placeholder={
@@ -7541,18 +7668,10 @@ function CreateProjectModal({
                     : "请先选择接入节点"
               }
               onChange={(event) =>
-                setClientIdInput(event.target.value.replace(/\D/g, ""))
+                setClientIdInput(event.replace(/\D/g, ""))
               }
+              clients={clients}
             />
-            <datalist id="project-client-options">
-              {clients.map((client) => (
-                <option
-                  key={client.id}
-                  value={String(client.id)}
-                  label={`#${client.id} · ${client.remark || `Client ${client.id}`} · ${client.connected ? "已连接" : "离线"}`}
-                />
-              ))}
-            </datalist>
             {nodeId && !loadingClients && (
               <small className="field-hint">
                 共 {clients.length} 个 Client · 支持选择或手动输入 ID
@@ -7599,6 +7718,154 @@ function CreateProjectModal({
         </div>
       </form>
     </ModalFrame>
+  );
+}
+
+function ClientCombobox({
+  clients,
+  value,
+  placeholder,
+  disabled,
+  onChange,
+}: {
+  clients: APINodeClient[];
+  value: string;
+  placeholder: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  const listID = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const query = value.trim().toLowerCase();
+  const visibleClients = clients.filter((client) => {
+    if (!query) return true;
+    return (
+      String(client.id).includes(query) ||
+      (client.remark || "").toLowerCase().includes(query)
+    );
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [open]);
+
+  return (
+    <div className="client-combobox" ref={rootRef}>
+      <input
+        name="clientId"
+        type="text"
+        inputMode="numeric"
+        pattern="[1-9][0-9]*"
+        role="combobox"
+        aria-label="选择或输入 Client ID"
+        aria-autocomplete="list"
+        aria-controls={listID}
+        aria-expanded={open}
+        required
+        value={value}
+        disabled={disabled}
+        placeholder={placeholder}
+        onClick={() => setOpen(true)}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
+          if (event.key === "ArrowDown") setOpen(true);
+        }}
+        onChange={(event) => {
+          onChange(event.currentTarget.value);
+          setOpen(true);
+        }}
+      />
+      {open && (
+        <div className="client-combobox-menu" id={listID} role="listbox">
+          {visibleClients.length > 0 ? (
+            visibleClients.map((client) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={value === String(client.id)}
+                key={client.id}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  onChange(String(client.id));
+                  setOpen(false);
+                }}
+              >
+                <strong>#{client.id}</strong>
+                <span>{client.remark || `Client ${client.id}`}</span>
+                <small className={client.connected ? "online" : "offline"}>
+                  {client.connected ? "已连接" : "离线"}
+                </small>
+              </button>
+            ))
+          ) : (
+            <p>没有匹配的 Client，可直接输入 ID</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MultiChoiceField({
+  label,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  options: string[];
+  selected: string[];
+  onChange: (values: string[]) => void;
+}) {
+  const available = options.filter((option) => !selected.includes(option));
+  const addChoice = (choice: string) => {
+    if (!choice) return;
+    if (choice === "全部项目") {
+      onChange([choice]);
+      return;
+    }
+    onChange([...selected.filter((item) => item !== "全部项目"), choice]);
+  };
+  return (
+    <div className="multi-choice-field">
+      <UnifiedSelect
+        aria-label={label}
+        value=""
+        onChange={(event) => addChoice(event.currentTarget.value)}
+      >
+        <option value="" disabled>
+          请选择{label}
+        </option>
+        {available.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </UnifiedSelect>
+      {selected.length > 0 && (
+        <div className="multi-choice-tags" aria-label={`已选择${label}`}>
+          {selected.map((choice) => (
+            <span key={choice}>
+              {choice}
+              <button
+                type="button"
+                aria-label={`移除${choice}`}
+                onClick={() => onChange(selected.filter((item) => item !== choice))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -7802,42 +8069,20 @@ function ResourceModal({
                   {FIELD_HELP[label] && <HelpTip text={FIELD_HELP[label]} />}
                 </span>
                 {options && MULTI_CHOICE_FIELDS.has(label) ? (
-                  <select
-                    aria-label={label}
-                    name={`field-${index}`}
-                    multiple
-                    required={required}
-                    size={Math.min(5, Math.max(2, options.length))}
-                    value={selectedChoices}
-                    onChange={(event) => {
+                  <MultiChoiceField
+                    label={label}
+                    options={options}
+                    selected={selectedChoices}
+                    onChange={(selected) => {
                       setFormError("");
-                      let selected = Array.from(
-                        event.currentTarget.selectedOptions,
-                        (option) => option.value,
-                      );
-                      if (
-                        selected.includes("全部项目") &&
-                        !selectedChoices.includes("全部项目")
-                      )
-                        selected = ["全部项目"];
-                      else if (selected.length > 1)
-                        selected = selected.filter(
-                          (option) => option !== "全部项目",
-                        );
                       setMultiChoices((currentChoices) => ({
                         ...currentChoices,
                         [label]: selected,
                       }));
                     }}
-                  >
-                    {options.map((option) => (
-                      <option key={option} value={option}>
-                        {option}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 ) : options ? (
-                  <select
+                  <UnifiedSelect
                     aria-label={label}
                     name={`field-${index}`}
                     required={required}
@@ -7853,7 +8098,7 @@ function ResourceModal({
                         {option}
                       </option>
                     ))}
-                  </select>
+                  </UnifiedSelect>
                 ) : (
                   <input
                     aria-label={label}
@@ -8564,7 +8809,7 @@ function WebServiceEditor({
             </label>
             <label>
               协议
-              <select
+              <UnifiedSelect
                 name="webProtocol"
                 value={row.protocol}
                 onChange={(event) =>
@@ -8578,7 +8823,7 @@ function WebServiceEditor({
               >
                 <option value="http">HTTP</option>
                 <option value="https">HTTPS</option>
-              </select>
+              </UnifiedSelect>
             </label>
             <label>
               目标端口
@@ -8699,9 +8944,34 @@ function AddDeviceModal({
   const [sshAuthMethod, setSshAuthMethod] = useState<"password" | "key">(
     "password",
   );
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    const invalid = Array.from(event.currentTarget.elements).find(
+      (element): element is HTMLInputElement =>
+        element instanceof HTMLInputElement &&
+        !element.disabled &&
+        !element.checkValidity(),
+    );
+    if (!invalid) {
+      onSubmit(event);
+      return;
+    }
+    event.preventDefault();
+    if (invalid.name.startsWith("web")) setSection("web");
+    else if (invalid.name.startsWith("ssh")) setSection("ssh");
+    else if (invalid.name.startsWith("other")) setSection("other");
+    else setSection("basic");
+    window.requestAnimationFrame(() => {
+      invalid.focus();
+      invalid.reportValidity();
+    });
+  };
   return (
     <ModalFrame onClose={onClose} wide>
-      <form className="form-modal device-modal" onSubmit={onSubmit}>
+      <form
+        className="form-modal device-modal"
+        noValidate
+        onSubmit={submit}
+      >
         <div className="form-head">
           <div>
             <h2>手工添加设备</h2>
@@ -8741,13 +9011,13 @@ function AddDeviceModal({
             </label>
             <label>
               设备类型
-              <select name="type">
+              <UnifiedSelect name="type">
                 <option>网络设备</option>
                 <option>视频监控</option>
                 <option>门禁设备</option>
                 <option>工业控制</option>
                 <option>其他设备</option>
-              </select>
+              </UnifiedSelect>
             </label>
             <label className="full">
               厂商与型号
@@ -8797,7 +9067,7 @@ function AddDeviceModal({
             </label>
             <label>
               SSH 登录方式
-              <select
+              <UnifiedSelect
                 name="sshAuthMethod"
                 disabled={!sshEnabled}
                 value={sshAuthMethod}
@@ -8807,7 +9077,7 @@ function AddDeviceModal({
               >
                 <option value="password">密码登录</option>
                 <option value="key">密钥登录</option>
-              </select>
+              </UnifiedSelect>
             </label>
             <label>
               SSH 用户名
@@ -8901,7 +9171,7 @@ function AddDeviceModal({
                   </label>
                   <label>
                     协议
-                    <select
+                    <UnifiedSelect
                       name="otherProtocol"
                       value={row.protocol}
                       onChange={(event) => {
@@ -8931,7 +9201,7 @@ function AddDeviceModal({
                       <option value="mysql">MySQL</option>
                       <option value="postgresql">PostgreSQL</option>
                       <option value="tcp">自定义 TCP</option>
-                    </select>
+                    </UnifiedSelect>
                   </label>
                   <label>
                     目标端口
@@ -9166,14 +9436,14 @@ function ManageDeviceModal({
             </label>
             <label>
               设备类型
-              <select name="type" defaultValue={device.type}>
+              <UnifiedSelect name="type" defaultValue={device.type}>
                 <option>网络设备</option>
                 <option>视频监控</option>
                 <option>门禁设备</option>
                 <option>工业控制</option>
                 <option>自动发现设备</option>
                 <option>其他设备</option>
-              </select>
+              </UnifiedSelect>
             </label>
             <label className="full">
               厂商与型号
@@ -9237,7 +9507,7 @@ function ManageDeviceModal({
             </label>
             <label>
               SSH 登录方式
-              <select
+              <UnifiedSelect
                 name="sshAuthMethod"
                 disabled={!sshEnabled}
                 value={sshAuthMethod}
@@ -9247,7 +9517,7 @@ function ManageDeviceModal({
               >
                 <option value="password">密码登录</option>
                 <option value="key">密钥登录</option>
-              </select>
+              </UnifiedSelect>
             </label>
             <label>
               SSH 用户名
@@ -9351,7 +9621,7 @@ function ManageDeviceModal({
                   </label>
                   <label>
                     协议
-                    <select
+                    <UnifiedSelect
                       value={row.protocol}
                       onChange={(event) => {
                         const protocol = event.target
@@ -9380,7 +9650,7 @@ function ManageDeviceModal({
                       <option value="mysql">MySQL</option>
                       <option value="postgresql">PostgreSQL</option>
                       <option value="tcp">自定义 TCP</option>
-                    </select>
+                    </UnifiedSelect>
                   </label>
                   <label>
                     目标端口

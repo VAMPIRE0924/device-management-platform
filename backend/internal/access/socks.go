@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+var errSOCKSProxyUnavailable = errors.New("SOCKS5 proxy unavailable")
+
 type SOCKSDialer struct {
 	ProxyAddress string
 	Username     string
@@ -32,7 +34,7 @@ func (d SOCKSDialer) DialContext(ctx context.Context, network, address string) (
 	}
 	conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", d.ProxyAddress)
 	if err != nil {
-		return nil, fmt.Errorf("connect SOCKS5 proxy: %w", err)
+		return nil, fmt.Errorf("%w: %v", errSOCKSProxyUnavailable, err)
 	}
 	success := false
 	defer func() {

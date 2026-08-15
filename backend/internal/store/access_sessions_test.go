@@ -53,6 +53,17 @@ func TestAccessSessionIdleExpiryAndRouteRotation(t *testing.T) {
 	if first.ID == second.ID {
 		t.Fatal("route rotation must replace the logical access session")
 	}
+	touchAt := now.Add(10 * time.Minute)
+	if err := db.TouchAccessSession(ctx, second.ID, touchAt, now.Add(-time.Minute)); err != nil {
+		t.Fatalf("touch active access session: %v", err)
+	}
+	var accessLastSeen, authLastSeen string
+	if err := db.db.QueryRowContext(ctx, `SELECT s.last_seen_at,a.last_seen_at FROM access_sessions s JOIN auth_sessions a ON a.id=s.auth_session_id WHERE s.id=?`, second.ID).Scan(&accessLastSeen, &authLastSeen); err != nil {
+		t.Fatal(err)
+	}
+	if accessLastSeen != touchAt.Format(time.RFC3339Nano) || authLastSeen != touchAt.Format(time.RFC3339Nano) {
+		t.Fatalf("touch timestamps = %q / %q", accessLastSeen, authLastSeen)
+	}
 	active, err := db.ListActiveAccessSessions(ctx, now.Add(-15*time.Minute))
 	if err != nil || len(active) != 1 || active[0].ID != second.ID {
 		t.Fatalf("active sessions after route rotation = %#v, err=%v", active, err)
@@ -68,5 +79,8 @@ func TestAccessSessionIdleExpiryAndRouteRotation(t *testing.T) {
 	expired, err := db.ExpireAccessSessions(ctx, now, now.Add(-15*time.Minute))
 	if err != nil || expired != 1 {
 		t.Fatalf("expired sessions = %d, err=%v", expired, err)
+	}
+	if err := db.TouchAccessSession(ctx, second.ID, now.Add(time.Minute), now.Add(-time.Minute)); err != ErrNotFound {
+		t.Fatalf("touch expired session error = %v, want ErrNotFound", err)
 	}
 }

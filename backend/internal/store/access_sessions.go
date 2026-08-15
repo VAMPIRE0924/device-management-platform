@@ -185,6 +185,54 @@ WHERE s.token_hash = ? AND s.grant_hash = ? AND s.grant_exchanged_at IS NOT NULL
 	return session, route, nil
 }
 
+// TouchAccessSession records activity from a long-lived WebSSH connection.
+// The guarded update cannot revive an expired/revoked access or auth session.
+func (s *Store) TouchAccessSession(ctx context.Context, sessionID string, now, idleCutoff time.Time) error {
+	now = now.UTC()
+	nowText := now.Format(time.RFC3339Nano)
+	idleText := idleCutoff.UTC().Format(time.RFC3339Nano)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+UPDATE access_sessions
+SET last_seen_at = ?
+WHERE id = ? AND status = 'active' AND expires_at > ? AND last_seen_at > ?
+  AND EXISTS (
+    SELECT 1 FROM auth_sessions a JOIN users u ON u.id = a.user_id
+    WHERE a.id = access_sessions.auth_session_id AND a.user_id = access_sessions.user_id
+		  AND a.status = 'active' AND a.expires_at > ? AND a.last_seen_at > ? AND u.enabled = 1
+	  )`, nowText, sessionID, nowText, idleText, nowText, idleText)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrNotFound
+	}
+	authResult, err := tx.ExecContext(ctx, `
+UPDATE auth_sessions
+SET last_seen_at = ?
+WHERE id = (SELECT auth_session_id FROM access_sessions WHERE id = ?)
+	  AND status = 'active' AND expires_at > ?`, nowText, sessionID, nowText)
+	if err != nil {
+		return err
+	}
+	authCount, err := authResult.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if authCount != 1 {
+		return ErrNotFound
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ListActiveAccessSessions(ctx context.Context, idleCutoff time.Time) ([]AccessSession, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	rows, err := s.db.QueryContext(ctx, `

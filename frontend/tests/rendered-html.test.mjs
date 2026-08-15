@@ -77,8 +77,9 @@ test("shows all node tunnels with independent state and activity", async () => {
 
 test("creates projects by binding an existing Client and scopes CIDRs to discovery", async () => {
   const page = await readFile(pageURL, "utf8");
-  contains(page, ["项目名称", "负责人", "接入节点", "选择 Client 或手动输入 ID", "扫描内网 IP 段", '<datalist id="project-client-options">', "multiple", 'className="project-table"']);
-  assert.doesNotMatch(page, /project-client-combobox|role="listbox"|aria-expanded=/);
+  contains(page, ["项目名称", "负责人", "接入节点", "选择 Client 或手动输入 ID", "扫描内网 IP 段", "UnifiedSelect", "unified-select-menu", "ClientCombobox", "client-combobox-menu", "没有匹配的 Client，可直接输入 ID", "MultiChoiceField", 'className="project-table"']);
+  assert.equal((page.match(/<select/g) || []).length, 0, "native select elements must not remain");
+  assert.doesNotMatch(page, /project-client-select|client-combobox-select|client-combobox-chevron|<select[^>]*multiple|size=\{Math\.min|<datalist|showPicker/);
   assert.doesNotMatch(page, /关联规则|GatewayBootstrapModal|网关接入方式|客户端运行环境|范围外.*不能访问|配置后才允许发现和远程访问/);
 });
 
