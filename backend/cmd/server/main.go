@@ -264,18 +264,37 @@ func addressWithPort(address string, port int) string {
 }
 
 func accessOnlyHandler(application http.Handler, accessDomain string) http.Handler {
-	suffix := "." + strings.ToLower(strings.TrimSpace(accessDomain))
+	domain := strings.ToLower(strings.Trim(strings.TrimSpace(accessDomain), "."))
+	suffix := "." + domain
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
 		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
 			host = parsedHost
 		}
-		if suffix == "." || !strings.HasSuffix(strings.ToLower(strings.TrimSuffix(host, ".")), suffix) {
+		host = strings.ToLower(strings.TrimSuffix(host, "."))
+		label := strings.TrimSuffix(host, suffix)
+		if domain == "" || !strings.HasSuffix(host, suffix) || !validAccessHostLabel(label) {
 			http.NotFound(w, r)
 			return
 		}
 		application.ServeHTTP(w, r)
 	})
+}
+
+func validAccessHostLabel(label string) bool {
+	if !strings.HasPrefix(label, "device-") {
+		return false
+	}
+	encoded := strings.TrimPrefix(label, "device-")
+	if len(encoded) != 32 {
+		return false
+	}
+	for _, character := range encoded {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func loadTLSCertificates(cfg config.Config) ([]tls.Certificate, error) {

@@ -47,7 +47,7 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	mux.Handle("/access/web/{token}/{path...}", gateway)
 
 	bootstrapRequest := httptest.NewRequest(http.MethodGet, "https://access.example/access/web/"+token+"/.dmp/authorize", nil)
-	// Reopening a stable route leaves the previous host-scoped cookie in the
+	// Reopening a stable route leaves the previous path-scoped cookie in the
 	// browser. The dedicated authorization endpoint must still process the new
 	// fragment instead of attempting to proxy with the stale cookie.
 	bootstrapRequest.AddCookie(&http.Cookie{Name: accessGrantCookie, Value: strings.Repeat("c", 48)})
@@ -55,6 +55,9 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	mux.ServeHTTP(bootstrapResponse, bootstrapRequest)
 	if bootstrapResponse.Code != http.StatusOK {
 		t.Fatalf("bootstrap status = %d: %s", bootstrapResponse.Code, bootstrapResponse.Body.String())
+	}
+	if got := bootstrapResponse.Header().Get("X-Robots-Tag"); got != "noindex, nofollow, noarchive" {
+		t.Fatalf("bootstrap X-Robots-Tag = %q", got)
 	}
 	body := bootstrapResponse.Body.String()
 	if !strings.Contains(body, "location.hash") || !strings.Contains(body, ".dmp/session") || !strings.Contains(body, ".dmp/authorize") || strings.Contains(body, "?grant=") {
@@ -87,6 +90,30 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	}
 	if got := strings.Join(clearedSchemePaths, ","); got != "/access/web/"+token+"/,/" {
 		t.Fatalf("cleared scheme cookie paths = %q", got)
+	}
+
+	formRequest := httptest.NewRequest(http.MethodPost, "https://device-route.access.example/access/web/"+token+"/.dmp/session", strings.NewReader("grant="+grant))
+	formRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	formRequest.Header.Set("Origin", "https://panel.example")
+	formRequest.Header.Set("Sec-Fetch-Mode", "navigate")
+	formRequest.Header.Set("Sec-Fetch-Dest", "document")
+	formResponse := httptest.NewRecorder()
+	mux.ServeHTTP(formResponse, WithSessionSubdomainAccess(formRequest))
+	var formCookie *http.Cookie
+	for _, cookie := range formResponse.Result().Cookies() {
+		if cookie.Name == accessGrantCookie {
+			formCookie = cookie
+			break
+		}
+	}
+	if formResponse.Code != http.StatusSeeOther || formResponse.Header().Get("Location") != "/" {
+		t.Fatalf("form exchange = %d location=%q: %s", formResponse.Code, formResponse.Header().Get("Location"), formResponse.Body.String())
+	}
+	if formCookie == nil || formCookie.Path != "/" || formCookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("form exchange cookie = %#v", formCookie)
+	}
+	if got := formResponse.Header().Get("X-Robots-Tag"); got != "noindex, nofollow, noarchive" {
+		t.Fatalf("form exchange X-Robots-Tag = %q", got)
 	}
 
 	foreignOriginRequest := httptest.NewRequest(http.MethodPost, "https://access.example/access/web/"+token+"/.dmp/session", strings.NewReader(`{"grant":"`+grant+`"}`))

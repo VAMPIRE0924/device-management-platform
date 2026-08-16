@@ -164,13 +164,21 @@ func TestIndependentAccessListenerRejectsControlPlaneHosts(t *testing.T) {
 
 	for _, test := range []struct {
 		host       string
+		path       string
 		wantStatus int
-	}{{"panel.example.test", http.StatusNotFound}, {"remote.example.test", http.StatusNotFound}, {"session.remote.example.test:28443", http.StatusNoContent}} {
-		request := httptest.NewRequest(http.MethodGet, "http://"+test.host+"/", nil)
+	}{
+		{"panel.example.test", "/access/web/device-0123456789abcdef0123456789abcdef/", http.StatusNotFound},
+		{"remote.example.test", "/", http.StatusNotFound},
+		{"remote.example.test", "/api/v1/projects", http.StatusNotFound},
+		{"remote.example.test:28443", "/access/web/device-0123456789abcdef0123456789abcdef/", http.StatusNotFound},
+		{"invalid.remote.example.test:28443", "/", http.StatusNotFound},
+		{"device-0123456789abcdef0123456789abcdef.remote.example.test:28443", "/", http.StatusNoContent},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "http://"+test.host+test.path, nil)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != test.wantStatus {
-			t.Fatalf("host %s status = %d, want %d", test.host, response.Code, test.wantStatus)
+			t.Fatalf("host %s path %s status = %d, want %d", test.host, test.path, response.Code, test.wantStatus)
 		}
 	}
 	if forwarded != 1 {

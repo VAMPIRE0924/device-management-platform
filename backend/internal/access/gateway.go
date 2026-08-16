@@ -121,22 +121,49 @@ func (g *WebGateway) exchangeGrant(w http.ResponseWriter, r *http.Request, token
 		gatewayError(w, http.StatusMethodNotAllowed, "访问授权交换仅支持 POST")
 		return
 	}
-	expectedOrigin := "http://" + r.Host
-	if accessRequestUsesHTTPS(r) {
-		expectedOrigin = "https://" + r.Host
+	formNavigation := strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "application/x-www-form-urlencoded")
+	var grant string
+	if formNavigation {
+		// A top-level form POST avoids loading an executable authorization page on
+		// the device origin. Possession of the 192-bit, one-time grant is the
+		// authorization; optional Fetch Metadata headers are still constrained
+		// when a browser supplies them.
+		if mode := strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")); mode != "" && mode != "navigate" {
+			gatewayError(w, http.StatusForbidden, "访问授权导航方式无效")
+			return
+		}
+		if destination := strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")); destination != "" && destination != "document" {
+			gatewayError(w, http.StatusForbidden, "访问授权导航目标无效")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1024)
+		if err := r.ParseForm(); err != nil || len(r.PostForm) != 1 || len(r.PostForm["grant"]) != 1 {
+			gatewayError(w, http.StatusBadRequest, "访问授权格式无效")
+			return
+		}
+		grant = strings.TrimSpace(r.PostForm.Get("grant"))
+	} else {
+		expectedOrigin := "http://" + r.Host
+		if accessRequestUsesHTTPS(r) {
+			expectedOrigin = "https://" + r.Host
+		}
+		if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Origin")), expectedOrigin) {
+			gatewayError(w, http.StatusForbidden, "访问授权来源无效")
+			return
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+		decoder.DisallowUnknownFields()
+		var input webGrantRequest
+		if err := decoder.Decode(&input); err != nil {
+			gatewayError(w, http.StatusBadRequest, "访问授权格式无效")
+			return
+		}
+		grant = strings.TrimSpace(input.Grant)
 	}
-	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Origin")), expectedOrigin) {
-		gatewayError(w, http.StatusForbidden, "访问授权来源无效")
-		return
-	}
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
-	decoder.DisallowUnknownFields()
-	var input webGrantRequest
-	if err := decoder.Decode(&input); err != nil || !validAccessToken(strings.TrimSpace(input.Grant)) {
+	if !validAccessToken(grant) {
 		gatewayError(w, http.StatusBadRequest, "访问授权格式无效")
 		return
 	}
-	grant := strings.TrimSpace(input.Grant)
 	tokenDigest := sha256.Sum256([]byte(token))
 	grantDigest := sha256.Sum256([]byte(grant))
 	idleCutoff := time.Now().UTC().Add(-g.idleTTL)
@@ -145,12 +172,23 @@ func (g *WebGateway) exchangeGrant(w http.ResponseWriter, r *http.Request, token
 		gatewayError(w, http.StatusGone, "访问授权不存在、已使用或登录已超时")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: accessGrantCookie, Value: grant, Path: cookiePath, HttpOnly: true, Secure: accessRequestUsesHTTPS(r), SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
+	sameSite := http.SameSiteStrictMode
+	if formNavigation {
+		// Lax allows the cookie on the top-level GET following a cross-site form
+		// launch while still withholding it from cross-site subrequests and POSTs.
+		sameSite = http.SameSiteLaxMode
+	}
+	http.SetCookie(w, &http.Cookie{Name: accessGrantCookie, Value: grant, Path: cookiePath, HttpOnly: true, Secure: accessRequestUsesHTTPS(r), SameSite: sameSite, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
 	// A previous visit may have followed a device HTTP -> HTTPS redirect. Do not
 	// let that short-lived upstream choice leak into a newly authorized visit.
 	clearUpstreamSchemeCookies(w, r, cookiePath)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
+	if formNavigation {
+		http.Redirect(w, r, cookiePath, http.StatusSeeOther)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -185,6 +223,7 @@ func serveGrantBootstrap(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
@@ -307,6 +346,7 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, reques
 			}
 			response.Header.Set("Cache-Control", "no-store")
 			response.Header.Set("Referrer-Policy", "no-referrer")
+			response.Header.Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 			return nil
 		},
 		ErrorHandler: func(writer http.ResponseWriter, _ *http.Request, err error) {

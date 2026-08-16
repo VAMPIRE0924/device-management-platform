@@ -57,7 +57,7 @@ test("initializes the first administrator without deployment tokens", async () =
 
 test("opens opaque Web and SSH sessions without exposing routes", async () => {
   const page = await readFile(pageURL, "utf8");
-  contains(page, ['window.open("about:blank", "_blank")', "opened.opener = null", 'api.createAccessSession(endpoint.endpointId, "web")', '"ssh"', "opened.location.replace(session.launchUrl)", "浏览器阻止了新标签页"]);
+  contains(page, ['window.open("about:blank", "_blank")', "opened.opener = null", 'api.createAccessSession(endpoint.endpointId, "web")', "submitWebAccessGrant", 'form.method = "post"', 'grantField.name = "grant"', '"ssh"', "opened.location.replace(session.launchUrl)", "浏览器阻止了新标签页"]);
   assert.doesNotMatch(page, /JSON\.stringify\([^\n]*remoteSession|setModal\("web"\)|setModal\("ssh"\)/);
 });
 
@@ -93,7 +93,10 @@ test("persists the compact per-project discovery contract", async () => {
 
 test("edits devices atomically with per-service HTTPS and practical SSH settings", async () => {
   const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
-  contains(page, ["api.updateDevice", "endpoints:", "api.createDevices", "事务化导入", "Web 服务入口", "TCP 服务", "创建访问入口", "TLS 校验主机名", "SSH 主机密钥指纹", "SSH 登录方式", "SSH 私钥文件路径", "密码加密保存且不回显"]);
+  contains(page, ["api.updateDevice", "endpoints:", "api.createDevices", "事务化导入", "Web 服务入口", "TCP 服务", "创建访问入口", "TLS 校验主机名", "SSH 主机密钥指纹", "SSH 登录方式", "SSH 私钥文件路径", "密码加密保存且不回显", "sshCredentialChanged", "canReuseStoredSSHSecret", "请完成当前分类中的必填项"]);
+  const manageDevice = page.slice(page.indexOf("function ManageDeviceModal"), page.indexOf("function parseCSVLine"));
+  assert.doesNotMatch(manageDevice, /name="sshUsername"[\s\S]{0,100}required=/);
+  assert.doesNotMatch(manageDevice, /name="sshKeyPath"[\s\S]{0,100}required=/);
   for (const removed of ["HTTPS 高级设置", "允许设备自签名证书", "授权凭据引用（可选）", "临时允许未知主机密钥"]) assert.doesNotMatch(page, new RegExp(removed));
   contains(api, ["tlsServerName", "credentialConfigured", "sshHostKeyFingerprint", "sshAuthMethod", "sshUsername", "sshKeyPath"]);
   assert.doesNotMatch(api, /addEndpoint\(|updateEndpoint\(|deleteEndpoint\(/);

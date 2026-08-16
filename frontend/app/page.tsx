@@ -1847,6 +1847,32 @@ export default function Home() {
     setSocksStatus((items) => ({ ...items, [project.code]: true }));
   };
 
+  const submitWebAccessGrant = (opened: Window, launchUrl: string) => {
+    try {
+      const launch = new URL(launchUrl, window.location.href);
+      const grant = /^#grant=([0-9a-f]{48})$/.exec(launch.hash)?.[1];
+      const authorizeSuffix = "/.dmp/authorize";
+      if (!grant || !launch.pathname.endsWith(authorizeSuffix)) {
+        return false;
+      }
+      launch.hash = "";
+      launch.pathname = `${launch.pathname.slice(0, -"authorize".length)}session`;
+      const form = opened.document.createElement("form");
+      form.method = "post";
+      form.action = launch.toString();
+      const grantField = opened.document.createElement("input");
+      grantField.type = "hidden";
+      grantField.name = "grant";
+      grantField.value = grant;
+      form.appendChild(grantField);
+      opened.document.body.replaceChildren(form);
+      form.submit();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const openWeb = async (device: Device, webUrl?: string) => {
     const project = projectItems.find(
       (item) => item.code === device.projectCode,
@@ -1872,7 +1898,10 @@ export default function Home() {
     try {
       const session = await api.createAccessSession(endpoint.endpointId, "web");
       markProjectTunnelOpen(project);
-      opened.location.replace(session.launchUrl);
+      if (!submitWebAccessGrant(opened, session.launchUrl)) {
+        // Compatibility fallback for older or non-standard access gateways.
+        opened.location.replace(session.launchUrl);
+      }
     } catch (error) {
       opened.close();
       setToast(error instanceof Error ? error.message : "Web 访问会话创建失败");
@@ -9307,6 +9336,24 @@ function ManageDeviceModal({
   const [error, setError] = useState("");
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const invalid = Array.from(event.currentTarget.elements).find(
+      (element): element is HTMLInputElement =>
+        element instanceof HTMLInputElement &&
+        !element.disabled &&
+        !element.checkValidity(),
+    );
+    if (invalid) {
+      if (invalid.name.startsWith("web")) setSection("web");
+      else if (invalid.name.startsWith("ssh")) setSection("ssh");
+      else if (invalid.name.startsWith("other")) setSection("other");
+      else setSection("basic");
+      setError("请完成当前分类中的必填项");
+      window.requestAnimationFrame(() => {
+        invalid.focus();
+        invalid.reportValidity();
+      });
+      return;
+    }
     const form = new FormData(event.currentTarget);
     const host = String(form.get("host") || device.host);
     const webServices = webRows
@@ -9321,13 +9368,30 @@ function ManageDeviceModal({
     const sshUsername = String(form.get("sshUsername") || "").trim();
     const sshPassword = String(form.get("sshPassword") || "");
     const sshKeyPath = String(form.get("sshKeyPath") || "").trim();
-    if (
+    const existingSSHAuthMethod =
+      sshEndpoint?.sshAuthMethod === "key" ? "key" : "password";
+    const hasStoredSSHCredential = Boolean(
+      sshEndpoint?.credentialConfigured,
+    );
+    const sshCredentialChanged =
       sshEnabled &&
+      (hasStoredSSHCredential
+        ? sshAuthMethod !== existingSSHAuthMethod ||
+          sshUsername !== (sshEndpoint?.sshUsername || "") ||
+          Boolean(sshPassword) ||
+          (sshAuthMethod === "key" &&
+            sshKeyPath !== (sshEndpoint?.sshKeyPath || ""))
+        : Boolean(sshUsername || sshPassword || sshKeyPath));
+    const canReuseStoredSSHSecret =
+      hasStoredSSHCredential && sshAuthMethod === existingSSHAuthMethod;
+    if (
+      sshCredentialChanged &&
       (!sshUsername ||
         (sshAuthMethod === "password"
-          ? !sshPassword && !sshEndpoint?.credentialConfigured
+          ? !sshPassword && !canReuseStoredSSHSecret
           : !sshKeyPath))
     ) {
+      setSection("ssh");
       setError(
         sshAuthMethod === "password"
           ? "请填写 SSH 用户名和密码"
@@ -9355,13 +9419,16 @@ function ManageDeviceModal({
               sshHostKeyFingerprint: String(
                 form.get("sshHostKeyFingerprint") || "",
               ).trim(),
-              sshCredential: {
-                method: sshAuthMethod,
-                username: sshUsername,
-                password:
-                  sshAuthMethod === "password" ? sshPassword : undefined,
-                keyPath: sshAuthMethod === "key" ? sshKeyPath : undefined,
-              },
+              sshCredential: sshCredentialChanged
+                ? {
+                    method: sshAuthMethod,
+                    username: sshUsername,
+                    password:
+                      sshAuthMethod === "password" ? sshPassword : undefined,
+                    keyPath:
+                      sshAuthMethod === "key" ? sshKeyPath : undefined,
+                  }
+                : undefined,
             },
           ]
         : []),
@@ -9399,7 +9466,11 @@ function ManageDeviceModal({
   };
   return (
     <ModalFrame onClose={onClose} wide>
-      <form className="form-modal device-modal" onSubmit={submit}>
+      <form
+        className="form-modal device-modal"
+        noValidate
+        onSubmit={submit}
+      >
         <div className="form-head">
           <div>
             <h2>管理设备与访问入口</h2>
@@ -9524,7 +9595,6 @@ function ManageDeviceModal({
               <input
                 name="sshUsername"
                 disabled={!sshEnabled}
-                required={sshEnabled}
                 defaultValue={sshEndpoint?.sshUsername || ""}
                 placeholder="例如 root"
                 autoComplete="off"
@@ -9551,7 +9621,6 @@ function ManageDeviceModal({
                 <input
                   name="sshKeyPath"
                   disabled={!sshEnabled}
-                  required={sshEnabled}
                   defaultValue={sshEndpoint?.sshKeyPath || ""}
                   placeholder="/run/secrets/device_ssh_key"
                   autoComplete="off"
@@ -9603,102 +9672,105 @@ function ManageDeviceModal({
                   : undefined;
                 return (
                   <div className="web-service-row" key={row.id}>
-                  <label>
-                    服务名称
-                    <input
-                      required
-                      value={row.name}
-                      onChange={(event) =>
-                        setOtherRows((rows) =>
-                          rows.map((item) =>
-                            item.id === row.id
-                              ? { ...item, name: event.target.value }
-                              : item,
-                          ),
-                        )
-                      }
-                    />
-                  </label>
-                  <label>
-                    协议
-                    <UnifiedSelect
-                      value={row.protocol}
-                      onChange={(event) => {
-                        const protocol = event.target
-                          .value as OtherServiceProtocol;
-                        const preset = OTHER_SERVICE_DEFAULTS[protocol];
-                        setOtherRows((rows) =>
-                          rows.map((item) =>
-                            item.id === row.id
-                              ? {
-                                  ...item,
-                                  name:
-                                    item.name ===
-                                    OTHER_SERVICE_DEFAULTS[item.protocol].name
-                                      ? preset.name
-                                      : item.name,
-                                  protocol,
-                                  port: preset.port,
-                                }
-                              : item,
-                          ),
-                        );
-                      }}
-                    >
-                      <option value="rtsp">RTSP</option>
-                      <option value="rdp">RDP</option>
-                      <option value="mysql">MySQL</option>
-                      <option value="postgresql">PostgreSQL</option>
-                      <option value="tcp">自定义 TCP</option>
-                    </UnifiedSelect>
-                  </label>
-                  <label>
-                    目标端口
-                    <input
-                      type="number"
-                      min="1"
-                      max="65535"
-                      required
-                      value={row.port}
-                      onChange={(event) =>
-                        setOtherRows((rows) =>
-                          rows.map((item) =>
-                            item.id === row.id
-                              ? { ...item, port: event.target.value }
-                              : item,
-                          ),
-                        )
-                      }
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    aria-label={`删除 TCP 服务 ${index + 1}`}
-                    onClick={() =>
-                      setOtherRows((rows) =>
-                        rows.filter((item) => item.id !== row.id),
-                      )
-                    }
-                  >
-                    ×
-                  </button>
-                  <div className="native-service-actions">
-                    <span>
-                      {forward
-                        ? `${forward.serverPort} · ${forward.status === "running" ? "运行中" : "已停止"}`
-                        : row.endpointId
-                          ? "尚未创建访问入口"
-                          : "保存配置后可创建访问入口"}
-                    </span>
-                    {row.endpointId && (
-                      <button
-                        type="button"
-                        onClick={() => onOpenForward(row.endpointId!)}
+                    <label>
+                      服务名称
+                      <input
+                        name="otherServiceName"
+                        required
+                        value={row.name}
+                        onChange={(event) =>
+                          setOtherRows((rows) =>
+                            rows.map((item) =>
+                              item.id === row.id
+                                ? { ...item, name: event.target.value }
+                                : item,
+                            ),
+                          )
+                        }
+                      />
+                    </label>
+                    <label>
+                      协议
+                      <UnifiedSelect
+                        name="otherProtocol"
+                        value={row.protocol}
+                        onChange={(event) => {
+                          const protocol = event.target
+                            .value as OtherServiceProtocol;
+                          const preset = OTHER_SERVICE_DEFAULTS[protocol];
+                          setOtherRows((rows) =>
+                            rows.map((item) =>
+                              item.id === row.id
+                                ? {
+                                    ...item,
+                                    name:
+                                      item.name ===
+                                      OTHER_SERVICE_DEFAULTS[item.protocol].name
+                                        ? preset.name
+                                        : item.name,
+                                    protocol,
+                                    port: preset.port,
+                                  }
+                                : item,
+                            ),
+                          );
+                        }}
                       >
-                        {forward ? "管理访问入口" : "创建访问入口"}
-                      </button>
-                    )}
-                  </div>
+                        <option value="rtsp">RTSP</option>
+                        <option value="rdp">RDP</option>
+                        <option value="mysql">MySQL</option>
+                        <option value="postgresql">PostgreSQL</option>
+                        <option value="tcp">自定义 TCP</option>
+                      </UnifiedSelect>
+                    </label>
+                    <label>
+                      目标端口
+                      <input
+                        name="otherPort"
+                        type="number"
+                        min="1"
+                        max="65535"
+                        required
+                        value={row.port}
+                        onChange={(event) =>
+                          setOtherRows((rows) =>
+                            rows.map((item) =>
+                              item.id === row.id
+                                ? { ...item, port: event.target.value }
+                                : item,
+                            ),
+                          )
+                        }
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      aria-label={`删除 TCP 服务 ${index + 1}`}
+                      onClick={() =>
+                        setOtherRows((rows) =>
+                          rows.filter((item) => item.id !== row.id),
+                        )
+                      }
+                    >
+                      ×
+                    </button>
+                    <div className="native-service-actions">
+                      <span>
+                        {forward
+                          ? `${forward.serverPort} · ${forward.status === "running" ? "运行中" : "已停止"}`
+                          : row.endpointId
+                            ? "尚未创建访问入口"
+                            : "保存配置后可创建访问入口"}
+                      </span>
+                      {row.endpointId && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenForward(row.endpointId!)}
+                        >
+                          {forward ? "管理访问入口" : "创建访问入口"}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 );
               })}
