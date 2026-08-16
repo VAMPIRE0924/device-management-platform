@@ -1960,9 +1960,9 @@ func newAccessToken() (string, string, error) {
 }
 
 func stableWebRouteToken(userID, endpointID string) (string, string) {
-	// v2 is a one-time route migration paired with the form-POST grant exchange.
-	// It retires origins that may already carry a Safe Browsing verdict; the
-	// resulting route remains stable and must not rotate on each launch.
+	// v2 is a one-time route migration that retires origins which may already
+	// carry a Safe Browsing verdict. The resulting route remains stable and must
+	// not rotate on each launch.
 	digest := sha256.Sum256([]byte("web-route-v2\x00" + userID + "\x00" + endpointID))
 	token := "device-" + hex.EncodeToString(digest[:16])
 	tokenDigest := sha256.Sum256([]byte(token))

@@ -1847,32 +1847,6 @@ export default function Home() {
     setSocksStatus((items) => ({ ...items, [project.code]: true }));
   };
 
-  const submitWebAccessGrant = (opened: Window, launchUrl: string) => {
-    try {
-      const launch = new URL(launchUrl, window.location.href);
-      const grant = /^#grant=([0-9a-f]{48})$/.exec(launch.hash)?.[1];
-      const authorizeSuffix = "/.dmp/authorize";
-      if (!grant || !launch.pathname.endsWith(authorizeSuffix)) {
-        return false;
-      }
-      launch.hash = "";
-      launch.pathname = `${launch.pathname.slice(0, -"authorize".length)}session`;
-      const form = opened.document.createElement("form");
-      form.method = "post";
-      form.action = launch.toString();
-      const grantField = opened.document.createElement("input");
-      grantField.type = "hidden";
-      grantField.name = "grant";
-      grantField.value = grant;
-      form.appendChild(grantField);
-      opened.document.body.replaceChildren(form);
-      form.submit();
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
   const openWeb = async (device: Device, webUrl?: string) => {
     const project = projectItems.find(
       (item) => item.code === device.projectCode,
@@ -1898,10 +1872,7 @@ export default function Home() {
     try {
       const session = await api.createAccessSession(endpoint.endpointId, "web");
       markProjectTunnelOpen(project);
-      if (!submitWebAccessGrant(opened, session.launchUrl)) {
-        // Compatibility fallback for older or non-standard access gateways.
-        opened.location.replace(session.launchUrl);
-      }
+      opened.location.replace(session.launchUrl);
     } catch (error) {
       opened.close();
       setToast(error instanceof Error ? error.message : "Web 访问会话创建失败");

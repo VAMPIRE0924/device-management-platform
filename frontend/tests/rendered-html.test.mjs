@@ -57,7 +57,7 @@ test("initializes the first administrator without deployment tokens", async () =
 
 test("opens opaque Web and SSH sessions without exposing routes", async () => {
   const page = await readFile(pageURL, "utf8");
-  contains(page, ['window.open("about:blank", "_blank")', "opened.opener = null", 'api.createAccessSession(endpoint.endpointId, "web")', "submitWebAccessGrant", 'form.method = "post"', 'grantField.name = "grant"', '"ssh"', "opened.location.replace(session.launchUrl)", "浏览器阻止了新标签页"]);
+  contains(page, ['window.open("about:blank", "_blank")', "opened.opener = null", 'api.createAccessSession(endpoint.endpointId, "web")', '"ssh"', "opened.location.replace(session.launchUrl)", "浏览器阻止了新标签页"]);
   assert.doesNotMatch(page, /JSON\.stringify\([^\n]*remoteSession|setModal\("web"\)|setModal\("ssh"\)/);
 });
 
