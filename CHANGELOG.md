@@ -19,7 +19,7 @@
 ## v1.0.0 - 2026-08-15
 
 - 发布 设备管理平台 首个正式容器版本。
-- 完成重构版 NPS 节点、Client 和 SOCKS 通道接入。
+- 完成重构版 NPS 节点、Client 和 SOCKS隧道接入。
 - 完成客户项目、设备发现、多 Web 服务、WebSSH、权限、策略、监控和审计。
 - 完成节点与 SSH 密码加密持久化、MFA、SQLite 一致性备份和离线恢复。
 - 完成独立泛域名 Web 网关以及 HTTP、HTTPS、WebSocket 和重定向兼容。

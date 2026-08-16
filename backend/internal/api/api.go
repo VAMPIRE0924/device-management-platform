@@ -731,7 +731,7 @@ func (s *server) monitorSnapshot(w http.ResponseWriter, r *http.Request) {
 			nodeResult.LatencyMS = time.Since(started).Milliseconds()
 			if listErr != nil {
 				nodeResult.Status = "unreachable"
-				nodeResult.Message = "节点 API 或托管通道接口不可达"
+				nodeResult.Message = "节点 API 或 SOCKS隧道接口不可达"
 				return
 			}
 			nodeResult.Status = "healthy"
@@ -891,7 +891,7 @@ func (s *server) managedTunnels(w http.ResponseWriter, r *http.Request) {
 	}
 	tunnels, err := s.nodes.ListManagedTunnels(r.Context(), r.PathValue("nodeID"))
 	if err != nil {
-		writeError(w, r, http.StatusBadGateway, "node_request_failed", "读取托管通道失败", nil)
+		writeError(w, r, http.StatusBadGateway, "node_request_failed", "读取 SOCKS隧道失败", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": tunnels, "total": len(tunnels)})
@@ -909,23 +909,23 @@ func (s *server) setManagedTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	action := r.PathValue("action")
 	if action != "start" && action != "stop" {
-		writeError(w, r, http.StatusNotFound, "not_found", "不支持的通道操作", nil)
+		writeError(w, r, http.StatusNotFound, "not_found", "不支持的 SOCKS隧道操作", nil)
 		return
 	}
 	running := action == "start"
 	if err := s.nodes.SetManagedTunnel(r.Context(), r.PathValue("nodeID"), clientID, running); err != nil {
-		writeError(w, r, http.StatusBadGateway, "tunnel_operation_failed", "托管通道操作失败", nil)
+		writeError(w, r, http.StatusBadGateway, "tunnel_operation_failed", "SOCKS隧道操作失败", nil)
 		return
 	}
 	audit := auditFromRequest(r, "managed_tunnel."+action, "managed_tunnel")
 	audit.ResourceID = fmt.Sprintf("%s:socks5:%d", r.PathValue("nodeID"), clientID)
 	if err := s.store.AppendAudit(r.Context(), audit); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "audit_write_failed", "通道操作已执行，但审计写入失败，请立即核对节点状态", nil)
+		writeError(w, r, http.StatusInternalServerError, "audit_write_failed", "SOCKS隧道操作已执行，但审计写入失败，请立即核对节点状态", nil)
 		return
 	}
 	status, err := s.nodes.ManagedTunnelStatus(r.Context(), r.PathValue("nodeID"), clientID)
 	if err != nil {
-		writeError(w, r, http.StatusBadGateway, "tunnel_status_failed", "通道操作已执行，但无法读取最新运行状态", nil)
+		writeError(w, r, http.StatusBadGateway, "tunnel_status_failed", "SOCKS隧道操作已执行，但无法读取最新运行状态", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
@@ -1390,7 +1390,7 @@ func (s *server) verifyDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	route, err := s.store.DiscoveryRoute(r.Context(), projectID)
 	if err != nil {
-		writeError(w, r, http.StatusConflict, "gateway_not_bound", "项目尚未绑定可用通道", nil)
+		writeError(w, r, http.StatusConflict, "gateway_not_bound", "项目尚未绑定可用 SOCKS隧道", nil)
 		return
 	}
 	ports := make([]store.DiscoveryPort, 0, len(device.Endpoints))
@@ -1510,7 +1510,7 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 		return createdAccessSession{}, false
 	}
 	if err := s.nodes.SetManagedTunnel(r.Context(), route.NodeID, route.ClientID, true); err != nil {
-		writeError(w, r, http.StatusBadGateway, "managed_tunnel_unavailable", "远程访问前无法启动托管通道", nil)
+		writeError(w, r, http.StatusBadGateway, "managed_tunnel_unavailable", "远程访问前无法启动 SOCKS隧道", nil)
 		return createdAccessSession{}, false
 	}
 	grant, grantHash, err := newAccessToken()
@@ -1905,7 +1905,7 @@ func (s *server) createDiscoveryJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.discovery.Start(r.Context(), job, route); err != nil {
 		_ = s.store.SetDiscoveryJobState(context.WithoutCancel(r.Context()), job.ID, "failed", 0)
-		writeError(w, r, http.StatusUnprocessableEntity, "discovery_start_failed", "自动发现任务无法启动，请检查范围、端口数和项目通道", nil)
+		writeError(w, r, http.StatusUnprocessableEntity, "discovery_start_failed", "自动发现任务无法启动，请检查范围、端口数和项目 SOCKS隧道", nil)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
