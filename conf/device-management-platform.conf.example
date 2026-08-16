@@ -33,7 +33,8 @@ mfa_email_code_ttl = 10m
 # access_http_port = 0
 # access_https_port = 0
 
-# 部署完成后可在系统设置中配置面板域名和 Web 反代域名。
+# 部署完成后可在系统设置中配置严格分离的面板域名和 Web 反代域名，
+# 例如 dmp.example.com 与 *.console.example.com。Web 访问不提供面板路径回退。
 
 # 只填写真实反向代理的容器或主机网段；直连部署可留空。
 # trusted_proxy_cidrs = 172.20.0.0/24

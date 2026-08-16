@@ -8,10 +8,10 @@
 
 - 管理 NPS 接入节点，节点认证信息加密保存。
 - 查看和新增 NPS Client；项目只绑定既有 Client，不代替 NPS 管理 Client 生命周期。
-- 平台控制 SOCKS 通道启停，远程访问时自动启动；NPS 负责空闲关闭。
+- 创建远程访问会话时启动项目 SOCKS 通道，Web/WebSocket/WebSSH 的真实流量续期；平台与 NPS 均按最长 30 分钟无流量回收，不在拨号失败后自动复活旧通道。
 - 按项目配置多个扫描网段与端口，发现 HTTP、HTTPS、SSH 等内网服务。
 - 每台设备可配置多个 Web 服务，HTTPS 参数按服务独立保存。
-- 基于独立泛域名代理 Web 服务，支持独立反代证书、可选独立端口、Cookie、重定向、动态接口和 WebSocket。
+- 每个 Web 访问会话使用独立的短随机子域名，支持独立反代证书、可选独立端口、原生 Cookie、重定向、动态接口和 WebSocket；面板域名不承载 Web 反代。
 - WebSSH 支持保存的密码或本地密钥，也支持单次临时凭据。
 - 提供用户权限、访问策略、运行监控、操作审计、MFA、备份和恢复。
 
@@ -32,8 +32,8 @@ Compose 不设置宿主机 `ports` 映射。容器默认监听 HTTP 80；在系�
 
 正式部署应配置面板域名和对应泛域名，例如：
 
-- `admin.example.com`
-- `*.admin.example.com`
+- 面板：`dmp.example.com`
+- Web 反代：`*.console.example.com`
 
 首次打开面板时直接创建系统管理员，无需部署令牌。平台内部 API 令牌由容器自动生成并持久化到 `/data/api.token`。完整配置见 [Docker 部署说明](./docs/部署运维/Docker部署.md)。
 
@@ -44,6 +44,14 @@ docker pull vampirerune/device-management-platform:v1.0.11
 ```
 
 已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，不要长期依赖 `latest`。
+
+镜像渠道严格分离：
+
+- `v1.0.11`：当前正式版本；
+- `latest`：始终与最新正式版本一致；
+- `dev`：仅用于 `dev` 分支测试，不得部署到生产环境。
+
+正式版本只从 `main` 当前提交上的 `vX.Y.Z` 标签发布。日常修复先进入 `dev`，通过完整验证后才能进入下一次正式发布。开发环境、分支和发布流程见 [本地开发与发布](./docs/开发维护/本地开发与发布.md)。
 
 ## 数据与安全
 

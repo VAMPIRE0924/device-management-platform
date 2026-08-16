@@ -9,7 +9,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const docs = path.resolve(process.argv[2]);
-const requiredDirectories = ["部署运维"];
+const requiredDirectories = ["部署运维", "开发维护"];
 const errors = [];
 
 for (const directory of requiredDirectories) {
@@ -20,6 +20,9 @@ for (const directory of requiredDirectories) {
 
 for (const document of ["Docker部署.md", "构建部署与备份.md", "登录安全与双重认证.md"]) {
   if (!fs.existsSync(path.join(docs, "部署运维", document))) errors.push(`缺少部署资料：部署运维/${document}`);
+}
+if (!fs.existsSync(path.join(docs, "开发维护", "本地开发与发布.md"))) {
+  errors.push("缺少开发资料：开发维护/本地开发与发布.md");
 }
 
 const rootFiles = fs.readdirSync(docs, { withFileTypes: true })

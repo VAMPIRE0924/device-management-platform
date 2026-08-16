@@ -1,13 +1,13 @@
 # Docker 正式部署
 
-本文适用于 `vampirerune/device-management-platform:v1.0.10`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
+本文适用于 `vampirerune/device-management-platform:v1.0.11`。平台是单容器、单实例 SQLite 应用，不允许多个容器同时写同一个数据目录。
 
 ## 最简 Compose
 
 ```yaml
 services:
   platform:
-    image: vampirerune/device-management-platform:v1.0.10
+    image: vampirerune/device-management-platform:v1.0.11
     container_name: device-management-platform
     restart: unless-stopped
     volumes:
@@ -43,7 +43,7 @@ docker compose logs --tail=100 platform
 在“系统设置”中分开配置：
 
 - 面板地址、面板证书和私钥路径；
-- 反代地址，例如 `*.admin.example.com`，界面中的 `*.` 为固定前缀；
+- 反代地址，例如 `*.console.example.com`，界面中的 `*.` 为固定且不可编辑的前缀；
 - 反代泛域名的证书和私钥路径。若面板证书已覆盖该泛域名，可留空复用；
 - 反代端口默认复用面板 HTTP/HTTPS 端口，也可成对配置独立端口。
 
@@ -77,7 +77,7 @@ docker compose up -d
 docker compose ps
 ```
 
-`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.10` 这类完整版本号。
+`latest` 始终指向最新正式镜像；需要严格控制升级时间时固定 `v1.0.11` 这类完整版本号。`dev` 是测试镜像，可能随 `dev` 分支的每次推送变化，不得用于生产部署。
 
 ## 常见问题
 
@@ -98,4 +98,4 @@ v1.0.4 起，登录 Cookie 会按实际访问协议自动设置：HTTP 不带 `S
 
 ### 为什么反代地址偶尔被 Chrome 标记为“危险网站”
 
-这是 Chrome Safe Browsing 的站点声誉或内容判定页面，不是 TLS 证书错误。v1.0.11 为每个“平台用户 + Web Endpoint”生成长期稳定的短不透明 `web-*` 子域（例如 `web-k7m2x9p4`）：同一入口重复打开不会持续产生新域名，也不存在共享入口池或全局数量上限；发生短标签碰撞时由数据库事务自动选择稳定备用标签。入口仍通过一次性授权、来源绑定、有效平台登录和独立设备 Cookie 命名空间隔离会话。设备域授权完成页及上游 HTML 页面会明确显示 I5CLOUD 代理关系。已被 Google 标记的旧 `device-*` 或长随机主机不会因升级立即清除历史标记；部署新版后还应由 `66yoyo.com` 的 Search Console 所有者在“安全性问题”中提交复核。
+这是 Chrome Safe Browsing 的站点声誉或内容判定页面，不是 TLS 证书错误，不能仅凭域名前缀长度直接定因。v1.0.11 每次创建 Web 访问会话都会生成新的短随机 `web-*` 子域（例如 `web-k7m2x9p4`），不存在固定入口池、用户/设备派生域名或全局数量上限。随机域名本身不授权；访问仍必须通过一次性授权、来源绑定和有效平台登录，设备 Cookie 由每个随机 Origin 自然隔离。已被 Google 标记的历史主机不会因升级立即清除记录；若当前随机主机仍被提示，应记录完整主机名、时间、目标服务和 Chrome 警告详情，再由域名所有者通过 Search Console 的“安全性问题”提交复核。
