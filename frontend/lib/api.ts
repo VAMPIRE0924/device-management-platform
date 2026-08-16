@@ -28,6 +28,29 @@ function csrfCookie(): string {
   return item ? decodeURIComponent(item.slice(prefix.length)) : "";
 }
 
+export function submitWebAccessLaunch(endpointId: string): boolean {
+  if (typeof document === "undefined" || !endpointId) return false;
+  const currentCSRF = csrfToken || csrfCookie();
+  if (!currentCSRF) return false;
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = "/api/v1/access-sessions/launch";
+  form.target = "_blank";
+  form.rel = "noopener noreferrer";
+  form.style.display = "none";
+  for (const [name, value] of [["endpointId", endpointId], ["csrfToken", currentCSRF]]) {
+    const field = document.createElement("input");
+    field.type = "hidden";
+    field.name = name;
+    field.value = value;
+    form.appendChild(field);
+  }
+  document.body.appendChild(form);
+  form.submit();
+  form.remove();
+  return true;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");

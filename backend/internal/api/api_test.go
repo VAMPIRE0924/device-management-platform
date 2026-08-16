@@ -154,7 +154,7 @@ func testServerWithAccessDomain(t *testing.T, accessDomain string) http.Handler 
 	var browserSessionMu sync.Mutex
 	browserSessionCreated := false
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/access-sessions" {
+		if r.Method == http.MethodPost && (r.URL.Path == "/api/v1/access-sessions" || r.URL.Path == "/api/v1/access-sessions/launch") {
 			if _, cookieErr := r.Cookie(authCookieName); cookieErr != nil {
 				browserSessionMu.Lock()
 				if !browserSessionCreated {
@@ -186,7 +186,9 @@ func testServerWithAccessDomain(t *testing.T, accessDomain string) http.Handler 
 				browserSessionMu.Unlock()
 				r.Header.Del("Authorization")
 				r.AddCookie(&http.Cookie{Name: authCookieName, Value: browserToken})
-				r.Header.Set("X-CSRF-Token", browserCSRF)
+				if r.URL.Path == "/api/v1/access-sessions" {
+					r.Header.Set("X-CSRF-Token", browserCSRF)
+				}
 			}
 		}
 		handler.ServeHTTP(w, r)
@@ -518,6 +520,34 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	var device store.Device
 	if err := json.Unmarshal(deviceResponse.Body.Bytes(), &device); err != nil {
 		t.Fatal(err)
+	}
+	missingCSRFForm := url.Values{"endpointId": {device.Endpoints[0].ID}}
+	missingCSRFRequest := httptest.NewRequest(http.MethodPost, "/api/v1/access-sessions/launch", strings.NewReader(missingCSRFForm.Encode()))
+	missingCSRFRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	missingCSRFResponse := httptest.NewRecorder()
+	handler.ServeHTTP(missingCSRFResponse, missingCSRFRequest)
+	if missingCSRFResponse.Code != http.StatusForbidden {
+		t.Fatalf("Web launch form without CSRF = %d: %s", missingCSRFResponse.Code, missingCSRFResponse.Body.String())
+	}
+	launchForm := url.Values{"endpointId": {device.Endpoints[0].ID}, "csrfToken": {"browser-test-csrf"}}
+	launchFormRequest := httptest.NewRequest(http.MethodPost, "/api/v1/access-sessions/launch", strings.NewReader(launchForm.Encode()))
+	launchFormRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	launchFormResponse := httptest.NewRecorder()
+	handler.ServeHTTP(launchFormResponse, launchFormRequest)
+	if launchFormResponse.Code != http.StatusOK {
+		t.Fatalf("Web launch form = %d: %s", launchFormResponse.Code, launchFormResponse.Body.String())
+	}
+	launchPage := launchFormResponse.Body.String()
+	for _, expected := range []string{"I5CLOUD 远程管理平台", `method="post"`, `/.dmp/session`, `name="grant"`, `document.getElementById('dmp-web-launch').submit()`} {
+		if !strings.Contains(launchPage, expected) {
+			t.Fatalf("Web launch page missing %q: %s", expected, launchPage)
+		}
+	}
+	if strings.Contains(launchPage, "#grant=") || strings.Contains(launchPage, "about:blank") || strings.Contains(launchPage, "browser-test-csrf") {
+		t.Fatalf("Web launch page exposed the legacy navigation flow: %s", launchPage)
+	}
+	if got := launchFormResponse.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("Web launch Referrer-Policy = %q", got)
 	}
 	sessionResponse := request(t, handler, http.MethodPost, "/api/v1/access-sessions", map[string]any{"endpointId": device.Endpoints[0].ID, "mode": "web"}, true)
 	if sessionResponse.Code != http.StatusCreated {

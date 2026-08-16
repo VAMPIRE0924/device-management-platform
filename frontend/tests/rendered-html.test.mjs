@@ -56,8 +56,10 @@ test("initializes the first administrator without deployment tokens", async () =
 });
 
 test("opens opaque Web and SSH sessions without exposing routes", async () => {
-  const page = await readFile(pageURL, "utf8");
-  contains(page, ['window.open("about:blank", "_blank")', "opened.opener = null", 'api.createAccessSession(endpoint.endpointId, "web")', '"ssh"', "opened.location.replace(session.launchUrl)", "浏览器阻止了新标签页"]);
+  const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
+  contains(page, ["submitWebAccessLaunch(endpoint.endpointId)", 'window.open("about:blank", "_blank")', "opened.opener = null", '"ssh"', "opened.location.replace(session.launchUrl)", "浏览器阻止了新标签页"]);
+  contains(api, ['form.method = "post"', 'form.action = "/api/v1/access-sessions/launch"', 'form.target = "_blank"', 'form.rel = "noopener noreferrer"', '["csrfToken", currentCSRF]']);
+  assert.doesNotMatch(page, /api\.createAccessSession\(endpoint\.endpointId,\s*"web"\)/);
   assert.doesNotMatch(page, /JSON\.stringify\([^\n]*remoteSession|setModal\("web"\)|setModal\("ssh"\)/);
 });
 

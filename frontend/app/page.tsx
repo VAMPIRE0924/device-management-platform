@@ -16,6 +16,7 @@ import {
 import {
   api,
   APIError,
+  submitWebAccessLaunch,
   type APIAccessPolicy,
   type APIAccessSession,
   type APIAuditLog,
@@ -1847,7 +1848,7 @@ export default function Home() {
     setSocksStatus((items) => ({ ...items, [project.code]: true }));
   };
 
-  const openWeb = async (device: Device, webUrl?: string) => {
+  const openWeb = (device: Device, webUrl?: string) => {
     const project = projectItems.find(
       (item) => item.code === device.projectCode,
     );
@@ -1863,20 +1864,11 @@ export default function Home() {
       setToast("该 Web 服务尚未写入后台 Endpoint");
       return;
     }
-    const opened = window.open("about:blank", "_blank");
-    if (!opened) {
-      setToast("浏览器阻止了新标签页，请允许本站弹出窗口后重试");
+    if (!submitWebAccessLaunch(endpoint.endpointId)) {
+      setToast("登录授权已失效，请重新登录后再试");
       return;
     }
-    opened.opener = null;
-    try {
-      const session = await api.createAccessSession(endpoint.endpointId, "web");
-      markProjectTunnelOpen(project);
-      opened.location.replace(session.launchUrl);
-    } catch (error) {
-      opened.close();
-      setToast(error instanceof Error ? error.message : "Web 访问会话创建失败");
-    }
+    markProjectTunnelOpen(project);
   };
 
   const openSsh = async (device: Device) => {

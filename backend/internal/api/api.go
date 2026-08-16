@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -289,6 +290,7 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("GET /api/v1/access-sessions", s.requireAuth(http.HandlerFunc(s.listAccessSessions)))
 	mux.Handle("GET /api/v1/monitor/snapshot", s.requireAuth(http.HandlerFunc(s.monitorSnapshot)))
 	mux.Handle("POST /api/v1/access-sessions", s.requireAuth(http.HandlerFunc(s.createAccessSession)))
+	mux.Handle("POST /api/v1/access-sessions/launch", s.requireAuth(http.HandlerFunc(s.launchWebAccessSession)))
 	mux.Handle("DELETE /api/v1/access-sessions/{sessionID}", s.requireAuth(http.HandlerFunc(s.revokeAccessSession)))
 	mux.Handle("GET /api/v1/projects/{projectID}/port-forwards", s.requireAuth(http.HandlerFunc(s.listPortForwards)))
 	mux.Handle("POST /api/v1/projects/{projectID}/port-forwards", s.requireAuth(http.HandlerFunc(s.createPortForward)))
@@ -1416,32 +1418,61 @@ type createAccessSessionRequest struct {
 	Mode       string `json:"mode"`
 }
 
+type createdAccessSession struct {
+	Session      store.AccessSession
+	LaunchURL    string
+	WebBaseURL   string
+	Grant        string
+	DeviceName   string
+	EndpointName string
+}
+
 func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
-	if s.nodes == nil {
-		writeError(w, r, http.StatusServiceUnavailable, "node_adapter_unavailable", "节点适配器尚未启用", nil)
-		return
-	}
 	var input createAccessSessionRequest
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	result, ok := s.createAccessSessionForRequest(w, r, input)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"sessionId": result.Session.ID, "launchUrl": result.LaunchURL, "expiresAt": result.Session.ExpiresAt})
+}
+
+func (s *server) launchWebAccessSession(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil || len(r.PostForm["endpointId"]) != 1 {
+		writeError(w, r, http.StatusBadRequest, "invalid_form", "Web 访问启动请求无效", nil)
+		return
+	}
+	result, ok := s.createAccessSessionForRequest(w, r, createAccessSessionRequest{EndpointID: strings.TrimSpace(r.PostForm.Get("endpointId")), Mode: "web"})
+	if !ok {
+		return
+	}
+	serveWebAccessLaunchPage(w, result)
+}
+
+func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Request, input createAccessSessionRequest) (createdAccessSession, bool) {
+	if s.nodes == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "node_adapter_unavailable", "节点适配器尚未启用", nil)
+		return createdAccessSession{}, false
+	}
 	if input.Mode != "web" && input.Mode != "ssh" {
 		writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "访问模式必须为 web 或 ssh", map[string]string{"mode": "仅支持 web 或 ssh"})
-		return
+		return createdAccessSession{}, false
 	}
 	route, err := s.store.EndpointRoute(r.Context(), input.EndpointID)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, r, http.StatusNotFound, "endpoint_not_found", "访问入口不存在", nil)
-		return
+		return createdAccessSession{}, false
 	}
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取访问入口失败", nil)
-		return
+		return createdAccessSession{}, false
 	}
 	current := principalFromRequest(r)
 	if current.Bootstrap || current.UserID == "" || current.AuthSessionID == "" {
 		writeError(w, r, http.StatusForbidden, "browser_session_required", "远程访问必须由已登录的平台用户发起", nil)
-		return
+		return createdAccessSession{}, false
 	}
 	allowed := canAccessProject(current, route.ProjectID)
 	if !allowed && current.Role == "temporary" {
@@ -1453,19 +1484,19 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if !allowed {
 		writeError(w, r, http.StatusForbidden, "forbidden", "当前用户无权访问该项目或该类型入口", nil)
-		return
+		return createdAccessSession{}, false
 	}
 	if (input.Mode == "web" && route.AccessType != "web_proxy") || (input.Mode == "ssh" && route.AccessType != "web_ssh") {
 		writeError(w, r, http.StatusUnprocessableEntity, "mode_mismatch", "访问模式与 Endpoint 类型不匹配", nil)
-		return
+		return createdAccessSession{}, false
 	}
 	if route.ClientID < 1 {
 		writeError(w, r, http.StatusConflict, "gateway_not_bound", "项目尚未绑定可用 Client", nil)
-		return
+		return createdAccessSession{}, false
 	}
 	if err := s.nodes.SetManagedTunnel(r.Context(), route.NodeID, route.ClientID, true); err != nil {
 		writeError(w, r, http.StatusBadGateway, "managed_tunnel_unavailable", "远程访问前无法启动托管通道", nil)
-		return
+		return createdAccessSession{}, false
 	}
 	// A Web route is stable for one user and one endpoint, including across
 	// platform logins. Reopening rotates the one-time grant and invalidates the
@@ -1480,13 +1511,13 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 		token, tokenHash, err = newAccessToken()
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "token_generation_failed", "无法创建安全访问令牌", nil)
-			return
+			return createdAccessSession{}, false
 		}
 	}
 	grant, grantHash, err := newAccessToken()
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "grant_generation_failed", "无法创建一次性访问授权", nil)
-		return
+		return createdAccessSession{}, false
 	}
 	// The remote access session must never outlive the authenticated platform
 	// login that created it. Idle expiry remains enforced on every proxied HTTP
@@ -1499,7 +1530,7 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 	session, err := s.store.CreateAccessSession(r.Context(), store.CreateAccessSessionInput{UserID: &userID, AuthSessionID: current.AuthSessionID, ProjectID: route.ProjectID, EndpointID: route.EndpointID, TokenHash: tokenHash, GrantHash: grantHash, Mode: input.Mode, SourceIP: requestSourceIP(r), ExpiresAt: expiresAt}, auditFromRequest(r, "access_session.create", "access_session"))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "session_create_failed", "访问会话创建失败", nil)
-		return
+		return createdAccessSession{}, false
 	}
 	launchURL := "/access/web/" + token + "/"
 	if input.Mode == "web" && s.accessDomain != "" {
@@ -1515,6 +1546,7 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 		}
 		launchURL = webAccessLaunchURL(r, s.accessScheme, s.accessDomain, s.mode, token, configuredPort, reusePanelPorts)
 	}
+	webBaseURL := launchURL
 	if input.Mode == "ssh" {
 		launchURL = "/access/ssh/" + token
 		launchURL += "?grant=" + url.QueryEscape(grant)
@@ -1525,7 +1557,34 @@ func (s *server) createAccessSession(w http.ResponseWriter, r *http.Request) {
 		// cookie from a previous launch.
 		launchURL = strings.TrimSuffix(launchURL, "/") + "/.dmp/authorize#grant=" + grant
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"sessionId": session.ID, "launchUrl": launchURL, "expiresAt": session.ExpiresAt})
+	return createdAccessSession{Session: session, LaunchURL: launchURL, WebBaseURL: webBaseURL, Grant: grant, DeviceName: route.DeviceName, EndpointName: route.EndpointName}, true
+}
+
+func serveWebAccessLaunchPage(w http.ResponseWriter, result createdAccessSession) {
+	action := strings.TrimSuffix(result.WebBaseURL, "/") + "/.dmp/session"
+	parsed, err := url.Parse(action)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		http.Error(w, "Web 访问地址无效", http.StatusInternalServerError)
+		return
+	}
+	label := strings.TrimSpace(result.DeviceName)
+	if endpoint := strings.TrimSpace(result.EndpointName); endpoint != "" {
+		if label != "" {
+			label += " · "
+		}
+		label += endpoint
+	}
+	if label == "" {
+		label = "内网设备"
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action "+origin+"; base-uri 'none'; frame-ancestors 'none'")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>正在打开内网设备</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{max-width:34rem;padding:2rem;text-align:center}strong{display:block;font-size:1.25rem;margin-bottom:.75rem}p{line-height:1.65;color:#526471}button{border:0;border-radius:.65rem;background:#078b83;color:white;font:inherit;font-weight:700;padding:.8rem 1.2rem;cursor:pointer}</style><main><strong>I5CLOUD 远程管理平台</strong><p>正在通过平台安全代理连接 `+html.EscapeString(label)+`。<br>接下来的页面由目标内网设备提供，请仅输入该设备的凭据。</p><form id="dmp-web-launch" method="post" action="`+html.EscapeString(action)+`" autocomplete="off"><input type="hidden" name="grant" value="`+html.EscapeString(result.Grant)+`"><button type="submit">继续打开内网设备</button></form></main><script>document.getElementById('dmp-web-launch').submit()</script></html>`)
 }
 
 func webAccessLaunchURL(r *http.Request, scheme, accessDomain, mode, token string, configuredPort int, reusePanelPorts bool) string {
@@ -1960,10 +2019,11 @@ func newAccessToken() (string, string, error) {
 }
 
 func stableWebRouteToken(userID, endpointID string) (string, string) {
-	// v2 is a one-time route migration that retires origins which may already
-	// carry a Safe Browsing verdict. The resulting route remains stable and must
-	// not rotate on each launch.
-	digest := sha256.Sum256([]byte("web-route-v2\x00" + userID + "\x00" + endpointID))
+	// v3 retires routes first opened through an opener-controlled blank-page
+	// redirect. New launches use a user-initiated control-plane form and a
+	// top-level one-time POST; the resulting route remains stable and must not
+	// rotate on each launch.
+	digest := sha256.Sum256([]byte("web-route-v3\x00" + userID + "\x00" + endpointID))
 	token := "device-" + hex.EncodeToString(digest[:16])
 	tokenDigest := sha256.Sum256([]byte(token))
 	return token, hex.EncodeToString(tokenDigest[:])
@@ -3108,7 +3168,14 @@ func (s *server) requireAuth(next http.Handler) http.Handler {
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
-			csrfHash := digestString(r.Header.Get("X-CSRF-Token"))
+			providedCSRF := strings.TrimSpace(r.Header.Get("X-CSRF-Token"))
+			if providedCSRF == "" && strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "application/x-www-form-urlencoded") {
+				r.Body = http.MaxBytesReader(w, r.Body, 4096)
+				if err := r.ParseForm(); err == nil && len(r.PostForm["csrfToken"]) == 1 {
+					providedCSRF = strings.TrimSpace(r.PostForm.Get("csrfToken"))
+				}
+			}
+			csrfHash := digestString(providedCSRF)
 			if len(csrfHash) != len(sessionRecord.CSRFHash) || subtle.ConstantTimeCompare([]byte(csrfHash), []byte(sessionRecord.CSRFHash)) != 1 {
 				writeError(w, r, http.StatusForbidden, "csrf_failed", "CSRF 校验失败", nil)
 				return

@@ -121,22 +121,48 @@ func (g *WebGateway) exchangeGrant(w http.ResponseWriter, r *http.Request, token
 		gatewayError(w, http.StatusMethodNotAllowed, "访问授权交换仅支持 POST")
 		return
 	}
-	expectedOrigin := "http://" + r.Host
-	if accessRequestUsesHTTPS(r) {
-		expectedOrigin = "https://" + r.Host
+	formNavigation := strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "application/x-www-form-urlencoded")
+	var grant string
+	if formNavigation {
+		// The control plane creates the 192-bit one-time grant and submits it as a
+		// top-level POST. This avoids an opener-controlled about:blank redirect and
+		// keeps the grant out of URLs, request logs and Referer headers.
+		if mode := strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode")); mode != "" && mode != "navigate" {
+			gatewayError(w, http.StatusForbidden, "访问授权导航方式无效")
+			return
+		}
+		if destination := strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")); destination != "" && destination != "document" {
+			gatewayError(w, http.StatusForbidden, "访问授权导航目标无效")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1024)
+		if err := r.ParseForm(); err != nil || len(r.PostForm) != 1 || len(r.PostForm["grant"]) != 1 {
+			gatewayError(w, http.StatusBadRequest, "访问授权格式无效")
+			return
+		}
+		grant = strings.TrimSpace(r.PostForm.Get("grant"))
+	} else {
+		expectedOrigin := "http://" + r.Host
+		if accessRequestUsesHTTPS(r) {
+			expectedOrigin = "https://" + r.Host
+		}
+		if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Origin")), expectedOrigin) {
+			gatewayError(w, http.StatusForbidden, "访问授权来源无效")
+			return
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+		decoder.DisallowUnknownFields()
+		var input webGrantRequest
+		if err := decoder.Decode(&input); err != nil {
+			gatewayError(w, http.StatusBadRequest, "访问授权格式无效")
+			return
+		}
+		grant = strings.TrimSpace(input.Grant)
 	}
-	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Origin")), expectedOrigin) {
-		gatewayError(w, http.StatusForbidden, "访问授权来源无效")
-		return
-	}
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
-	decoder.DisallowUnknownFields()
-	var input webGrantRequest
-	if err := decoder.Decode(&input); err != nil || !validAccessToken(strings.TrimSpace(input.Grant)) {
+	if !validAccessToken(grant) {
 		gatewayError(w, http.StatusBadRequest, "访问授权格式无效")
 		return
 	}
-	grant := strings.TrimSpace(input.Grant)
 	tokenDigest := sha256.Sum256([]byte(token))
 	grantDigest := sha256.Sum256([]byte(grant))
 	idleCutoff := time.Now().UTC().Add(-g.idleTTL)
@@ -145,13 +171,21 @@ func (g *WebGateway) exchangeGrant(w http.ResponseWriter, r *http.Request, token
 		gatewayError(w, http.StatusGone, "访问授权不存在、已使用或登录已超时")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: accessGrantCookie, Value: grant, Path: cookiePath, HttpOnly: true, Secure: accessRequestUsesHTTPS(r), SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
+	sameSite := http.SameSiteStrictMode
+	if formNavigation {
+		sameSite = http.SameSiteLaxMode
+	}
+	http.SetCookie(w, &http.Cookie{Name: accessGrantCookie, Value: grant, Path: cookiePath, HttpOnly: true, Secure: accessRequestUsesHTTPS(r), SameSite: sameSite, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
 	// A previous visit may have followed a device HTTP -> HTTPS redirect. Do not
 	// let that short-lived upstream choice leak into a newly authorized visit.
 	clearUpstreamSchemeCookies(w, r, cookiePath)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
+	if formNavigation {
+		http.Redirect(w, r, cookiePath, http.StatusSeeOther)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -192,7 +226,7 @@ func serveGrantBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>正在建立安全访问</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{max-width:32rem;padding:2rem;text-align:center}</style><main><p id="status">正在建立安全访问…</p></main><script>(()=>{const match=/^#grant=([0-9a-f]{48})$/.exec(location.hash);const status=document.getElementById('status');if(!match){status.textContent='访问授权无效，请返回平台重新打开';return}const suffix='/.dmp/authorize';const path=location.pathname;const root=path.endsWith(suffix)?path.slice(0,-suffix.length)+'/':'/';const endpoint=path.endsWith(suffix)?path.slice(0,-'authorize'.length)+'session':root+'.dmp/session';fetch(endpoint,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({grant:match[1]})}).then(response=>{if(!response.ok)throw new Error('exchange failed');history.replaceState(null,'',root+location.search);location.replace(root+location.search)}).catch(()=>{history.replaceState(null,'',root+location.search);status.textContent='访问授权已失效，请返回平台重新打开'})})();</script></html>`)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>I5CLOUD 内网设备代理</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{max-width:34rem;padding:2rem;text-align:center}strong{display:block;font-size:1.25rem;margin-bottom:.75rem}p{line-height:1.65;color:#526471}</style><main><strong>I5CLOUD 远程管理平台</strong><p>此页面用于安全连接由目标内网设备提供的第三方管理界面。</p><p id="status">正在建立安全访问…</p></main><script>(()=>{const match=/^#grant=([0-9a-f]{48})$/.exec(location.hash);const status=document.getElementById('status');if(!match){status.textContent='访问授权无效，请返回平台重新打开';return}const suffix='/.dmp/authorize';const path=location.pathname;const root=path.endsWith(suffix)?path.slice(0,-suffix.length)+'/':'/';const endpoint=path.endsWith(suffix)?path.slice(0,-'authorize'.length)+'session':root+'.dmp/session';fetch(endpoint,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({grant:match[1]})}).then(response=>{if(!response.ok)throw new Error('exchange failed');history.replaceState(null,'',root+location.search);location.replace(root+location.search)}).catch(()=>{history.replaceState(null,'',root+location.search);status.textContent='访问授权已失效，请返回平台重新打开'})})();</script></html>`)
 }
 
 func webAccessCookiePath(r *http.Request, token string) string {
