@@ -711,6 +711,40 @@ func TestStableWebRouteIsScopedToUserAndEndpoint(t *testing.T) {
 	}
 }
 
+func TestConfiguredPanelAndAccessDomainsAreStrictlySeparated(t *testing.T) {
+	server := &server{panelDomain: "dmp.example.test", accessDomain: "console.example.test"}
+	for _, test := range []struct {
+		name       string
+		host       string
+		path       string
+		wantStatus int
+		wantPath   string
+	}{
+		{name: "panel", host: "dmp.example.test:4043", path: "/login", wantStatus: http.StatusNoContent, wantPath: "/login"},
+		{name: "valid access slot", host: "web-01.console.example.test:4043", path: "/cgi-bin/luci/", wantStatus: http.StatusNoContent, wantPath: "/access/web/web-01/cgi-bin/luci/"},
+		{name: "pool overflow", host: "web-99.console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
+		{name: "arbitrary access child", host: "anything.console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
+		{name: "bare access domain", host: "console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
+		{name: "unknown panel host", host: "other.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
+		{name: "loopback panel denied", host: "127.0.0.1:4043", path: "/login", wantStatus: http.StatusNotFound},
+		{name: "loopback readiness allowed", host: "127.0.0.1:4043", path: "/health/ready", wantStatus: http.StatusNoContent, wantPath: "/health/ready"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			forwardedPath := ""
+			handler := server.accessDomainRouting(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				forwardedPath = r.URL.Path
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			request := httptest.NewRequest(http.MethodGet, "https://"+test.host+test.path, nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || forwardedPath != test.wantPath {
+				t.Fatalf("status/path = %d/%q, want %d/%q", response.Code, forwardedPath, test.wantStatus, test.wantPath)
+			}
+		})
+	}
+}
+
 func TestWebAccessLaunchPageSupportsSameOriginPathMode(t *testing.T) {
 	response := httptest.NewRecorder()
 	serveWebAccessLaunchPage(response, createdAccessSession{

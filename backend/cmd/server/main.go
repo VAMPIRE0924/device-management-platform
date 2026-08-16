@@ -150,6 +150,7 @@ func run() error {
 		Settings:           config.NewSettingsManager(cfg),
 		NodeCredentials:    nodeCredentialVault,
 		APIToken:           cfg.APIToken,
+		PanelDomain:        cfg.PanelDomain,
 		AccessDomain:       cfg.AccessDomain,
 		AccessScheme:       cfg.AccessScheme,
 		HTTPPort:           portFromAddress(cfg.ListenAddress),

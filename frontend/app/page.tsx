@@ -6005,7 +6005,7 @@ function SettingsView({
               <label className="full">
                 反代地址
                 <div className="domain-prefix-input">
-                  <span>*.</span>
+                  <span aria-hidden="true">*.</span>
                   <input
                     disabled={locked("accessDomain")}
                     value={draft.accessDomain}

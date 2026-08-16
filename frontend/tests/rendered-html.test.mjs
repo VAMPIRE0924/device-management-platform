@@ -41,8 +41,11 @@ test("uses the authenticated versioned backend contract", async () => {
 });
 
 test("keeps formal login, MFA and editable deployment settings", async () => {
-  const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
+  const [page, api, styles] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8"), readFile(stylesURL, "utf8")]);
   contains(page, ["修改初始密码", "绑定并验证邮箱", "开启双重认证", "认证器令牌", "邮箱验证码", "保存系统设置", "SMTP 主机", "SMTP 密码", "HTTP 端口", "HTTPS 端口", "面板证书文件路径", "面板私钥文件路径", "面板地址", "反代地址", "反代端口", "独立设置反代端口", "反代证书文件路径", "反代私钥文件路径"]);
+  contains(page, ['<span aria-hidden="true">*.</span>']);
+  assert.match(styles, /\.domain-prefix-input > span \{[^}]*color: #314347;[^}]*background: transparent;[^}]*font-size: 13px;[^}]*font-weight: 700;/);
+  assert.doesNotMatch(styles, /\.domain-prefix-input > span \{[^}]*border-right:/);
   contains(api, ["/auth/onboarding/password", "/auth/onboarding/email/send", "/auth/onboarding/email/verify", "/auth/mfa/start", "/auth/mfa/complete", "/mfa/reset", "/settings/security"]);
   assert.doesNotMatch(page, /不可在线降低的边界|连接安全|本机 Relay（无 TLS）|可信反向代理 CIDR|生产环境|开发环境|测试环境/);
 });

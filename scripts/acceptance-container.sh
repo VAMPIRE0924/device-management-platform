@@ -133,6 +133,11 @@ access_route_three="device-cccccccccccccccccccccccccccccccc"
 test "$(curl -sS -o /dev/null -w '%{http_code}' --resolve "$access_route_one.container-remote.example.test:$https_port:127.0.0.1" \
   --cacert "$artifact_dir/certificate-source/access/fullchain.pem" \
   "https://$access_route_one.container-remote.example.test:$https_port/")" = "401"
+test "$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "web-99.container-remote.example.test:$https_port:127.0.0.1" \
+  "https://web-99.container-remote.example.test:$https_port/login")" = "404"
+test "$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "container-remote.example.test:$https_port:127.0.0.1" \
+  "https://container-remote.example.test:$https_port/login")" = "404"
+test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: other.container.example.test' "$primary_url/login")" = "404"
 test "$(curl -sS -o /dev/null -w '%{http_code}' -H "Host: $access_route_three.container-remote.example.test" \
   "http://127.0.0.1:$access_http_port/")" = "401"
 test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: panel.container.example.test' "http://127.0.0.1:$access_http_port/")" = "404"
@@ -143,20 +148,20 @@ test "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/cert"}}{{.RW}
 docker exec "$primary" sh -c 'su-exec platform test ! -r /cert/panel/fullchain.pem && su-exec platform test ! -r /cert/access/fullchain.pem && test ! -e /data/runtime-tls && test ! -e /run/device-management-platform/tls'
 test "$(docker run --rm --entrypoint sh -v "$certificate_volume:/cert:ro" "$image" -c 'sha256sum /cert/panel/fullchain.pem /cert/panel/privkey.pem /cert/access/fullchain.pem /cert/access/privkey.pem')" = "$certificate_digest"
 test "$(docker exec "$primary" sh -c 'cat /data/api.token')" = "$api_token"
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/nodes" | grep -q '容器持久化验收节点'
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessDomain":"container-remote.example.test"'
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessTlsConfigured":true'
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"restartRequired":false'
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessHttpPort":28080'
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessHttpsPort":28443'
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"smtpPasswordConfigured":true'
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $api_token" "$primary_url/api/v1/nodes" | grep -q '容器持久化验收节点'
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessDomain":"container-remote.example.test"'
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessTlsConfigured":true'
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"restartRequired":false'
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessHttpPort":28080'
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"accessHttpsPort":28443'
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $api_token" "$primary_url/api/v1/settings/security" | grep -q '"smtpPasswordConfigured":true'
 https_headers="$artifact_dir/https-login-headers.txt"
 curl -fsS --resolve "panel.container.example.test:$https_port:127.0.0.1" --cacert "$artifact_dir/certificate-source/panel/fullchain.pem" -D "$https_headers" -X POST -H 'Content-Type: application/json' \
   -d '{"username":"container-admin","password":"container-admin-password"}' \
   "https://panel.container.example.test:$https_port/api/v1/auth/login" >/dev/null
 test "$(grep -ic '^Set-Cookie:.*; Secure' "$https_headers")" = "2"
 
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/data/backup" -o "$artifact_dir/backup.db"
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $api_token" "$primary_url/api/v1/data/backup" -o "$artifact_dir/backup.db"
 test "$(sqlite3 "$artifact_dir/backup.db" 'pragma integrity_check;')" = "ok"
 test "$(sqlite3 "$artifact_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "24"
 docker volume create "$restored_volume" >/dev/null
@@ -168,7 +173,7 @@ restored_url="http://127.0.0.1:$restored_port"
 wait_ready "$restored_url"
 restored_api_token=$(docker exec "$restored" sh -c 'cat /data/api.token')
 test "${#restored_api_token}" = "64"
-curl -fsS -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/nodes" | grep -q '容器持久化验收节点'
-curl -fsS -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/meta" | grep -q '"schemaVersion":24'
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/nodes" | grep -q '容器持久化验收节点'
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/meta" | grep -q '"schemaVersion":24'
 
 printf 'Container acceptance passed\nbackup artifact: %s\n' "$artifact_dir/backup.db"

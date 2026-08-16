@@ -127,6 +127,7 @@ type Dependencies struct {
 	SSHGateway         http.Handler
 	UI                 http.Handler
 	APIToken           string
+	PanelDomain        string
 	AccessDomain       string
 	AccessScheme       string
 	HTTPPort           int
@@ -172,6 +173,7 @@ type server struct {
 	sessionRevoker     accessSessionRevoker
 	ui                 http.Handler
 	apiToken           string
+	panelDomain        string
 	accessDomain       string
 	accessScheme       string
 	httpPort           int
@@ -217,7 +219,7 @@ type apiError struct {
 }
 
 func New(deps Dependencies) http.Handler {
-	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, accessDomain: strings.ToLower(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, authSessionTTL: deps.AuthSessionTTL, authSessionIdleTTL: deps.AuthSessionIdleTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials, restart: deps.Restart}
+	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, panelDomain: normalizeConfiguredDomain(deps.PanelDomain), accessDomain: normalizeConfiguredDomain(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, authSessionTTL: deps.AuthSessionTTL, authSessionIdleTTL: deps.AuthSessionIdleTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials, restart: deps.Restart}
 	if s.emailCodeTTL == 0 {
 		s.emailCodeTTL = 10 * time.Minute
 	}
@@ -3309,29 +3311,55 @@ func (s *server) requestContext(next http.Handler) http.Handler {
 
 func (s *server) accessDomainRouting(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.accessDomain == "" {
-			next.ServeHTTP(w, r)
+		host := requestHostname(r.Host)
+		if s.accessDomain != "" {
+			suffix := "." + s.accessDomain
+			if host == s.accessDomain {
+				http.NotFound(w, r)
+				return
+			}
+			if strings.HasSuffix(host, suffix) {
+				token := strings.TrimSuffix(host, suffix)
+				if !validAccessRouteLabel(token) {
+					http.NotFound(w, r)
+					return
+				}
+				clone := r.Clone(r.Context())
+				clone.URL.Path = "/access/web/" + token + "/" + strings.TrimPrefix(r.URL.Path, "/")
+				clone.URL.RawPath = ""
+				next.ServeHTTP(w, access.WithSessionSubdomainAccess(clone))
+				return
+			}
+		}
+		if s.panelDomain != "" && host != s.panelDomain && !isLoopbackHealthRequest(r, host) {
+			http.NotFound(w, r)
 			return
 		}
-		host := strings.ToLower(r.Host)
-		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-			host = parsedHost
-		}
-		suffix := "." + s.accessDomain
-		if !strings.HasSuffix(host, suffix) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		token := strings.TrimSuffix(host, suffix)
-		if !validAccessRouteLabel(token) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		clone := r.Clone(r.Context())
-		clone.URL.Path = "/access/web/" + token + "/" + strings.TrimPrefix(r.URL.Path, "/")
-		clone.URL.RawPath = ""
-		next.ServeHTTP(w, access.WithSessionSubdomainAccess(clone))
+		next.ServeHTTP(w, r)
 	})
+}
+
+func normalizeConfiguredDomain(value string) string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(value), "."))
+}
+
+func requestHostname(authority string) string {
+	host := strings.TrimSpace(authority)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	return strings.ToLower(strings.Trim(strings.TrimSpace(host), "."))
+}
+
+func isLoopbackHealthRequest(r *http.Request, host string) bool {
+	if r.URL.Path != "/health/live" && r.URL.Path != "/health/ready" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	address := net.ParseIP(strings.Trim(host, "[]"))
+	return address != nil && address.IsLoopback()
 }
 
 func validAccessRouteLabel(token string) bool {

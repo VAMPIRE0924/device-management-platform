@@ -183,6 +183,9 @@ func (cfg Config) validate() error {
 	if strings.ContainsAny(cfg.PanelDomain, "/: ") {
 		return fmt.Errorf("panel_domain must be a DNS name without scheme or port")
 	}
+	if cfg.PanelDomain != "" && cfg.AccessDomain != "" && (cfg.PanelDomain == cfg.AccessDomain || strings.HasSuffix(cfg.PanelDomain, "."+cfg.AccessDomain)) {
+		return fmt.Errorf("panel_domain must not equal or be a subdomain of access_domain")
+	}
 	for _, cidr := range cfg.TrustedProxyCIDRs {
 		if _, err := netip.ParsePrefix(cidr); err != nil {
 			return fmt.Errorf("trusted_proxy_cidrs contains invalid CIDR %q", cidr)

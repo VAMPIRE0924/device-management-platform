@@ -4173,21 +4173,28 @@ main {
   box-shadow: 0 0 0 3px rgba(8, 127, 117, 0.08);
 }
 .domain-prefix-input > span {
-  display: grid;
-  place-items: center;
-  padding: 0 11px;
-  border-right: 1px solid var(--line);
-  color: #087f75;
-  background: #edf8f6;
-  font-size: 12px;
-  font-weight: 800;
+  display: flex;
+  align-items: center;
+  padding: 0 0 0 11px;
+  color: #314347;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
   user-select: none;
 }
 .settings-card .settings-field-grid .domain-prefix-input input {
   min-height: 38px;
+  padding-left: 0;
   border: 0;
   border-radius: 0;
+  background: transparent;
   box-shadow: none;
+}
+.domain-prefix-input:has(input:disabled) {
+  background: #f2f5f5;
+}
+.domain-prefix-input:has(input:disabled) > span {
+  color: #7c8b8e;
 }
 .secret-clear-button {
   align-self: flex-start;

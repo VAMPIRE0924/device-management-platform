@@ -166,6 +166,11 @@ func TestAccessTLSCertificateRequiresCompleteConfiguration(t *testing.T) {
 	if err := conflictingPorts.validate(); err == nil || !strings.Contains(err.Error(), "cannot conflict") {
 		t.Fatalf("conflicting independent access ports error = %v", err)
 	}
+	overlappingDomains := base
+	overlappingDomains.PanelDomain = "panel.remote.example.test"
+	if err := overlappingDomains.validate(); err == nil || !strings.Contains(err.Error(), "must not equal or be a subdomain") {
+		t.Fatalf("overlapping panel/access domains error = %v", err)
+	}
 }
 
 func TestProductionLocalWildcardDomainAllowsHTTPAcceptance(t *testing.T) {
