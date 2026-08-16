@@ -1,0 +1,40 @@
+# 正式部署模板。复制为 device-management-platform.conf；不要写入密码或私钥。
+app_name = 设备管理平台
+run_mode = pro
+listen_addr = 0.0.0.0:80
+https_listen_addr = 0.0.0.0:443
+data_dir = /data
+database_path = /data/platform.db
+settings_override_file = /data/settings.override.conf
+
+# 管理 API 令牌首次启动时自动生成并保存在 /data/api.token。
+
+# 完成 SMTP 配置和恢复演练后再开启。
+mfa_enabled = false
+mfa_methods = totp,email
+mfa_key_file = /data/mfa.key
+mfa_email_code_ttl = 10m
+
+# smtp_host = smtp.example.com
+# smtp_port = 587
+# smtp_username = notifier@example.com
+# smtp_password_file = /run/secrets/platform_smtp_password
+# smtp_from = 设备管理平台 <notifier@example.com>
+
+# 未配置证书时仅监听 HTTP 端口；配置以下证书路径后同时监听 HTTPS 端口。
+# tls_cert_file = /run/secrets/platform_tls_cert
+# tls_key_file = /run/secrets/platform_tls_key
+
+# 反代泛域名与面板证书不同时，单独配置这一对只读证书路径。
+# access_tls_cert_file = /run/secrets/platform_access_tls_cert
+# access_tls_key_file = /run/secrets/platform_access_tls_key
+
+# 0 表示反代域名复用面板 HTTP / HTTPS 端口；独立设置时两项必须同时填写。
+# access_http_port = 0
+# access_https_port = 0
+
+# 部署完成后可在系统设置中配置严格分离的面板域名和 Web 反代域名，
+# 例如 dmp.example.com 与 *.console.example.com。Web 访问不提供面板路径回退。
+
+# 只填写真实反向代理的容器或主机网段；直连部署可留空。
+# trusted_proxy_cidrs = 172.20.0.0/24

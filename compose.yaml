@@ -1,0 +1,22 @@
+name: device-management-platform
+
+services:
+  platform:
+    image: ${DMP_IMAGE:-vampirerune/device-management-platform:main}
+    container_name: device-management-platform
+    restart: unless-stopped
+    volumes:
+      - platform-data:/data
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/device-management-platform", "healthcheck"]
+      interval: 20s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  platform-data:

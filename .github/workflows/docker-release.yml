@@ -1,0 +1,119 @@
+name: Publish formal release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docker-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: release
+        name: Validate release metadata
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "VERSION must use X.Y.Z format" >&2
+            exit 1
+          }
+          tag="v$version"
+          frontend_version=$(node -p "require('./frontend/package.json').version")
+          test "$frontend_version" = "$version" || {
+            echo "frontend/package.json version must match VERSION" >&2
+            exit 1
+          }
+          grep -Fq "## $tag " CHANGELOG.md || {
+            echo "CHANGELOG.md must contain a $tag release section" >&2
+            exit 1
+          }
+
+          git fetch --no-tags origin main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || {
+            echo "formal releases may only use the current main commit" >&2
+            exit 1
+          }
+          git fetch --force --tags origin
+          tag_exists=false
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            test "$(git rev-list -n 1 "refs/tags/$tag")" = "$(git rev-parse HEAD)" || {
+              echo "$tag already points to a different commit; bump VERSION before merging to main" >&2
+              exit 1
+            }
+            tag_exists=true
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "tag_exists=$tag_exists"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: build
+        name: Build metadata
+        run: |
+          {
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: vampirerune/device-management-platform
+          tags: |
+            type=raw,value=${{ steps.release.outputs.tag }}
+            type=raw,value=main
+
+      - name: Build and publish formal image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.release.outputs.tag }}
+            VCS_REF=${{ steps.build.outputs.sha }}
+            BUILD_DATE=${{ steps.build.outputs.date }}
+
+      - name: Create version tag
+        if: steps.release.outputs.tag_exists == 'false'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+          fi

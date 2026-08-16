@@ -1,0 +1,34 @@
+# Local deployment configuration and secrets.
+.env
+.env.*
+!.env.example
+conf/device-management-platform.conf
+secrets/*
+
+# Private local project documentation.
+/docs/
+/scripts/verify-docs.sh
+
+# Runtime data and generated artifacts.
+data/
+backend/bin/
+backend/data/
+frontend/node_modules/
+frontend/.next/
+frontend/.wrangler/
+frontend/dist/
+frontend/dist-spa/
+frontend/tsconfig.tsbuildinfo
+backend/internal/ui/dist/*
+!backend/internal/ui/dist/index.html
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.pid
+*.out
+
+# Editor and operating-system files.
+.DS_Store
+.idea/
+.vscode/

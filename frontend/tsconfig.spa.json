@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false,
+    "plugins": [],
+    "types": ["vite/client"]
+  },
+  "include": ["app/page.tsx", "lib/**/*.ts", "spa/**/*.ts", "spa/**/*.tsx", "vite.spa.config.ts"],
+  "exclude": ["dist", "dist-spa", "node_modules"]
+}
