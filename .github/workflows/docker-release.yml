@@ -68,6 +68,29 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Sync Docker Hub overview
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          auth_response=$(jq -n \
+            --arg username "$DOCKERHUB_USERNAME" \
+            --arg password "$DOCKERHUB_TOKEN" \
+            '{username: $username, password: $password}' | \
+            curl --fail --silent --show-error \
+              --header 'Content-Type: application/json' \
+              --data-binary @- \
+              https://hub.docker.com/v2/users/login)
+          hub_token=$(printf '%s' "$auth_response" | jq --exit-status --raw-output '.token')
+          jq --raw-input --slurp '{full_description: .}' README.md | \
+            curl --fail --silent --show-error \
+              --request PATCH \
+              --header "Authorization: JWT $hub_token" \
+              --header 'Content-Type: application/json' \
+              --data-binary @- \
+              https://hub.docker.com/v2/repositories/vampirerune/device-management-platform/ \
+              >/dev/null
+
       - id: build
         name: Build metadata
         run: |
