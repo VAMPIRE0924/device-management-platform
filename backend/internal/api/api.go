@@ -1563,9 +1563,13 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 func serveWebAccessLaunchPage(w http.ResponseWriter, result createdAccessSession) {
 	action := strings.TrimSuffix(result.WebBaseURL, "/") + "/.dmp/session"
 	parsed, err := url.Parse(action)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+	formAction := "'self'"
+	if err != nil || (parsed.IsAbs() && (parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "")) || (!parsed.IsAbs() && !strings.HasPrefix(parsed.Path, "/")) {
 		http.Error(w, "Web 访问地址无效", http.StatusInternalServerError)
 		return
+	}
+	if parsed.IsAbs() {
+		formAction = parsed.Scheme + "://" + parsed.Host
 	}
 	label := strings.TrimSpace(result.DeviceName)
 	if endpoint := strings.TrimSpace(result.EndpointName); endpoint != "" {
@@ -1577,12 +1581,11 @@ func serveWebAccessLaunchPage(w http.ResponseWriter, result createdAccessSession
 	if label == "" {
 		label = "内网设备"
 	}
-	origin := parsed.Scheme + "://" + parsed.Host
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action "+origin+"; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action "+formAction+"; base-uri 'none'; frame-ancestors 'none'")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>正在打开内网设备</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{max-width:34rem;padding:2rem;text-align:center}strong{display:block;font-size:1.25rem;margin-bottom:.75rem}p{line-height:1.65;color:#526471}button{border:0;border-radius:.65rem;background:#078b83;color:white;font:inherit;font-weight:700;padding:.8rem 1.2rem;cursor:pointer}</style><main><strong>I5CLOUD 远程管理平台</strong><p>正在通过平台安全代理连接 `+html.EscapeString(label)+`。<br>接下来的页面由目标内网设备提供，请仅输入该设备的凭据。</p><form id="dmp-web-launch" method="post" action="`+html.EscapeString(action)+`" autocomplete="off"><input type="hidden" name="grant" value="`+html.EscapeString(result.Grant)+`"><button type="submit">继续打开内网设备</button></form></main><script>document.getElementById('dmp-web-launch').submit()</script></html>`)
 }

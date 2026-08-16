@@ -707,6 +707,24 @@ func TestStableWebRouteIsScopedToUserAndEndpoint(t *testing.T) {
 	}
 }
 
+func TestWebAccessLaunchPageSupportsSameOriginPathMode(t *testing.T) {
+	response := httptest.NewRecorder()
+	serveWebAccessLaunchPage(response, createdAccessSession{
+		WebBaseURL: "/access/web/device-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+		Grant:      strings.Repeat("b", 48),
+		DeviceName: "路径模式设备",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("path-mode launch = %d: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Content-Security-Policy"); !strings.Contains(got, "form-action 'self'") {
+		t.Fatalf("path-mode launch CSP = %q", got)
+	}
+	if !strings.Contains(response.Body.String(), `action="/access/web/device-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.dmp/session"`) {
+		t.Fatalf("path-mode launch action missing: %s", response.Body.String())
+	}
+}
+
 func TestDevelopmentAccessDomainLaunchPreservesLocalPort(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:3000/api/v1/access-sessions", nil)
 	launchURL := webAccessLaunchURL(request, "http", "localhost", "dev", strings.Repeat("a", 48), 3000, true)
