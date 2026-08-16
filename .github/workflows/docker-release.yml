@@ -34,8 +34,6 @@ jobs:
           images: vampirerune/device-management-platform
           tags: |
             type=raw,value=${{ inputs.version }}
-            type=semver,value=${{ inputs.version }},pattern={{version}}
-            type=semver,value=${{ inputs.version }},pattern={{major}}.{{minor}}
             type=raw,value=latest
       - uses: docker/build-push-action@v6
         with:
