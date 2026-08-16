@@ -29,6 +29,7 @@ import (
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/secrets"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/ui"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/webroutelabel"
 )
 
 var version = "dev"
@@ -283,25 +284,7 @@ func accessOnlyHandler(application http.Handler, accessDomain string) http.Handl
 }
 
 func validAccessHostLabel(label string) bool {
-	if strings.HasPrefix(label, "web-") && len(label) == len("web-00") {
-		slot, err := strconv.Atoi(strings.TrimPrefix(label, "web-"))
-		return err == nil && slot >= 1 && slot <= 32
-	}
-	// Keep accepting the previous labels for the duration of their normal
-	// access-session lifetime during a rolling deployment.
-	if !strings.HasPrefix(label, "device-") {
-		return false
-	}
-	encoded := strings.TrimPrefix(label, "device-")
-	if len(encoded) != 32 {
-		return false
-	}
-	for _, character := range encoded {
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			return false
-		}
-	}
-	return true
+	return webroutelabel.IsAllowed(label)
 }
 
 func loadTLSCertificates(cfg config.Config) ([]tls.Certificate, error) {

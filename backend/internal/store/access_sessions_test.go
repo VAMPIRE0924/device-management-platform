@@ -67,7 +67,7 @@ func TestAccessSessionIdleExpiryAndRouteRotation(t *testing.T) {
 	otherInput.GrantHash = "other-grant"
 	otherInput.RouteIdleCutoff = now.Add(-15 * time.Minute)
 	if _, err := db.CreateAccessSession(ctx, otherInput, audit); err != ErrInUse {
-		t.Fatalf("active pooled route collision error = %v, want ErrInUse", err)
+		t.Fatalf("active stable route collision error = %v, want ErrInUse", err)
 	}
 	touchAt := now.Add(10 * time.Minute)
 	if err := db.TouchAccessSession(ctx, second.ID, touchAt, now.Add(-time.Minute)); err != nil {

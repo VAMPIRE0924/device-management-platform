@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/config"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/webroutelabel"
 )
 
 func TestHealthcheckUsesAlwaysAvailableHTTPListener(t *testing.T) {
@@ -157,6 +158,7 @@ func TestTLSCertificatesSelectAccessCertificateBySNI(t *testing.T) {
 
 func TestIndependentAccessListenerRejectsControlPlaneHosts(t *testing.T) {
 	forwarded := 0
+	opaqueRoute := webroutelabel.StableCandidates("user", "endpoint")[0]
 	handler := accessOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		forwarded++
 		w.WriteHeader(http.StatusNoContent)
@@ -172,6 +174,7 @@ func TestIndependentAccessListenerRejectsControlPlaneHosts(t *testing.T) {
 		{"remote.example.test", "/api/v1/projects", http.StatusNotFound},
 		{"remote.example.test:28443", "/access/web/device-0123456789abcdef0123456789abcdef/", http.StatusNotFound},
 		{"invalid.remote.example.test:28443", "/", http.StatusNotFound},
+		{opaqueRoute + ".remote.example.test:28443", "/", http.StatusNoContent},
 		{"device-0123456789abcdef0123456789abcdef.remote.example.test:28443", "/", http.StatusNoContent},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "http://"+test.host+test.path, nil)
@@ -181,8 +184,8 @@ func TestIndependentAccessListenerRejectsControlPlaneHosts(t *testing.T) {
 			t.Fatalf("host %s path %s status = %d, want %d", test.host, test.path, response.Code, test.wantStatus)
 		}
 	}
-	if forwarded != 1 {
-		t.Fatalf("forwarded request count = %d, want 1", forwarded)
+	if forwarded != 2 {
+		t.Fatalf("forwarded request count = %d, want 2", forwarded)
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/secrets"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/webroutelabel"
 )
 
 type storage interface {
@@ -1517,12 +1518,12 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 	var session store.AccessSession
 	createInput := store.CreateAccessSessionInput{UserID: &userID, AuthSessionID: current.AuthSessionID, ProjectID: route.ProjectID, EndpointID: route.EndpointID, GrantHash: grantHash, Mode: input.Mode, SourceIP: requestSourceIP(r), ExpiresAt: expiresAt, RouteIdleCutoff: time.Now().UTC().Add(-s.authSessionIdleTTL)}
 	if input.Mode == "web" {
-		// Use a bounded set of long-lived, human-readable access origins. Creating
-		// a fresh opaque hostname for every user/endpoint made normal bursts of
-		// device login pages indistinguishable from disposable phishing hosts to
-		// Safe Browsing. A slot is routing information only: the one-time grant,
-		// source binding and live platform session remain mandatory authorization.
-		for _, candidate := range stableWebRouteTokens(current.UserID, route.EndpointID) {
+		// Each user/endpoint pair receives its own long-lived opaque origin. It is
+		// stable across reopen operations, but unlike the former shared slot pool it
+		// has no global concurrency ceiling. The label remains routing information
+		// only: the one-time grant, source binding and live platform session are the
+		// authorization boundary.
+		for _, candidate := range webroutelabel.StableCandidates(current.UserID, route.EndpointID) {
 			token, tokenHash = candidate, accessTokenHash(candidate)
 			createInput.TokenHash = tokenHash
 			session, err = s.store.CreateAccessSession(r.Context(), createInput, auditFromRequest(r, "access_session.create", "access_session"))
@@ -1531,7 +1532,7 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 			}
 		}
 		if errors.Is(err, store.ErrInUse) {
-			writeError(w, r, http.StatusServiceUnavailable, "web_route_pool_exhausted", "当前 Web 访问入口繁忙，请稍后重试", nil)
+			writeError(w, r, http.StatusInternalServerError, "web_route_collision", "无法分配唯一 Web 访问入口", nil)
 			return createdAccessSession{}, false
 		}
 	} else {
@@ -2038,23 +2039,6 @@ func newAccessToken() (string, string, error) {
 func accessTokenHash(token string) string {
 	tokenDigest := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(tokenDigest[:])
-}
-
-const webRoutePoolSize = 32
-
-func stableWebRouteTokens(userID, endpointID string) []string {
-	// An odd step walks every slot in a power-of-two pool. The deterministic
-	// order lets a reopened endpoint reclaim its existing slot first while the
-	// conditional database upsert prevents concurrent sessions from colliding.
-	digest := sha256.Sum256([]byte("web-route-pool-v1\x00" + userID + "\x00" + endpointID))
-	start := int(digest[0]) % webRoutePoolSize
-	step := int(digest[1]%16)*2 + 1
-	tokens := make([]string, 0, webRoutePoolSize)
-	for offset := 0; offset < webRoutePoolSize; offset++ {
-		slot := (start + offset*step) % webRoutePoolSize
-		tokens = append(tokens, fmt.Sprintf("web-%02d", slot+1))
-	}
-	return tokens
 }
 
 func newOpaqueSecret(bytesCount int) (string, error) {
@@ -3363,21 +3347,7 @@ func isLoopbackHealthRequest(r *http.Request, host string) bool {
 }
 
 func validAccessRouteLabel(token string) bool {
-	if strings.HasPrefix(token, "web-") && len(token) == len("web-00") {
-		slot, err := strconv.Atoi(strings.TrimPrefix(token, "web-"))
-		return err == nil && slot >= 1 && slot <= webRoutePoolSize
-	}
-	// Accept v3 labels during a rolling update so already-open sessions fail
-	// through normal expiry instead of being mistaken for control-plane hosts.
-	if !strings.HasPrefix(token, "device-") {
-		return false
-	}
-	encoded := strings.TrimPrefix(token, "device-")
-	if len(encoded) != 32 {
-		return false
-	}
-	_, err := hex.DecodeString(encoded)
-	return err == nil && encoded == strings.ToLower(encoded)
+	return webroutelabel.IsAllowed(token)
 }
 
 func (s *server) securityHeaders(next http.Handler) http.Handler {

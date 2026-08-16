@@ -28,6 +28,7 @@ import (
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/secrets"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/webroutelabel"
 )
 
 type fakeNodeControl struct {
@@ -688,31 +689,19 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	}
 }
 
-func TestStableWebRouteIsScopedToUserAndEndpoint(t *testing.T) {
-	first := stableWebRouteTokens("user-one", "endpoint-one")
-	reopened := stableWebRouteTokens("user-one", "endpoint-one")
-	if len(first) != webRoutePoolSize || strings.Join(first, ",") != strings.Join(reopened, ",") {
-		t.Fatal("the same user and endpoint must keep one stable Web route preference")
+func TestOpaqueWebRouteLabelsAreAcceptedWithoutOpeningArbitraryHosts(t *testing.T) {
+	label := webroutelabel.StableCandidates("user-one", "endpoint-one")[0]
+	if !validAccessRouteLabel(label) {
+		t.Fatalf("generated opaque route label was rejected: %q", label)
 	}
-	seen := make(map[string]bool, len(first))
-	for _, token := range first {
-		if seen[token] || !validAccessRouteLabel(token) {
-			t.Fatalf("invalid or repeated route pool token: %q", token)
-		}
-		seen[token] = true
-	}
-	otherUser := stableWebRouteTokens("user-two", "endpoint-one")
-	otherEndpoint := stableWebRouteTokens("user-one", "endpoint-two")
-	if strings.Join(otherUser, ",") == strings.Join(first, ",") || strings.Join(otherEndpoint, ",") == strings.Join(first, ",") {
-		t.Fatal("different principals should not use the same route preference order")
-	}
-	if validAccessRouteLabel("web-00") || validAccessRouteLabel("web-33") || validAccessRouteLabel("web-1") {
-		t.Fatal("out-of-pool labels were accepted")
+	if validAccessRouteLabel("web-00") || validAccessRouteLabel("web-33") || validAccessRouteLabel("web-deadbeef") {
+		t.Fatal("invalid Web route labels were accepted")
 	}
 }
 
 func TestConfiguredPanelAndAccessDomainsAreStrictlySeparated(t *testing.T) {
 	server := &server{panelDomain: "dmp.example.test", accessDomain: "console.example.test"}
+	opaqueRoute := webroutelabel.StableCandidates("user", "endpoint")[0]
 	for _, test := range []struct {
 		name       string
 		host       string
@@ -721,8 +710,9 @@ func TestConfiguredPanelAndAccessDomainsAreStrictlySeparated(t *testing.T) {
 		wantPath   string
 	}{
 		{name: "panel", host: "dmp.example.test:4043", path: "/login", wantStatus: http.StatusNoContent, wantPath: "/login"},
-		{name: "valid access slot", host: "web-01.console.example.test:4043", path: "/cgi-bin/luci/", wantStatus: http.StatusNoContent, wantPath: "/access/web/web-01/cgi-bin/luci/"},
-		{name: "pool overflow", host: "web-99.console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
+		{name: "opaque access route", host: opaqueRoute + ".console.example.test:4043", path: "/cgi-bin/luci/", wantStatus: http.StatusNoContent, wantPath: "/access/web/" + opaqueRoute + "/cgi-bin/luci/"},
+		{name: "legacy access slot", host: "web-01.console.example.test:4043", path: "/cgi-bin/luci/", wantStatus: http.StatusNoContent, wantPath: "/access/web/web-01/cgi-bin/luci/"},
+		{name: "invalid legacy slot", host: "web-99.console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
 		{name: "arbitrary access child", host: "anything.console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
 		{name: "bare access domain", host: "console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
 		{name: "unknown panel host", host: "other.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},

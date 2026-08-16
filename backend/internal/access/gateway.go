@@ -21,6 +21,7 @@ import (
 
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/webroutelabel"
 )
 
 type sessionResolver interface {
@@ -108,9 +109,8 @@ func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func validGatewayRouteToken(token string) bool {
-	if strings.HasPrefix(token, "web-") && len(token) == len("web-00") {
-		slot, err := strconv.Atoi(strings.TrimPrefix(token, "web-"))
-		return err == nil && slot >= 1 && slot <= 32
+	if webroutelabel.IsAllowed(token) {
+		return true
 	}
 	return len(token) >= 32 && len(token) <= 128 && !strings.ContainsAny(token, "/\\ ")
 }
