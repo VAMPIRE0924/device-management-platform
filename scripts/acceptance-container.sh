@@ -135,7 +135,7 @@ test "$(curl -sS -o /dev/null -w '%{http_code}' --resolve "$access_route_one.con
   "https://$access_route_one.container-remote.example.test:$https_port/")" = "401"
 test "$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "web-99.container-remote.example.test:$https_port:127.0.0.1" \
   "https://web-99.container-remote.example.test:$https_port/login")" = "404"
-opaque_access_route="web-0123456789abcdefghjkmnpqrstvwxyz"
+opaque_access_route="web-k7m2x9p4"
 test "$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "$opaque_access_route.container-remote.example.test:$https_port:127.0.0.1" \
   "https://$opaque_access_route.container-remote.example.test:$https_port/")" = "401"
 test "$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "container-remote.example.test:$https_port:127.0.0.1" \

@@ -694,7 +694,7 @@ func TestOpaqueWebRouteLabelsAreAcceptedWithoutOpeningArbitraryHosts(t *testing.
 	if !validAccessRouteLabel(label) {
 		t.Fatalf("generated opaque route label was rejected: %q", label)
 	}
-	if validAccessRouteLabel("web-00") || validAccessRouteLabel("web-33") || validAccessRouteLabel("web-deadbeef") {
+	if validAccessRouteLabel("web-00") || validAccessRouteLabel("web-33") || validAccessRouteLabel("web-deadbee") {
 		t.Fatal("invalid Web route labels were accepted")
 	}
 }

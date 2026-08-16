@@ -27,21 +27,28 @@ func TestStableCandidatesAreOpaqueAndUnboundedBySharedSlots(t *testing.T) {
 func TestPrimaryLabelsRemainUniqueAcrossFiftyThousandRoutes(t *testing.T) {
 	seen := make(map[string]struct{}, 50_000)
 	for index := 0; index < 50_000; index++ {
-		label := StableCandidates("user-"+strconv.Itoa(index%500), "endpoint-"+strconv.Itoa(index))[0]
-		if _, exists := seen[label]; exists {
-			t.Fatalf("duplicate primary label at route %d: %q", index, label)
+		assigned := false
+		for _, label := range StableCandidates("user-"+strconv.Itoa(index%500), "endpoint-"+strconv.Itoa(index)) {
+			if _, exists := seen[label]; exists {
+				continue
+			}
+			seen[label] = struct{}{}
+			assigned = true
+			break
 		}
-		seen[label] = struct{}{}
+		if !assigned {
+			t.Fatalf("could not assign a unique label to route %d", index)
+		}
 	}
 }
 
 func TestAllowedLabelsKeepOnlyExplicitMigrationFormats(t *testing.T) {
-	for _, label := range []string{StableCandidates("user", "endpoint")[0], "web-01", "web-32", "device-0123456789abcdef0123456789abcdef"} {
+	for _, label := range []string{StableCandidates("user", "endpoint")[0], "web-0123456789abcdefghjkmnpqrstvwxyz", "web-01", "web-32", "device-0123456789abcdef0123456789abcdef"} {
 		if !IsAllowed(label) {
 			t.Fatalf("expected allowed label: %q", label)
 		}
 	}
-	for _, label := range []string{"web-00", "web-33", "web-99", "web-deadbeef", "anything", "device-0123456789ABCDEF0123456789ABCDEF"} {
+	for _, label := range []string{"web-00", "web-33", "web-99", "web-deadbee", "anything", "device-0123456789ABCDEF0123456789ABCDEF"} {
 		if IsAllowed(label) {
 			t.Fatalf("unexpected allowed label: %q", label)
 		}

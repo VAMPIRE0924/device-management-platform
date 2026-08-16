@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	prefix                  = "web-"
-	encodedDigestBytes      = 20
-	CollisionCandidateCount = 4
+	prefix                   = "web-"
+	encodedDigestBytes       = 5
+	legacyEncodedDigestBytes = 20
+	CollisionCandidateCount  = 4
 )
 
 var routeEncoding = base32.NewEncoding("0123456789abcdefghjkmnpqrstvwxyz").WithPadding(base32.NoPadding)
@@ -23,14 +24,18 @@ var routeEncoding = base32.NewEncoding("0123456789abcdefghjkmnpqrstvwxyz").WithP
 func StableCandidates(userID, endpointID string) []string {
 	labels := make([]string, 0, CollisionCandidateCount)
 	for candidate := 0; candidate < CollisionCandidateCount; candidate++ {
-		digest := sha256.Sum256([]byte("dmp-web-route-v2\x00" + userID + "\x00" + endpointID + "\x00" + strconv.Itoa(candidate)))
+		digest := sha256.Sum256([]byte("dmp-web-route-v3\x00" + userID + "\x00" + endpointID + "\x00" + strconv.Itoa(candidate)))
 		labels = append(labels, prefix+strings.ToLower(routeEncoding.EncodeToString(digest[:encodedDigestBytes])))
 	}
 	return labels
 }
 
 func IsCurrent(label string) bool {
-	if !strings.HasPrefix(label, prefix) || len(label) != len(prefix)+routeEncoding.EncodedLen(encodedDigestBytes) {
+	return isOpaqueLabel(label, encodedDigestBytes)
+}
+
+func isOpaqueLabel(label string, digestBytes int) bool {
+	if !strings.HasPrefix(label, prefix) || len(label) != len(prefix)+routeEncoding.EncodedLen(digestBytes) {
 		return false
 	}
 	encoded := strings.TrimPrefix(label, prefix)
@@ -42,7 +47,7 @@ func IsCurrent(label string) bool {
 }
 
 func IsAllowed(label string) bool {
-	return IsCurrent(label) || isLegacyPoolLabel(label) || isLegacyDeviceLabel(label)
+	return IsCurrent(label) || isOpaqueLabel(label, legacyEncodedDigestBytes) || isLegacyPoolLabel(label) || isLegacyDeviceLabel(label)
 }
 
 func isLegacyPoolLabel(label string) bool {
