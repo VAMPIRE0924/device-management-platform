@@ -122,7 +122,7 @@ func (f *fakeNodeControl) DeleteClient(_ context.Context, _ string, clientID int
 }
 
 func testServer(t *testing.T) http.Handler {
-	return testServerWithAccessDomain(t, "")
+	return testServerWithAccessDomain(t, "remote.example.test")
 }
 
 func namedCookie(cookies []*http.Cookie, name string) *http.Cookie {
@@ -545,7 +545,7 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 		}
 	}
 	if strings.Contains(launchPage, "#grant=") || strings.Contains(launchPage, "about:blank") || strings.Contains(launchPage, "browser-test-csrf") {
-		t.Fatalf("Web launch page exposed the legacy navigation flow: %s", launchPage)
+		t.Fatalf("Web launch page exposed an unsafe navigation flow: %s", launchPage)
 	}
 	if got := launchFormResponse.Header().Get("Referrer-Policy"); got != "no-referrer" {
 		t.Fatalf("Web launch Referrer-Policy = %q", got)
@@ -586,11 +586,11 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	if unauthorizedResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("access route without grant = %d, want 401", unauthorizedResponse.Code)
 	}
-	legacyQueryRequest := httptest.NewRequest(http.MethodGet, "https://"+launchURL.Host+"/?grant="+grant, nil)
-	legacyQueryResponse := httptest.NewRecorder()
-	handler.ServeHTTP(legacyQueryResponse, legacyQueryRequest)
-	if legacyQueryResponse.Code != http.StatusUnauthorized || len(legacyQueryResponse.Result().Cookies()) != 0 {
-		t.Fatalf("legacy Web query grant unexpectedly authorized access: status=%d cookies=%d", legacyQueryResponse.Code, len(legacyQueryResponse.Result().Cookies()))
+	queryGrantRequest := httptest.NewRequest(http.MethodGet, "https://"+launchURL.Host+"/?grant="+grant, nil)
+	queryGrantResponse := httptest.NewRecorder()
+	handler.ServeHTTP(queryGrantResponse, queryGrantRequest)
+	if queryGrantResponse.Code != http.StatusUnauthorized || len(queryGrantResponse.Result().Cookies()) != 0 {
+		t.Fatalf("Web query grant unexpectedly authorized access: status=%d cookies=%d", queryGrantResponse.Code, len(queryGrantResponse.Result().Cookies()))
 	}
 	exchangeRequest := httptest.NewRequest(http.MethodPost, "https://"+launchURL.Host+"/.dmp/session", strings.NewReader(`{"grant":"`+grant+`"}`))
 	exchangeRequest.Header.Set("Content-Type", "application/json")
@@ -736,11 +736,11 @@ func TestAccessSessionDomainPrefixAcceptsOnlyStoredCurrentRoute(t *testing.T) {
 	}
 	for _, session := range []store.AccessSession{
 		{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(randomLabel)},
-		{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(randomLabel), DomainPrefix: "fixed-slot"},
+		{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(randomLabel), DomainPrefix: "invalid-route"},
 		{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash("web-deadbeef"), DomainPrefix: randomLabel},
 	} {
 		if actual := accessSessionDomainPrefix(session); actual != "" {
-			t.Fatalf("obsolete, missing, or mismatched domain prefix was exposed: %q", actual)
+			t.Fatalf("invalid, missing, or mismatched domain prefix was exposed: %q", actual)
 		}
 	}
 	if actual := accessSessionDomainPrefix(store.AccessSession{Mode: "ssh", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(randomLabel), DomainPrefix: randomLabel}); actual != "" {
@@ -769,6 +769,7 @@ func TestConfiguredPanelAndAccessDomainsAreStrictlySeparated(t *testing.T) {
 		wantPath   string
 	}{
 		{name: "panel", host: "dmp.example.test:4043", path: "/login", wantStatus: http.StatusNoContent, wantPath: "/login"},
+		{name: "panel cannot use internal Web route", host: "dmp.example.test:4043", path: "/access/web/" + opaqueRoute + "/", wantStatus: http.StatusNotFound},
 		{name: "opaque access route", host: opaqueRoute + ".console.example.test:4043", path: "/cgi-bin/luci/", wantStatus: http.StatusNoContent, wantPath: "/access/web/" + opaqueRoute + "/cgi-bin/luci/"},
 		{name: "invalid short child", host: "web-short.console.example.test:4043", path: "/cgi-bin/luci/", wantStatus: http.StatusNotFound},
 		{name: "invalid long child", host: "invalid-route-label-that-is-too-long.console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
@@ -791,24 +792,6 @@ func TestConfiguredPanelAndAccessDomainsAreStrictlySeparated(t *testing.T) {
 				t.Fatalf("status/path = %d/%q, want %d/%q", response.Code, forwardedPath, test.wantStatus, test.wantPath)
 			}
 		})
-	}
-}
-
-func TestWebAccessLaunchPageSupportsSameOriginPathMode(t *testing.T) {
-	response := httptest.NewRecorder()
-	serveWebAccessLaunchPage(response, createdAccessSession{
-		WebBaseURL: "/access/web/web-01234567/",
-		Grant:      strings.Repeat("b", 48),
-		DeviceName: "路径模式设备",
-	})
-	if response.Code != http.StatusOK {
-		t.Fatalf("path-mode launch = %d: %s", response.Code, response.Body.String())
-	}
-	if got := response.Header().Get("Content-Security-Policy"); !strings.Contains(got, "form-action 'self'") {
-		t.Fatalf("path-mode launch CSP = %q", got)
-	}
-	if !strings.Contains(response.Body.String(), `action="/access/web/web-01234567/.dmp/session"`) {
-		t.Fatalf("path-mode launch action missing: %s", response.Body.String())
 	}
 }
 
@@ -978,7 +961,7 @@ func TestCreateNodeAndProject(t *testing.T) {
 		}
 	}
 	sessionResponse := request(t, handler, http.MethodPost, "/api/v1/access-sessions", map[string]any{"endpointId": device.Endpoints[0].ID, "mode": "web"}, true)
-	if sessionResponse.Code != http.StatusCreated || bytes.Contains(sessionResponse.Body.Bytes(), []byte("10.10.0.1")) || !bytes.Contains(sessionResponse.Body.Bytes(), []byte("/access/web/")) {
+	if sessionResponse.Code != http.StatusCreated || bytes.Contains(sessionResponse.Body.Bytes(), []byte("10.10.0.1")) || !bytes.Contains(sessionResponse.Body.Bytes(), []byte(".remote.example.test/")) {
 		t.Fatalf("create session status = %d: %s", sessionResponse.Code, sessionResponse.Body.String())
 	}
 	var sessionResult struct {

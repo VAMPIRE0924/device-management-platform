@@ -171,7 +171,7 @@ type server struct {
 	nodes              nodeControl
 	discovery          discoveryControl
 	sshGateway         http.Handler
-	sessionRevoker     accessSessionRevoker
+	sessionRevokers    []accessSessionRevoker
 	ui                 http.Handler
 	apiToken           string
 	panelDomain        string
@@ -231,7 +231,7 @@ func New(deps Dependencies) http.Handler {
 		s.authSessionIdleTTL = 15 * time.Minute
 	}
 	if revoker, ok := deps.SSHGateway.(accessSessionRevoker); ok {
-		s.sessionRevoker = revoker
+		s.sessionRevokers = append(s.sessionRevokers, revoker)
 	}
 	for _, cidr := range deps.TrustedProxyCIDRs {
 		if prefix, err := netip.ParsePrefix(cidr); err == nil {
@@ -307,7 +307,9 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("POST /api/v1/discovery-jobs/{jobID}/cancel", s.requireAuth(http.HandlerFunc(s.cancelDiscoveryJob)))
 	mux.Handle("POST /api/v1/discovery-jobs/{jobID}/import", s.requireAuth(http.HandlerFunc(s.importDiscoveryDevice)))
 	if s.nodes != nil {
-		mux.Handle("/access/web/{token}/{path...}", access.NewWebGateway(s.store, s.nodes, s.accessSessionIdleTTL()))
+		webGateway := access.NewWebGateway(s.store, s.nodes, s.accessSessionIdleTTL())
+		s.sessionRevokers = append(s.sessionRevokers, webGateway)
+		mux.Handle("/access/web/{token}/{path...}", webGateway)
 	}
 	if s.sshGateway != nil {
 		mux.Handle("GET /access/ssh/{token}", s.sshGateway)
@@ -1493,6 +1495,10 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 		writeError(w, r, http.StatusUnprocessableEntity, "mode_mismatch", "访问模式与 Endpoint 类型不匹配", nil)
 		return createdAccessSession{}, false
 	}
+	if input.Mode == "web" && s.accessDomain == "" {
+		writeError(w, r, http.StatusConflict, "access_domain_required", "Web 反代域名尚未配置", nil)
+		return createdAccessSession{}, false
+	}
 	if route.ClientID < 1 {
 		writeError(w, r, http.StatusConflict, "gateway_not_bound", "项目尚未绑定可用 Client", nil)
 		return createdAccessSession{}, false
@@ -1518,11 +1524,9 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 	var session store.AccessSession
 	createInput := store.CreateAccessSessionInput{UserID: &userID, AuthSessionID: current.AuthSessionID, ProjectID: route.ProjectID, EndpointID: route.EndpointID, GrantHash: grantHash, Mode: input.Mode, SourceIP: requestSourceIP(r), ExpiresAt: expiresAt}
 	if input.Mode == "web" {
-		// Each Web access session receives an independent short random origin. This
-		// is not a bounded pool and the hostname remains routing information only:
-		// the one-time grant, source binding and live platform session are the
-		// authorization boundary. A few retries handle the practically impossible
-		// case where a random label collides with a live route.
+		// Each Web access session receives an independent short random origin. The
+		// hostname is routing information only; the one-time grant, source binding
+		// and live platform session are the authorization boundary.
 		for candidate := 0; candidate < webroutelabel.CollisionCandidateCount; candidate++ {
 			token, err = webroutelabel.New()
 			if err != nil {
@@ -1554,8 +1558,8 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 		writeError(w, r, http.StatusInternalServerError, "session_create_failed", "访问会话创建失败", nil)
 		return createdAccessSession{}, false
 	}
-	launchURL := "/access/web/" + token + "/"
-	if input.Mode == "web" && s.accessDomain != "" {
+	launchURL := ""
+	if input.Mode == "web" {
 		configuredPort := s.accessHTTPPort
 		panelPort := s.httpPort
 		if s.accessScheme == "https" {
@@ -1584,14 +1588,11 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 func serveWebAccessLaunchPage(w http.ResponseWriter, result createdAccessSession) {
 	action := strings.TrimSuffix(result.WebBaseURL, "/") + "/.dmp/session"
 	parsed, err := url.Parse(action)
-	formAction := "'self'"
-	if err != nil || (parsed.IsAbs() && (parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "")) || (!parsed.IsAbs() && !strings.HasPrefix(parsed.Path, "/")) {
+	if err != nil || !parsed.IsAbs() || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" {
 		http.Error(w, "Web 访问地址无效", http.StatusInternalServerError)
 		return
 	}
-	if parsed.IsAbs() {
-		formAction = parsed.Scheme + "://" + parsed.Host
-	}
+	formAction := parsed.Scheme + "://" + parsed.Host
 	label := strings.TrimSpace(result.DeviceName)
 	if endpoint := strings.TrimSpace(result.EndpointName); endpoint != "" {
 		if label != "" {
@@ -1677,8 +1678,8 @@ func (s *server) revokeAccessSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "session_revoke_failed", "访问会话吊销失败", nil)
 		return
 	}
-	if s.sessionRevoker != nil {
-		s.sessionRevoker.Revoke(sessionID)
+	for _, revoker := range s.sessionRevokers {
+		revoker.Revoke(sessionID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -3336,6 +3337,10 @@ func (s *server) accessDomainRouting(next http.Handler) http.Handler {
 				next.ServeHTTP(w, access.WithSessionSubdomainAccess(clone))
 				return
 			}
+		}
+		if strings.HasPrefix(r.URL.Path, "/access/web/") {
+			http.NotFound(w, r)
+			return
 		}
 		if s.panelDomain != "" && host != s.panelDomain && !isLoopbackHealthRequest(r, host) {
 			http.NotFound(w, r)

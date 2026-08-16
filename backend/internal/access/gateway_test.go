@@ -71,7 +71,7 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	// attempting to proxy with an unrelated access cookie.
 	bootstrapRequest.AddCookie(&http.Cookie{Name: accessGrantCookie, Value: strings.Repeat("c", 48)})
 	bootstrapResponse := httptest.NewRecorder()
-	mux.ServeHTTP(bootstrapResponse, bootstrapRequest)
+	mux.ServeHTTP(bootstrapResponse, WithSessionSubdomainAccess(bootstrapRequest))
 	if bootstrapResponse.Code != http.StatusOK {
 		t.Fatalf("bootstrap status = %d: %s", bootstrapResponse.Code, bootstrapResponse.Body.String())
 	}
@@ -79,14 +79,14 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 		t.Fatalf("bootstrap X-Robots-Tag = %q", got)
 	}
 	body := bootstrapResponse.Body.String()
-	if !strings.Contains(body, "location.hash") || !strings.Contains(body, ".dmp/session") || !strings.Contains(body, ".dmp/authorize") || strings.Contains(body, "?grant=") {
+	if !strings.Contains(body, "location.hash") || !strings.Contains(body, "fetch('/.dmp/session'") || strings.Contains(body, "?grant=") {
 		t.Fatalf("bootstrap does not use fragment-to-POST exchange: %s", body)
 	}
 
 	exchangeRequest := httptest.NewRequest(http.MethodPost, "https://access.example/access/web/"+token+"/.dmp/session", strings.NewReader(`{"grant":"`+grant+`"}`))
 	exchangeRequest.Header.Set("Origin", "https://access.example")
 	exchangeResponse := httptest.NewRecorder()
-	mux.ServeHTTP(exchangeResponse, exchangeRequest)
+	mux.ServeHTTP(exchangeResponse, WithSessionSubdomainAccess(exchangeRequest))
 	if exchangeResponse.Code != http.StatusNoContent {
 		t.Fatalf("exchange status = %d: %s", exchangeResponse.Code, exchangeResponse.Body.String())
 	}
@@ -104,10 +104,10 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	if accessCookie == nil || accessCookie.Value != grant || !accessCookie.HttpOnly || !accessCookie.Secure {
 		t.Fatalf("exchange cookie = %#v", cookies)
 	}
-	if accessCookie.Path != "/access/web/"+token+"/" {
+	if accessCookie.Path != "/" {
 		t.Fatalf("exchange cookie path = %q", accessCookie.Path)
 	}
-	if got := strings.Join(clearedSchemePaths, ","); got != "/access/web/"+token+"/" {
+	if got := strings.Join(clearedSchemePaths, ","); got != "/" {
 		t.Fatalf("cleared scheme cookie paths = %q", got)
 	}
 
@@ -133,7 +133,7 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	foreignOriginRequest := httptest.NewRequest(http.MethodPost, "https://access.example/access/web/"+token+"/.dmp/session", strings.NewReader(`{"grant":"`+grant+`"}`))
 	foreignOriginRequest.Header.Set("Origin", "https://attacker.example")
 	foreignOriginResponse := httptest.NewRecorder()
-	mux.ServeHTTP(foreignOriginResponse, foreignOriginRequest)
+	mux.ServeHTTP(foreignOriginResponse, WithSessionSubdomainAccess(foreignOriginRequest))
 	if foreignOriginResponse.Code != http.StatusForbidden {
 		t.Fatalf("foreign origin exchange status = %d", foreignOriginResponse.Code)
 	}
@@ -142,7 +142,7 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 func TestRandomOriginDeviceCookiesKeepNativeNames(t *testing.T) {
 	responseHeader := http.Header{}
 	responseHeader.Add("Set-Cookie", "device_session=value-a; Path=/; HttpOnly")
-	rewriteCookies(responseHeader, "")
+	rewriteCookies(responseHeader)
 	rewritten := (&http.Response{Header: responseHeader}).Cookies()
 	if len(rewritten) != 1 || rewritten[0].Name != "device_session" || rewritten[0].Path != "/" {
 		t.Fatalf("rewritten response cookies = %#v", rewritten)
@@ -159,7 +159,7 @@ func TestRandomOriginDeviceCookiesKeepNativeNames(t *testing.T) {
 func TestHTMLGetsVisibleProxyDisclosure(t *testing.T) {
 	body := `<!doctype html><html><body><form><input name="username"><input type="password"></form></body></html>`
 	response := &http.Response{Header: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}, Body: io.NopCloser(strings.NewReader(body))}
-	if err := rewriteTextResponse(response, "", true); err != nil {
+	if err := injectProxyDisclosureResponse(response); err != nil {
 		t.Fatal(err)
 	}
 	rewritten, err := io.ReadAll(response.Body)
@@ -174,7 +174,7 @@ func TestHTMLGetsVisibleProxyDisclosure(t *testing.T) {
 	}
 
 	plainText := &http.Response{Header: http.Header{"Content-Type": []string{"text/plain"}}, Body: io.NopCloser(strings.NewReader("status"))}
-	if err := rewriteTextResponse(plainText, "", true); err != nil {
+	if err := injectProxyDisclosureResponse(plainText); err != nil {
 		t.Fatal(err)
 	}
 	plainBody, _ := io.ReadAll(plainText.Body)
@@ -265,29 +265,35 @@ func TestIdleWebConnectionClosesAtAccessSessionLimit(t *testing.T) {
 	}
 }
 
+func TestWebGatewayRevocationImmediatelyClosesActiveConnections(t *testing.T) {
+	gateway := NewWebGateway(fakeSessionResolver{}, fakeRouteResolver{})
+	tracker := newWebSessionActivityTracker(fakeSessionResolver{}, "revoked-web-session", time.Minute)
+	client, server := net.Pipe()
+	defer server.Close()
+	connection, err := gateway.trackWebActivityConn(client, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gateway.Revoke("revoked-web-session") {
+		t.Fatal("active Web connection was not found during revocation")
+	}
+	if _, err := connection.Write([]byte("blocked")); err == nil {
+		t.Fatal("revoked Web connection remained writable")
+	}
+
+	lateClient, lateServer := net.Pipe()
+	defer lateServer.Close()
+	if _, err := gateway.trackWebActivityConn(lateClient, tracker); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("late Web connection error = %v, want ErrNotFound", err)
+	}
+}
+
 type fakeRouteResolver struct {
 	route nodeadapter.SOCKSRoute
 }
 
 func (f fakeRouteResolver) SOCKSRoute(context.Context, string, int) (nodeadapter.SOCKSRoute, error) {
 	return f.route, nil
-}
-
-type restartingRouteResolver struct {
-	fakeRouteResolver
-	mu        sync.Mutex
-	restarts  int
-	onRestart func() error
-}
-
-func (r *restartingRouteResolver) SetManagedTunnel(context.Context, string, int, bool) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.restarts++
-	if r.onRestart != nil {
-		return r.onRestart()
-	}
-	return nil
 }
 
 func TestWebGatewayProxiesThroughAuthenticatedSOCKS(t *testing.T) {
@@ -328,7 +334,7 @@ func TestWebGatewayProxiesThroughAuthenticatedSOCKS(t *testing.T) {
 	request.Header.Set("Cookie", "dmp_session=platform-session; dmp_csrf=platform-csrf; device_session=device-value")
 	authorizeGatewayRequest(request)
 	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, request)
+	mux.ServeHTTP(response, WithSessionSubdomainAccess(request))
 	if response.Code != http.StatusFound {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -341,58 +347,12 @@ func TestWebGatewayProxiesThroughAuthenticatedSOCKS(t *testing.T) {
 	if requestCookie != "device_session=device-value" || requestAuthorization != "" || requestForwardedFor != "" {
 		t.Fatalf("control-plane headers leaked: cookie=%q authorization=%q forwarded-for=%q", requestCookie, requestAuthorization, requestForwardedFor)
 	}
-	wantLocation := "/access/web/" + token + "/next?from=device"
+	wantLocation := "/next?from=device"
 	if got := response.Header().Get("Location"); got != wantLocation {
 		t.Fatalf("location = %q, want %q", got, wantLocation)
 	}
-	if cookie := response.Header().Get("Set-Cookie"); !strings.Contains(cookie, "Path=/access/web/"+token+"/") || !strings.Contains(cookie, "HttpOnly") {
-		t.Fatalf("cookie was not scoped to session: %q", cookie)
-	}
-}
-
-func TestWebGatewayRestartsIdleManagedSOCKSOnce(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "resumed")
-	}))
-	defer upstream.Close()
-	upstreamAddress := strings.TrimPrefix(upstream.URL, "http://")
-	reserved, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	socksAddress := reserved.Addr().String()
-	_ = reserved.Close()
-	resolver := &restartingRouteResolver{fakeRouteResolver: fakeRouteResolver{route: nodeadapter.SOCKSRoute{Address: socksAddress, Username: "proxy-user", Password: "proxy-pass"}}}
-	resolver.onRestart = func() error {
-		listener, listenErr := net.Listen("tcp", socksAddress)
-		if listenErr != nil {
-			return listenErr
-		}
-		serveForwardingSOCKS(t, listener, upstreamAddress, "proxy-user", "proxy-pass")
-		resolver.onRestart = nil
-		return nil
-	}
-	host, portText, _ := net.SplitHostPort(upstreamAddress)
-	port, _ := strconv.Atoi(portText)
-	token := testWebRoute(t)
-	gateway := NewWebGateway(
-		fakeSessionResolver{session: store.AccessSession{Mode: "web"}, route: store.EndpointRoute{EndpointID: "idle-endpoint", Protocol: "http", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1}},
-		resolver,
-	)
-	mux := http.NewServeMux()
-	mux.Handle("/access/web/{token}/{path...}", gateway)
-	request := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/", nil)
-	authorizeGatewayRequest(request)
-	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || response.Body.String() != "resumed" {
-		t.Fatalf("resumed gateway response = %d %q", response.Code, response.Body.String())
-	}
-	resolver.mu.Lock()
-	restarts := resolver.restarts
-	resolver.mu.Unlock()
-	if restarts != 1 {
-		t.Fatalf("managed SOCKS restarts = %d, want 1", restarts)
+	if cookie := response.Header().Get("Set-Cookie"); !strings.Contains(cookie, "Path=/") || !strings.Contains(cookie, "HttpOnly") || strings.Contains(cookie, "/access/web/") {
+		t.Fatalf("cookie was not scoped to the random origin: %q", cookie)
 	}
 }
 
@@ -424,7 +384,9 @@ func TestWebGatewayProxiesWebSocketThroughAuthenticatedSOCKS(t *testing.T) {
 	)
 	mux := http.NewServeMux()
 	mux.Handle("/access/web/{token}/{path...}", gateway)
-	server := httptest.NewServer(mux)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, WithSessionSubdomainAccess(r))
+	}))
 	defer server.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -476,7 +438,7 @@ func TestWebGatewayUsesServerContextForSubdomainIsolation(t *testing.T) {
 	authorizeGatewayRequest(request)
 	request = WithSessionSubdomainAccess(request)
 	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, request)
+	mux.ServeHTTP(response, WithSessionSubdomainAccess(request))
 	if response.Code != http.StatusFound {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -485,73 +447,6 @@ func TestWebGatewayUsesServerContextForSubdomainIsolation(t *testing.T) {
 	}
 	if cookie := response.Header().Get("Set-Cookie"); !strings.Contains(cookie, "Path=/") || strings.Contains(cookie, "/access/web/") {
 		t.Fatalf("subdomain cookie was incorrectly path-prefixed: %q", cookie)
-	}
-}
-
-func TestWebGatewayRewritesRootPathsInTextResponses(t *testing.T) {
-	var upstreamAcceptEncoding string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamAcceptEncoding = r.Header.Get("Accept-Encoding")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("ETag", `"upstream-etag"`)
-		_, _ = io.WriteString(w, `<link href="/luci-static/app.css"><script>const api="\/ubus\/";const cdn="//cdn.example/app.js"</script><div style="background:url(/image.png)"></div>`)
-	}))
-	defer upstream.Close()
-	upstreamAddress := strings.TrimPrefix(upstream.URL, "http://")
-	socksAddress := startForwardingSOCKS(t, upstreamAddress, "proxy-user", "proxy-pass")
-	host, portText, _ := net.SplitHostPort(upstreamAddress)
-	port, _ := strconv.Atoi(portText)
-	token := testWebRoute(t)
-	prefix := "/access/web/" + token
-	gateway := NewWebGateway(
-		fakeSessionResolver{session: store.AccessSession{Mode: "web"}, route: store.EndpointRoute{Protocol: "http", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1}},
-		fakeRouteResolver{route: nodeadapter.SOCKSRoute{Address: socksAddress, Username: "proxy-user", Password: "proxy-pass"}},
-	)
-	mux := http.NewServeMux()
-	mux.Handle("/access/web/{token}/{path...}", gateway)
-	request := httptest.NewRequest(http.MethodGet, prefix+"/cgi-bin/luci/", nil)
-	authorizeGatewayRequest(request)
-	request.Header.Set("Accept-Encoding", "gzip, br")
-	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	if strings.Contains(upstreamAcceptEncoding, "br") {
-		t.Fatalf("browser Accept-Encoding reached upstream in path-prefix mode: %q", upstreamAcceptEncoding)
-	}
-	body := response.Body.String()
-	for _, expected := range []string{
-		`href="` + prefix + `/luci-static/app.css"`,
-		`"` + prefix + `\/ubus\/"`,
-		`url(` + prefix + `/image.png)`,
-		`"//cdn.example/app.js"`,
-	} {
-		if !strings.Contains(body, expected) {
-			t.Fatalf("rewritten body missing %q: %s", expected, body)
-		}
-	}
-	if response.Header().Get("ETag") != "" {
-		t.Fatalf("upstream ETag survived rewritten body")
-	}
-	if got := response.Header().Get("Content-Length"); got != strconv.Itoa(response.Body.Len()) {
-		t.Fatalf("Content-Length = %q, body length = %d", got, response.Body.Len())
-	}
-}
-
-func TestWebGatewayOnlyRewritesURLLikeJavaScriptStrings(t *testing.T) {
-	script := `const slash="/"; const sentinel="/$"; const cidr=value.match(/^(.+)\/(\d+)$/); const quote=value.replace(/'/g,'"'); const login="/login.html";`
-	response := &http.Response{Header: http.Header{"Content-Type": []string{"text/javascript; charset=utf-8"}}, Body: io.NopCloser(strings.NewReader(script)), ContentLength: int64(len(script))}
-	if err := rewriteTextResponse(response, "/access/web/session-token"); err != nil {
-		t.Fatal(err)
-	}
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `const slash="/"; const sentinel="/$"; const cidr=value.match(/^(.+)\/(\d+)$/); const quote=value.replace(/'/g,'"'); const login="/access/web/session-token/login.html";`
-	if string(body) != want {
-		t.Fatalf("JavaScript response = %s, want %s", body, want)
 	}
 }
 
@@ -566,7 +461,7 @@ func TestWebGatewayRejectsDifferentSourceIP(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/", nil)
 	authorizeGatewayRequest(request)
 	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, request)
+	mux.ServeHTTP(response, WithSessionSubdomainAccess(request))
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d", response.Code)
 	}
@@ -598,7 +493,7 @@ func TestWebGatewayHTTPSAcceptsPrivateDeviceCertificates(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/", nil)
 		authorizeGatewayRequest(request)
 		response := httptest.NewRecorder()
-		mux.ServeHTTP(response, request)
+		mux.ServeHTTP(response, WithSessionSubdomainAccess(request))
 		return response
 	}
 
@@ -611,31 +506,27 @@ func TestWebGatewayHTTPSAcceptsPrivateDeviceCertificates(t *testing.T) {
 }
 
 func TestWebGatewayKeepsHTTPToHTTPSRedirectInsideSession(t *testing.T) {
-	token := testWebRoute(t)
-	basePrefix := "/access/web/" + token
 	header := http.Header{"Location": []string{"https://10.10.0.25/console?view=main"}}
-	rewriteLocation(header, "http", "10.10.0.25", 80, basePrefix, basePrefix)
-	want := basePrefix + "/" + httpsUpgradePath + "/console?view=main"
+	rewriteLocation(header, "http", "10.10.0.25", 80)
+	want := "/" + httpsUpgradePath + "/console?view=main"
 	if got := header.Get("Location"); got != want {
 		t.Fatalf("upgraded location = %q, want %q", got, want)
 	}
-	scheme, port, path, responsePrefix := gatewayUpstream(store.EndpointRoute{Protocol: "http", TargetPort: 80}, httpsUpgradePath+"/console", basePrefix, false)
-	if scheme != "https" || port != 443 || path != "/console" || responsePrefix != basePrefix+"/"+httpsUpgradePath {
-		t.Fatalf("upgraded route = %q %d %q %q", scheme, port, path, responsePrefix)
+	scheme, port, path := gatewayUpstream(store.EndpointRoute{Protocol: "http", TargetPort: 80}, httpsUpgradePath+"/console", false)
+	if scheme != "https" || port != 443 || path != "/console" {
+		t.Fatalf("upgraded route = %q %d %q", scheme, port, path)
 	}
 }
 
 func TestWebGatewayKeepsTrustedHTTPSMarkerAfterRewritingDeviceCookies(t *testing.T) {
-	token := testWebRoute(t)
-	prefix := "/access/web/" + token
 	header := http.Header{}
 	header.Add("Set-Cookie", "device_session=ok; Path=/; HttpOnly")
 	// A device must not be able to inject a platform-reserved routing marker.
 	header.Add("Set-Cookie", upstreamSchemeCookie+"=http; Path=/")
-	rewriteCookies(header, prefix)
+	rewriteCookies(header)
 
-	request := httptest.NewRequest(http.MethodGet, "https://access.example"+prefix+"/"+httpsUpgradePath+"/", nil)
-	appendTrustedUpstreamSchemeCookie(header, request, token, "http", "https")
+	request := httptest.NewRequest(http.MethodGet, "https://access.example/"+httpsUpgradePath+"/", nil)
+	appendTrustedUpstreamSchemeCookie(header, request, "http", "https")
 
 	var deviceCookie, schemeCookie *http.Cookie
 	for _, cookie := range (&http.Response{Header: header}).Cookies() {
@@ -646,30 +537,27 @@ func TestWebGatewayKeepsTrustedHTTPSMarkerAfterRewritingDeviceCookies(t *testing
 			schemeCookie = cookie
 		}
 	}
-	if deviceCookie == nil || deviceCookie.Path != prefix+"/" || !deviceCookie.HttpOnly {
+	if deviceCookie == nil || deviceCookie.Path != "/" || !deviceCookie.HttpOnly {
 		t.Fatalf("rewritten device cookie = %#v", deviceCookie)
 	}
-	if schemeCookie == nil || schemeCookie.Value != "https" || schemeCookie.Path != prefix+"/" || !schemeCookie.HttpOnly || !schemeCookie.Secure {
+	if schemeCookie == nil || schemeCookie.Value != "https" || schemeCookie.Path != "/" || !schemeCookie.HttpOnly || !schemeCookie.Secure {
 		t.Fatalf("trusted HTTPS marker = %#v", schemeCookie)
 	}
 }
 
 func TestWebGatewayNormalizesBrokenHTTPSRedirectPort(t *testing.T) {
-	basePrefix := "/access/web/session"
 	header := http.Header{"Location": []string{"https://10.1.1.165:80/"}}
-	rewriteLocation(header, "http", "10.1.1.165", 80, basePrefix, basePrefix)
-	if got := header.Get("Location"); got != basePrefix+"/"+httpsUpgradePath+"/" {
+	rewriteLocation(header, "http", "10.1.1.165", 80)
+	if got := header.Get("Location"); got != "/"+httpsUpgradePath+"/" {
 		t.Fatalf("broken device redirect escaped session: %q", got)
 	}
 }
 
 func TestWebGatewayContainsCrossOriginRedirectsInsideSession(t *testing.T) {
-	for _, prefix := range []string{"", "/access/web/session"} {
-		header := http.Header{"Location": []string{"https://other-device.invalid/login?token=secret"}}
-		rewriteLocation(header, "https", "10.1.1.165", 443, prefix, prefix)
-		if got, want := header.Get("Location"), accessSessionRoot(prefix); got != want {
-			t.Fatalf("external redirect escaped session: got %q, want %q", got, want)
-		}
+	header := http.Header{"Location": []string{"https://other-device.invalid/login?token=secret"}}
+	rewriteLocation(header, "https", "10.1.1.165", 443)
+	if got := header.Get("Location"); got != "/" {
+		t.Fatalf("external redirect escaped session: got %q", got)
 	}
 }
 
@@ -687,7 +575,7 @@ func TestWebGatewayDoesNotExposeInternalNetworkErrors(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/", nil)
 	authorizeGatewayRequest(request)
 	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, request)
+	mux.ServeHTTP(response, WithSessionSubdomainAccess(request))
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}

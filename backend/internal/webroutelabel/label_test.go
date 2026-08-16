@@ -2,7 +2,7 @@ package webroutelabel
 
 import "testing"
 
-func TestNewLabelsAreShortRandomAndUnboundedBySharedSlots(t *testing.T) {
+func TestNewLabelsAreShortAndRandom(t *testing.T) {
 	seen := make(map[string]bool, 2_000)
 	for index := 0; index < 2_000; index++ {
 		label, err := New()
@@ -46,7 +46,7 @@ func TestAllowedLabelsAcceptOnlyCurrentRandomFormat(t *testing.T) {
 	}
 	for _, label := range []string{"web-short", "web-iiiiiiii", "web-uppercase", "web-0123456789abcdefghjkmnpqrstvwxyz", "anything", "invalid-route-label-that-is-too-long"} {
 		if IsCurrent(label) {
-			t.Fatalf("obsolete or invalid label was accepted: %q", label)
+			t.Fatalf("invalid label was accepted: %q", label)
 		}
 	}
 }

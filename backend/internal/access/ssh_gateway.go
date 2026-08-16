@@ -223,13 +223,6 @@ func (g *SSHGateway) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 	target := net.JoinHostPort(route.Host, strconv.Itoa(route.TargetPort))
 	dialer := SOCKSDialer{ProxyAddress: socksRoute.Address, Username: socksRoute.Username, Password: socksRoute.Password, Timeout: g.timeout}
 	networkConn, err := dialer.DialContext(ctx, "tcp", target)
-	if errors.Is(err, errSOCKSProxyUnavailable) {
-		if controller, ok := g.routes.(managedTunnelRestarter); ok {
-			if restartErr := controller.SetManagedTunnel(ctx, route.NodeID, route.ClientID, true); restartErr == nil {
-				networkConn, err = dialer.DialContext(ctx, "tcp", target)
-			}
-		}
-	}
 	if err != nil {
 		_ = wsjson.Write(ctx, conn, sshServerMessage{Type: "error", Code: "target_unreachable", Message: "SSH 目标暂时不可达"})
 		return
