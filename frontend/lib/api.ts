@@ -174,8 +174,16 @@ export type APIManagedTunnel = {
   port: number;
   configured: boolean;
   running: boolean;
+  active: boolean;
+  countdown: boolean;
+  lastActiveAt: number;
+  idleSeconds: number;
+  remainingSeconds: number;
+  autoCloseAt: number;
+  autoCloseTimeoutSeconds: number;
   inletFlow: number;
   exportFlow: number;
+  observedAt: string;
 };
 
 export type APIMonitorNode = {
@@ -296,8 +304,11 @@ export type APIPortForward = {
   endpointName: string;
   deviceName: string;
   nodeId: string;
+	clientId: number;
   target: string;
   serverPort: number;
+	nodeTaskType: "portForward" | "";
+	nodeTaskId: number | null;
   status: string;
   expiresAt: string | null;
 };
@@ -407,7 +418,7 @@ export const api = {
   async createPortForward(projectId: string, input: { endpointId: string; serverPort: number; expiresAt: string | null }) { return request<APIPortForward>(`/api/v1/projects/${encodeURIComponent(projectId)}/port-forwards`, { method: "POST", body: JSON.stringify(input) }); },
   async setPortForward(forwardId: string, running: boolean) { return request<{ id: string; status: string }>(`/api/v1/port-forwards/${encodeURIComponent(forwardId)}/${running ? "start" : "stop"}`, { method: "POST" }); },
   async deletePortForward(forwardId: string) { return request<void>(`/api/v1/port-forwards/${encodeURIComponent(forwardId)}`, { method: "DELETE" }); },
-  async setManagedTunnel(nodeId: string, clientId: number, running: boolean) { return request<{ running: boolean }>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/managed-tunnels/${clientId}/${running ? "start" : "stop"}`, { method: "POST" }); },
+  async setManagedTunnel(nodeId: string, clientId: number, running: boolean) { return request<APIManagedTunnel>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/managed-tunnels/${clientId}/${running ? "start" : "stop"}`, { method: "POST" }); },
   async managedTunnels(nodeId: string) { return (await request<{ items: APIManagedTunnel[] }>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/managed-tunnels`)).items; },
   async projectScanPorts(projectId: string) { return (await request<{ items: APIDiscoveryPort[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/scan-ports`)).items; },
   async updateProjectScanPorts(projectId: string, ports: APIDiscoveryPort[]) { return (await request<{ items: APIDiscoveryPort[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/scan-ports`, { method: "PUT", body: JSON.stringify({ ports }) })).items; },

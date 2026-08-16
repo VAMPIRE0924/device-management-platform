@@ -99,7 +99,7 @@ if grep -i '^Set-Cookie:.*; Secure' "$login_headers" >/dev/null; then
   exit 1
 fi
 curl -fsS -b "$login_cookies" "$primary_url/api/v1/auth/me" | grep -q '"username":"container-admin"'
-curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/meta" | grep -q '"schemaVersion":25'
+curl -fsS -H "Authorization: Bearer $api_token" "$primary_url/api/v1/meta" | grep -q '"schemaVersion":26'
 
 settings_response="$artifact_dir/settings.json"
 curl -fsS -X PUT -H "Authorization: Bearer $api_token" -H 'Content-Type: application/json' \
@@ -113,7 +113,7 @@ fi
 docker exec "$primary" sh -c 'test "$(stat -c %a /data/settings.override.conf)" = "600" && test "$(stat -c %a /data/smtp-password)" = "600" && ! grep -q container-settings-test-secret /data/settings.override.conf'
 
 curl -fsS -H "Authorization: Bearer $api_token" -H 'Content-Type: application/json' \
-  -d '{"name":"容器持久化验收节点","apiUrl":"https://127.0.0.1:16443","tlsServerName":"node.acceptance.local","credential":{"type":"session","username":"container-admin","password":"container-node-password"},"portStart":29000,"portEnd":29099}' \
+  -d '{"name":"容器持久化验收节点","apiUrl":"https://127.0.0.1:16443","tlsServerName":"node.acceptance.local","credential":{"type":"signed","authKey":"container-test-auth-key-0123456789-abcd"},"portStart":29000,"portEnd":29099}' \
   "$primary_url/api/v1/nodes" >/dev/null
 
 docker stop -t 15 "$primary" >/dev/null
@@ -166,7 +166,7 @@ test "$(grep -ic '^Set-Cookie:.*; Secure' "$https_headers")" = "2"
 
 curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $api_token" "$primary_url/api/v1/data/backup" -o "$artifact_dir/backup.db"
 test "$(sqlite3 "$artifact_dir/backup.db" 'pragma integrity_check;')" = "ok"
-test "$(sqlite3 "$artifact_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "25"
+test "$(sqlite3 "$artifact_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "26"
 docker volume create "$restored_volume" >/dev/null
 docker run --rm -v "$restored_volume:/data" -v "$artifact_dir:/backup:ro" \
   "$image" restore /backup/backup.db >/dev/null
@@ -177,6 +177,6 @@ wait_ready "$restored_url"
 restored_api_token=$(docker exec "$restored" sh -c 'cat /data/api.token')
 test "${#restored_api_token}" = "64"
 curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/nodes" | grep -q '容器持久化验收节点'
-curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/meta" | grep -q '"schemaVersion":25'
+curl -fsS -H 'Host: panel.container.example.test' -H "Authorization: Bearer $restored_api_token" "$restored_url/api/v1/meta" | grep -q '"schemaVersion":26'
 
 printf 'Container acceptance passed\nbackup artifact: %s\n' "$artifact_dir/backup.db"

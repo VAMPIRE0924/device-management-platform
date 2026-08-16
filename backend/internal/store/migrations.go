@@ -1,6 +1,6 @@
 package store
 
-const schemaVersion = 25
+const schemaVersion = 26
 
 var migrations = []string{`
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -341,4 +341,7 @@ ALTER TABLE access_sessions ADD COLUMN route_label TEXT NOT NULL DEFAULT '';
 UPDATE access_sessions
 SET status = 'revoked', ended_at = COALESCE(ended_at, datetime('now'))
 WHERE mode = 'web' AND route_label = '' AND status = 'active';
+`, `
+ALTER TABLE port_forwards ADD COLUMN node_task_type TEXT NOT NULL DEFAULT '';
+UPDATE port_forwards SET node_task_type = 'portForward' WHERE node_task_id IS NOT NULL;
 `}

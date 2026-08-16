@@ -64,7 +64,7 @@ type storage interface {
 	ResolveAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error)
 	ListPortForwards(context.Context, string) ([]store.PortForward, error)
 	ReservePortForward(context.Context, store.ReservePortForwardInput, store.AuditInput) (store.PortForward, error)
-	ActivatePortForward(context.Context, string, int) error
+	ActivatePortForward(context.Context, string, string, int) error
 	PortForwardByID(context.Context, string) (store.PortForward, error)
 	SetPortForwardStatus(context.Context, string, string, store.AuditInput) error
 	DeletePortForward(context.Context, string, store.AuditInput) error
@@ -112,6 +112,7 @@ type nodeControl interface {
 	ListClients(context.Context, string) ([]nodeadapter.Client, error)
 	ClientCredentials(context.Context, string, int) (nodeadapter.ClientCredentials, error)
 	ListManagedTunnels(context.Context, string) ([]nodeadapter.ManagedTunnel, error)
+	ManagedTunnelStatus(context.Context, string, int) (nodeadapter.ManagedTunnel, error)
 	SetManagedTunnel(context.Context, string, int, bool) error
 	SOCKSRoute(context.Context, string, int) (nodeadapter.SOCKSRoute, error)
 	CreatePortForward(context.Context, string, int, int, string, string) (nodeadapter.PortForward, error)
@@ -922,7 +923,12 @@ func (s *server) setManagedTunnel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "audit_write_failed", "通道操作已执行，但审计写入失败，请立即核对节点状态", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"clientId": clientID, "running": running})
+	status, err := s.nodes.ManagedTunnelStatus(r.Context(), r.PathValue("nodeID"), clientID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "tunnel_status_failed", "通道操作已执行，但无法读取最新运行状态", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
@@ -1738,13 +1744,14 @@ func (s *server) createPortForward(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadGateway, "node_port_forward_failed", "接入节点创建端口转发失败，预留已释放", nil)
 		return
 	}
-	if err := s.store.ActivatePortForward(r.Context(), forward.ID, nodeTask.ID); err != nil {
+	if err := s.store.ActivatePortForward(r.Context(), forward.ID, nodeTask.Type, nodeTask.ID); err != nil {
 		_ = s.nodes.DeletePortForward(context.WithoutCancel(r.Context()), forward.NodeID, nodeTask.ID)
 		_ = s.store.DeletePortForward(context.WithoutCancel(r.Context()), forward.ID, auditFromRequest(r, "port_forward.rollback", "port_forward"))
 		writeError(w, r, http.StatusInternalServerError, "port_forward_commit_failed", "转发任务已回滚，请重试", nil)
 		return
 	}
 	forward.NodeTaskID = &nodeTask.ID
+	forward.NodeTaskType = nodeTask.Type
 	forward.Status = "running"
 	writeJSON(w, http.StatusCreated, forward)
 }
@@ -1760,7 +1767,7 @@ func (s *server) setPortForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	forward, err := s.store.PortForwardByID(r.Context(), r.PathValue("forwardID"))
-	if errors.Is(err, store.ErrNotFound) || forward.NodeTaskID == nil {
+	if errors.Is(err, store.ErrNotFound) || forward.NodeTaskID == nil || forward.NodeTaskType != "portForward" {
 		writeError(w, r, http.StatusNotFound, "port_forward_not_found", "端口转发不存在或尚未完成创建", nil)
 		return
 	}
@@ -1796,6 +1803,10 @@ func (s *server) deletePortForward(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取端口转发失败", nil)
+		return
+	}
+	if forward.NodeTaskID != nil && forward.NodeTaskType != "portForward" {
+		writeError(w, r, http.StatusConflict, "invalid_task_reference", "端口转发保存的 NPS 任务类型无效", nil)
 		return
 	}
 	if forward.NodeTaskID != nil {
