@@ -187,6 +187,9 @@ type CreateAccessSessionInput struct {
 	Mode          string
 	SourceIP      string
 	ExpiresAt     time.Time
+	// RouteIdleCutoff lets the bounded Web-origin pool reclaim a slot whose
+	// previous access session has already crossed the platform idle boundary.
+	RouteIdleCutoff time.Time
 }
 
 type PortForward struct {

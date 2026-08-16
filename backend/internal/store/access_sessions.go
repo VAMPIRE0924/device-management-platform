@@ -46,12 +46,16 @@ func (s *Store) CreateAccessSession(ctx context.Context, input CreateAccessSessi
 		return AccessSession{}, err
 	}
 	now := time.Now().UTC()
+	routeIdleCutoff := input.RouteIdleCutoff.UTC()
+	if input.RouteIdleCutoff.IsZero() {
+		routeIdleCutoff = now.Add(-15 * time.Minute)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return AccessSession{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 INSERT INTO access_sessions(id,user_id,auth_session_id,project_id,endpoint_id,token_hash,grant_hash,grant_exchanged_at,mode,source_ip,status,expires_at,started_at,ended_at,last_seen_at)
 VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,NULL,?)
 ON CONFLICT(token_hash) DO UPDATE SET
@@ -68,10 +72,25 @@ ON CONFLICT(token_hash) DO UPDATE SET
   expires_at=excluded.expires_at,
   started_at=excluded.started_at,
   ended_at=NULL,
-  last_seen_at=excluded.last_seen_at`,
-		sessionID, input.UserID, input.AuthSessionID, input.ProjectID, input.EndpointID, input.TokenHash, input.GrantHash, input.Mode, input.SourceIP, "active", input.ExpiresAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+  last_seen_at=excluded.last_seen_at
+WHERE access_sessions.user_id IS excluded.user_id AND access_sessions.endpoint_id = excluded.endpoint_id
+   OR access_sessions.status != 'active'
+   OR access_sessions.expires_at <= ?
+   OR access_sessions.last_seen_at <= ?
+   OR NOT EXISTS (
+      SELECT 1 FROM auth_sessions a JOIN users u ON u.id = a.user_id
+      WHERE a.id = access_sessions.auth_session_id AND a.user_id = access_sessions.user_id
+        AND a.status = 'active' AND a.expires_at > ? AND a.last_seen_at > ? AND u.enabled = 1
+   )`,
+		sessionID, input.UserID, input.AuthSessionID, input.ProjectID, input.EndpointID, input.TokenHash, input.GrantHash, input.Mode, input.SourceIP, "active", input.ExpiresAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		now.Format(time.RFC3339Nano), routeIdleCutoff.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), routeIdleCutoff.Format(time.RFC3339Nano))
 	if err != nil {
 		return AccessSession{}, err
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return AccessSession{}, rowsErr
+	} else if affected != 1 {
+		return AccessSession{}, ErrInUse
 	}
 	audit.ResourceID = sessionID
 	if err := insertAudit(ctx, tx, auditID, audit, now); err != nil {

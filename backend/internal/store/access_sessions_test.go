@@ -53,6 +53,22 @@ func TestAccessSessionIdleExpiryAndRouteRotation(t *testing.T) {
 	if first.ID == second.ID {
 		t.Fatal("route rotation must replace the logical access session")
 	}
+	otherUser, err := db.CreateUser(ctx, CreateUserInput{Username: "operator", DisplayName: "Operator", PasswordHash: "not-used", Role: "operator", Enabled: true, ProjectIDs: []string{project.ID}}, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAuth, err := db.CreateAuthSession(ctx, otherUser.ID, "other-auth-token-hash", "other-csrf-hash", now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherInput := input
+	otherInput.UserID = &otherUser.ID
+	otherInput.AuthSessionID = otherAuth.ID
+	otherInput.GrantHash = "other-grant"
+	otherInput.RouteIdleCutoff = now.Add(-15 * time.Minute)
+	if _, err := db.CreateAccessSession(ctx, otherInput, audit); err != ErrInUse {
+		t.Fatalf("active pooled route collision error = %v, want ErrInUse", err)
+	}
 	touchAt := now.Add(10 * time.Minute)
 	if err := db.TouchAccessSession(ctx, second.ID, touchAt, now.Add(-time.Minute)); err != nil {
 		t.Fatalf("touch active access session: %v", err)

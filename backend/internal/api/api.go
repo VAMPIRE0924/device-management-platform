@@ -1498,22 +1498,6 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 		writeError(w, r, http.StatusBadGateway, "managed_tunnel_unavailable", "远程访问前无法启动托管通道", nil)
 		return createdAccessSession{}, false
 	}
-	// A Web route is stable for one user and one endpoint, including across
-	// platform logins. Reopening rotates the one-time grant and invalidates the
-	// old access authorization without creating bursts of unrelated subdomains.
-	// Different users still receive different browser origins so device cookies
-	// cannot cross user boundaries. The route label remains routing information
-	// only; it never authorizes a request without the host-scoped grant cookie.
-	var token, tokenHash string
-	if input.Mode == "web" {
-		token, tokenHash = stableWebRouteToken(current.UserID, route.EndpointID)
-	} else {
-		token, tokenHash, err = newAccessToken()
-		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, "token_generation_failed", "无法创建安全访问令牌", nil)
-			return createdAccessSession{}, false
-		}
-	}
 	grant, grantHash, err := newAccessToken()
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "grant_generation_failed", "无法创建一次性访问授权", nil)
@@ -1527,7 +1511,36 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 		expiresAt = time.Now().UTC().Add(s.authSessionTTL)
 	}
 	userID := current.UserID
-	session, err := s.store.CreateAccessSession(r.Context(), store.CreateAccessSessionInput{UserID: &userID, AuthSessionID: current.AuthSessionID, ProjectID: route.ProjectID, EndpointID: route.EndpointID, TokenHash: tokenHash, GrantHash: grantHash, Mode: input.Mode, SourceIP: requestSourceIP(r), ExpiresAt: expiresAt}, auditFromRequest(r, "access_session.create", "access_session"))
+	var token, tokenHash string
+	var session store.AccessSession
+	createInput := store.CreateAccessSessionInput{UserID: &userID, AuthSessionID: current.AuthSessionID, ProjectID: route.ProjectID, EndpointID: route.EndpointID, GrantHash: grantHash, Mode: input.Mode, SourceIP: requestSourceIP(r), ExpiresAt: expiresAt, RouteIdleCutoff: time.Now().UTC().Add(-s.authSessionIdleTTL)}
+	if input.Mode == "web" {
+		// Use a bounded set of long-lived, human-readable access origins. Creating
+		// a fresh opaque hostname for every user/endpoint made normal bursts of
+		// device login pages indistinguishable from disposable phishing hosts to
+		// Safe Browsing. A slot is routing information only: the one-time grant,
+		// source binding and live platform session remain mandatory authorization.
+		for _, candidate := range stableWebRouteTokens(current.UserID, route.EndpointID) {
+			token, tokenHash = candidate, accessTokenHash(candidate)
+			createInput.TokenHash = tokenHash
+			session, err = s.store.CreateAccessSession(r.Context(), createInput, auditFromRequest(r, "access_session.create", "access_session"))
+			if !errors.Is(err, store.ErrInUse) {
+				break
+			}
+		}
+		if errors.Is(err, store.ErrInUse) {
+			writeError(w, r, http.StatusServiceUnavailable, "web_route_pool_exhausted", "当前 Web 访问入口繁忙，请稍后重试", nil)
+			return createdAccessSession{}, false
+		}
+	} else {
+		token, tokenHash, err = newAccessToken()
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "token_generation_failed", "无法创建安全访问令牌", nil)
+			return createdAccessSession{}, false
+		}
+		createInput.TokenHash = tokenHash
+		session, err = s.store.CreateAccessSession(r.Context(), createInput, auditFromRequest(r, "access_session.create", "access_session"))
+	}
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "session_create_failed", "访问会话创建失败", nil)
 		return createdAccessSession{}, false
@@ -2017,19 +2030,29 @@ func newAccessToken() (string, string, error) {
 		return "", "", err
 	}
 	token := hex.EncodeToString(raw)
-	digest := sha256.Sum256([]byte(token))
-	return token, hex.EncodeToString(digest[:]), nil
+	return token, accessTokenHash(token), nil
 }
 
-func stableWebRouteToken(userID, endpointID string) (string, string) {
-	// v3 retires routes first opened through an opener-controlled blank-page
-	// redirect. New launches use a user-initiated control-plane form and a
-	// top-level one-time POST; the resulting route remains stable and must not
-	// rotate on each launch.
-	digest := sha256.Sum256([]byte("web-route-v3\x00" + userID + "\x00" + endpointID))
-	token := "device-" + hex.EncodeToString(digest[:16])
+func accessTokenHash(token string) string {
 	tokenDigest := sha256.Sum256([]byte(token))
-	return token, hex.EncodeToString(tokenDigest[:])
+	return hex.EncodeToString(tokenDigest[:])
+}
+
+const webRoutePoolSize = 32
+
+func stableWebRouteTokens(userID, endpointID string) []string {
+	// An odd step walks every slot in a power-of-two pool. The deterministic
+	// order lets a reopened endpoint reclaim its existing slot first while the
+	// conditional database upsert prevents concurrent sessions from colliding.
+	digest := sha256.Sum256([]byte("web-route-pool-v1\x00" + userID + "\x00" + endpointID))
+	start := int(digest[0]) % webRoutePoolSize
+	step := int(digest[1]%16)*2 + 1
+	tokens := make([]string, 0, webRoutePoolSize)
+	for offset := 0; offset < webRoutePoolSize; offset++ {
+		slot := (start + offset*step) % webRoutePoolSize
+		tokens = append(tokens, fmt.Sprintf("web-%02d", slot+1))
+	}
+	return tokens
 }
 
 func newOpaqueSecret(bytesCount int) (string, error) {
@@ -3312,6 +3335,12 @@ func (s *server) accessDomainRouting(next http.Handler) http.Handler {
 }
 
 func validAccessRouteLabel(token string) bool {
+	if strings.HasPrefix(token, "web-") && len(token) == len("web-00") {
+		slot, err := strconv.Atoi(strings.TrimPrefix(token, "web-"))
+		return err == nil && slot >= 1 && slot <= webRoutePoolSize
+	}
+	// Accept v3 labels during a rolling update so already-open sessions fail
+	// through normal expiry instead of being mistaken for control-plane hosts.
 	if !strings.HasPrefix(token, "device-") {
 		return false
 	}

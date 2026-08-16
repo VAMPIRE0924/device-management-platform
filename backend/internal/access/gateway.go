@@ -74,7 +74,7 @@ func NewWebGateway(sessions sessionResolver, routes routeResolver, idleTTLs ...t
 
 func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
-	if len(token) < 32 || len(token) > 128 || strings.ContainsAny(token, "/\\ ") {
+	if !validGatewayRouteToken(token) {
 		gatewayError(w, http.StatusNotFound, "访问会话不存在或已失效")
 		return
 	}
@@ -104,7 +104,15 @@ func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		gatewayError(w, http.StatusBadGateway, "无法获取项目通道路由")
 		return
 	}
-	g.proxy(w, r, token, pathValue, route, socksRoute)
+	g.proxy(w, r, token, pathValue, session, route, socksRoute)
+}
+
+func validGatewayRouteToken(token string) bool {
+	if strings.HasPrefix(token, "web-") && len(token) == len("web-00") {
+		slot, err := strconv.Atoi(strings.TrimPrefix(token, "web-"))
+		return err == nil && slot >= 1 && slot <= 32
+	}
+	return len(token) >= 32 && len(token) <= 128 && !strings.ContainsAny(token, "/\\ ")
 }
 
 const accessGrantCookie = "dmp_access_grant"
@@ -183,10 +191,18 @@ func (g *WebGateway) exchangeGrant(w http.ResponseWriter, r *http.Request, token
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 	if formNavigation {
-		http.Redirect(w, r, cookiePath, http.StatusSeeOther)
+		serveGrantExchangeComplete(w, cookiePath)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func serveGrantExchangeComplete(w http.ResponseWriter, destination string) {
+	encodedDestination, _ := json.Marshal(destination)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>I5CLOUD 内网设备代理</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{max-width:38rem;padding:2rem;text-align:center}strong{display:block;font-size:1.3rem;margin-bottom:.75rem}p{line-height:1.65;color:#526471}</style><main><strong>I5CLOUD 远程管理平台</strong><p>正在进入由目标内网设备提供的第三方管理页面。</p><p>请仅在确认设备身份后输入该设备的凭据。</p></main><script>setTimeout(()=>location.replace(%s),300)</script></html>`, encodedDestination)
 }
 
 func clearUpstreamSchemeCookies(w http.ResponseWriter, r *http.Request, cookiePath string) {
@@ -293,10 +309,12 @@ func resolveAuthorizedAccess(w http.ResponseWriter, r *http.Request, sessions se
 	return session, route, true
 }
 
-func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, requestPath string, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) {
+func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, requestPath string, session store.AccessSession, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) {
 	basePrefix := "/access/web/" + token
+	deviceCookiePrefix := ""
 	if usesSessionSubdomain(r) {
 		basePrefix = ""
+		deviceCookiePrefix = deviceCookieNamespace(session)
 	}
 	stickyHTTPS := false
 	if cookie, err := r.Cookie(upstreamSchemeCookie); err == nil && cookie.Value == "https" {
@@ -314,11 +332,11 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, reques
 		Transport: transport,
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
 			request := proxyRequest.Out
-			stripControlPlaneHeaders(request.Header)
+			stripControlPlaneHeaders(request.Header, deviceCookiePrefix)
 			// Path-prefix access needs textual response rewriting. Removing the
 			// browser's Accept-Encoding lets net/http transparently decompress the
 			// upstream body before ModifyResponse sees it.
-			if responsePrefix != "" {
+			if responsePrefix != "" || usesSessionSubdomain(r) {
 				request.Header.Del("Accept-Encoding")
 			}
 			request.URL.Scheme = upstreamScheme
@@ -336,9 +354,9 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, reques
 			// names reserved by the platform, so the trusted gateway marker must be
 			// appended afterwards instead of being mistaken for an injected device
 			// cookie and removed again.
-			rewriteCookies(response.Header, responsePrefix)
+			rewriteCookies(response.Header, responsePrefix, deviceCookiePrefix)
 			appendTrustedUpstreamSchemeCookie(response.Header, r, token, route.Protocol, upstreamScheme)
-			if err := rewriteTextResponse(response, responsePrefix); err != nil {
+			if err := rewriteTextResponse(response, responsePrefix, usesSessionSubdomain(r)); err != nil {
 				return err
 			}
 			response.Header.Set("Cache-Control", "no-store")
@@ -501,8 +519,9 @@ const maxRewrittenResponseBytes = 16 << 20
 // untouched those requests escape the access session and hit the control plane.
 // Production deployments should still prefer the configured wildcard access
 // domain, where each session owns an origin and no body rewriting is required.
-func rewriteTextResponse(response *http.Response, prefix string) error {
-	if prefix == "" || response.Body == nil || !isRewritableContentType(response.Header.Get("Content-Type")) {
+func rewriteTextResponse(response *http.Response, prefix string, discloseProxy ...bool) error {
+	addDisclosure := len(discloseProxy) > 0 && discloseProxy[0] && isHTMLContentType(response.Header.Get("Content-Type"))
+	if response.Body == nil || prefix == "" && !addDisclosure || !isRewritableContentType(response.Header.Get("Content-Type")) {
 		return nil
 	}
 	if encoding := strings.TrimSpace(response.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
@@ -517,13 +536,45 @@ func rewriteTextResponse(response *http.Response, prefix string) error {
 		return nil
 	}
 	_ = response.Body.Close()
-	rewritten := prefixRootURLs(body, prefix)
+	rewritten := body
+	if prefix != "" {
+		rewritten = prefixRootURLs(rewritten, prefix)
+	}
+	if addDisclosure {
+		rewritten = injectProxyDisclosure(rewritten)
+	}
 	response.Body = io.NopCloser(bytes.NewReader(rewritten))
 	response.ContentLength = int64(len(rewritten))
 	response.Header.Set("Content-Length", strconv.Itoa(len(rewritten)))
 	response.Header.Del("ETag")
 	response.Header.Del("Content-MD5")
 	return nil
+}
+
+func isHTMLContentType(contentType string) bool {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
+	return mediaType == "text/html" || mediaType == "application/xhtml+xml"
+}
+
+var proxyDisclosure = []byte(`<div data-i5cloud-proxy-notice="true" role="banner" style="position:sticky;top:0;z-index:2147483647;box-sizing:border-box;width:100%;padding:8px 12px;background:#073b4c;color:#fff;text-align:center;font:600 13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">I5CLOUD 远程管理平台代理 · 当前页面由目标内网设备提供 · 仅在确认设备身份后输入凭据</div>`)
+
+func injectProxyDisclosure(input []byte) []byte {
+	lower := bytes.ToLower(input)
+	if bytes.Contains(lower, []byte(`data-i5cloud-proxy-notice=`)) {
+		return input
+	}
+	bodyStart := bytes.Index(lower, []byte(`<body`))
+	insertAt := 0
+	if bodyStart >= 0 {
+		if bodyEnd := bytes.IndexByte(lower[bodyStart:], '>'); bodyEnd >= 0 {
+			insertAt = bodyStart + bodyEnd + 1
+		}
+	}
+	output := make([]byte, 0, len(input)+len(proxyDisclosure))
+	output = append(output, input[:insertAt]...)
+	output = append(output, proxyDisclosure...)
+	output = append(output, input[insertAt:]...)
+	return output
 }
 
 func isRewritableContentType(contentType string) bool {
@@ -574,13 +625,26 @@ func isURLPathStart(value byte) bool {
 // stripControlPlaneHeaders prevents platform credentials and caller-supplied
 // forwarding metadata from crossing the trust boundary into a customer device.
 // Device cookies issued by the proxied application are preserved.
-func stripControlPlaneHeaders(header http.Header) {
+func stripControlPlaneHeaders(header http.Header, cookiePrefixes ...string) {
+	cookiePrefix := ""
+	if len(cookiePrefixes) > 0 {
+		cookiePrefix = cookiePrefixes[0]
+	}
 	cookieRequest := &http.Request{Header: http.Header{"Cookie": append([]string(nil), header.Values("Cookie")...)}}
 	header.Del("Cookie")
 	deviceCookies := make([]string, 0)
 	for _, cookie := range cookieRequest.Cookies() {
 		if cookie.Name == "dmp_session" || cookie.Name == "dmp_csrf" || cookie.Name == upstreamSchemeCookie || cookie.Name == accessGrantCookie {
 			continue
+		}
+		if cookiePrefix != "" {
+			if !strings.HasPrefix(cookie.Name, cookiePrefix) {
+				continue
+			}
+			cookie.Name = strings.TrimPrefix(cookie.Name, cookiePrefix)
+			if cookie.Name == "" || cookie.Name == "dmp_session" || cookie.Name == "dmp_csrf" || cookie.Name == upstreamSchemeCookie || cookie.Name == accessGrantCookie {
+				continue
+			}
 		}
 		deviceCookies = append(deviceCookies, cookie.String())
 	}
@@ -696,7 +760,11 @@ func defaultURLPort(scheme, explicit string) int {
 	return 0
 }
 
-func rewriteCookies(header http.Header, prefix string) {
+func rewriteCookies(header http.Header, prefix string, cookiePrefixes ...string) {
+	cookiePrefix := ""
+	if len(cookiePrefixes) > 0 {
+		cookiePrefix = cookiePrefixes[0]
+	}
 	response := &http.Response{Header: header}
 	cookies := response.Cookies()
 	if len(cookies) == 0 {
@@ -707,6 +775,9 @@ func rewriteCookies(header http.Header, prefix string) {
 		if cookie.Name == "dmp_session" || cookie.Name == "dmp_csrf" || cookie.Name == upstreamSchemeCookie || cookie.Name == accessGrantCookie {
 			continue
 		}
+		if cookiePrefix != "" {
+			cookie.Name = cookiePrefix + cookie.Name
+		}
 		cookie.Domain = ""
 		if cookie.Path == "" || cookie.Path == "/" {
 			cookie.Path = prefix + "/"
@@ -715,6 +786,15 @@ func rewriteCookies(header http.Header, prefix string) {
 		}
 		header.Add("Set-Cookie", cookie.String())
 	}
+}
+
+func deviceCookieNamespace(session store.AccessSession) string {
+	userID := ""
+	if session.UserID != nil {
+		userID = *session.UserID
+	}
+	digest := sha256.Sum256([]byte("device-cookie-v1\x00" + userID + "\x00" + session.EndpointID))
+	return "dmpu_" + hex.EncodeToString(digest[:12]) + "_"
 }
 
 func directSourceIP(r *http.Request) string {

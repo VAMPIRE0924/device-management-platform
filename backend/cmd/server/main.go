@@ -282,6 +282,12 @@ func accessOnlyHandler(application http.Handler, accessDomain string) http.Handl
 }
 
 func validAccessHostLabel(label string) bool {
+	if strings.HasPrefix(label, "web-") && len(label) == len("web-00") {
+		slot, err := strconv.Atoi(strings.TrimPrefix(label, "web-"))
+		return err == nil && slot >= 1 && slot <= 32
+	}
+	// Keep accepting the previous labels for the duration of their normal
+	// access-session lifetime during a rolling deployment.
 	if !strings.HasPrefix(label, "device-") {
 		return false
 	}

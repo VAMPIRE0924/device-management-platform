@@ -110,7 +110,7 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	formResponse := httptest.NewRecorder()
 	mux.ServeHTTP(formResponse, WithSessionSubdomainAccess(formRequest))
 	formCookie := gatewayNamedCookie(formResponse.Result().Cookies(), accessGrantCookie)
-	if formResponse.Code != http.StatusSeeOther || formResponse.Header().Get("Location") != "/" {
+	if formResponse.Code != http.StatusOK || formResponse.Header().Get("Location") != "" || !strings.Contains(formResponse.Body.String(), "I5CLOUD 远程管理平台") || !strings.Contains(formResponse.Body.String(), `location.replace("/")`) {
 		t.Fatalf("form exchange = %d location=%q: %s", formResponse.Code, formResponse.Header().Get("Location"), formResponse.Body.String())
 	}
 	if formCookie == nil || formCookie.Path != "/" || formCookie.SameSite != http.SameSiteLaxMode {
@@ -126,6 +126,57 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	mux.ServeHTTP(foreignOriginResponse, foreignOriginRequest)
 	if foreignOriginResponse.Code != http.StatusForbidden {
 		t.Fatalf("foreign origin exchange status = %d", foreignOriginResponse.Code)
+	}
+}
+
+func TestPooledOriginDeviceCookiesAreNamespaced(t *testing.T) {
+	userA, userB := "user-a", "user-b"
+	namespaceA := deviceCookieNamespace(store.AccessSession{UserID: &userA, EndpointID: "endpoint-a"})
+	namespaceB := deviceCookieNamespace(store.AccessSession{UserID: &userB, EndpointID: "endpoint-b"})
+	if namespaceA == namespaceB {
+		t.Fatal("different access principals unexpectedly share a cookie namespace")
+	}
+
+	responseHeader := http.Header{}
+	responseHeader.Add("Set-Cookie", "device_session=value-a; Path=/; HttpOnly")
+	rewriteCookies(responseHeader, "", namespaceA)
+	rewritten := (&http.Response{Header: responseHeader}).Cookies()
+	if len(rewritten) != 1 || rewritten[0].Name != namespaceA+"device_session" || rewritten[0].Path != "/" {
+		t.Fatalf("namespaced response cookies = %#v", rewritten)
+	}
+
+	requestHeader := http.Header{}
+	requestHeader.Set("Cookie", namespaceA+"device_session=value-a; "+namespaceB+"device_session=value-b; unrelated=leak; dmp_session=platform")
+	stripControlPlaneHeaders(requestHeader, namespaceA)
+	if got := requestHeader.Get("Cookie"); got != "device_session=value-a" {
+		t.Fatalf("pooled origin leaked another namespace upstream: %q", got)
+	}
+}
+
+func TestHTMLGetsVisibleProxyDisclosure(t *testing.T) {
+	body := `<!doctype html><html><body><form><input name="username"><input type="password"></form></body></html>`
+	response := &http.Response{Header: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}, Body: io.NopCloser(strings.NewReader(body))}
+	if err := rewriteTextResponse(response, "", true); err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rewritten), `data-i5cloud-proxy-notice="true"`) || !strings.Contains(string(rewritten), "当前页面由目标内网设备提供") {
+		t.Fatalf("credential disclosure missing: %s", rewritten)
+	}
+	if response.ContentLength != int64(len(rewritten)) || response.Header.Get("Content-Length") != strconv.Itoa(len(rewritten)) {
+		t.Fatalf("rewritten content length = %d / %q", response.ContentLength, response.Header.Get("Content-Length"))
+	}
+
+	plainText := &http.Response{Header: http.Header{"Content-Type": []string{"text/plain"}}, Body: io.NopCloser(strings.NewReader("status"))}
+	if err := rewriteTextResponse(plainText, "", true); err != nil {
+		t.Fatal(err)
+	}
+	plainBody, _ := io.ReadAll(plainText.Body)
+	if strings.Contains(string(plainBody), "data-i5cloud-proxy-notice") {
+		t.Fatalf("non-HTML response was modified: %s", plainBody)
 	}
 }
 

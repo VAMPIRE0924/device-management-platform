@@ -689,21 +689,25 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 }
 
 func TestStableWebRouteIsScopedToUserAndEndpoint(t *testing.T) {
-	first, firstHash := stableWebRouteToken("user-one", "endpoint-one")
-	reopened, reopenedHash := stableWebRouteToken("user-one", "endpoint-one")
-	if first != reopened || firstHash != reopenedHash {
-		t.Fatal("the same user and endpoint must keep one stable Web route")
+	first := stableWebRouteTokens("user-one", "endpoint-one")
+	reopened := stableWebRouteTokens("user-one", "endpoint-one")
+	if len(first) != webRoutePoolSize || strings.Join(first, ",") != strings.Join(reopened, ",") {
+		t.Fatal("the same user and endpoint must keep one stable Web route preference")
 	}
-	otherUser, _ := stableWebRouteToken("user-two", "endpoint-one")
-	if otherUser == first {
-		t.Fatal("different users must not share a Web route origin")
+	seen := make(map[string]bool, len(first))
+	for _, token := range first {
+		if seen[token] || !validAccessRouteLabel(token) {
+			t.Fatalf("invalid or repeated route pool token: %q", token)
+		}
+		seen[token] = true
 	}
-	otherEndpoint, _ := stableWebRouteToken("user-one", "endpoint-two")
-	if otherEndpoint == first {
-		t.Fatal("different endpoints must not share a Web route origin")
+	otherUser := stableWebRouteTokens("user-two", "endpoint-one")
+	otherEndpoint := stableWebRouteTokens("user-one", "endpoint-two")
+	if strings.Join(otherUser, ",") == strings.Join(first, ",") || strings.Join(otherEndpoint, ",") == strings.Join(first, ",") {
+		t.Fatal("different principals should not use the same route preference order")
 	}
-	if !validAccessRouteLabel(first) {
-		t.Fatalf("stable Web route is not a valid access label: %q", first)
+	if validAccessRouteLabel("web-00") || validAccessRouteLabel("web-33") || validAccessRouteLabel("web-1") {
+		t.Fatal("out-of-pool labels were accepted")
 	}
 }
 
