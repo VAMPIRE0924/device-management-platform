@@ -1791,7 +1791,7 @@ export default function Home() {
               `扫描完成，发现 ${grouped.length} 台设备、${result.results.length} 个待确认服务`,
             );
           } else if (result.job.status === "failed")
-            setToast("扫描任务失败，请检查项目通道与扫描网段");
+            setToast("扫描任务失败，请检查项目 SOCKS隧道与扫描网段");
           return;
         }
         schedulePoll();
@@ -1854,7 +1854,7 @@ export default function Home() {
   const refreshMonitor = async () => {
     setMonitorLoading(true);
     try {
-      const snapshot = await api.monitorSnapshot();
+      const snapshot = await api.monitorSnapshot(true);
       setMonitorSnapshot(snapshot);
       setToast("运行快照已刷新");
     } catch (error) {
@@ -2372,7 +2372,7 @@ export default function Home() {
     { id: "overview" as View, label: "概览", icon: "⌂" },
     { id: "portal" as View, label: "访问门户", icon: "◫" },
     { id: "projects" as View, label: "客户项目", icon: "▦" },
-    { id: "socks" as View, label: "托管通道", icon: "═" },
+    { id: "socks" as View, label: "SOCKS隧道", icon: "═" },
     { id: "nodes" as View, label: "接入节点", icon: "◇" },
     { id: "accounts" as View, label: "用户与权限", icon: "♙" },
     { id: "policies" as View, label: "访问策略", icon: "▤" },
@@ -2593,9 +2593,9 @@ export default function Home() {
                   if (!node.id) return;
                   try {
                     const [health, tunnels, clients] = await Promise.all([
-                      api.nodeHealth(node.id),
-                      api.managedTunnels(node.id),
-                      api.nodeClients(node.id),
+                      api.nodeHealth(node.id, true),
+                      api.managedTunnels(node.id, true),
+                      api.nodeClients(node.id, true),
                     ]);
                     setNodeItems((items) =>
                       items.map((item) =>
@@ -2669,7 +2669,7 @@ export default function Home() {
                       )
                       .map(async (node) => ({
                         node,
-                        items: await api.managedTunnels(node.id),
+                        items: await api.managedTunnels(node.id, true),
                       })),
                   );
                   const nextStatus: Record<string, boolean> = {};
@@ -3297,7 +3297,7 @@ function Overview({
   const deviceRate = devices.length ? Math.round((online / devices.length) * 100) : 0;
   const capabilityItems = [
     { icon: "▦", title: "客户项目", value: projects.length, detail: `${onlineClients} 个 Client 在线`, action: "管理项目", view: "projects" as View },
-    { icon: "═", title: "托管通道", value: tunnels.length, detail: `${runningTunnels} 条正在运行`, action: "查看通道", view: "socks" as View },
+    { icon: "═", title: "SOCKS隧道", value: tunnels.length, detail: `${runningTunnels} 条正在运行`, action: "查看隧道", view: "socks" as View },
     { icon: "◇", title: "接入节点", value: nodes.length, detail: `${availableNodes} 个节点可用`, action: "管理节点", view: "nodes" as View },
     { icon: "◫", title: "远程入口", value: webServices + sshServices, detail: `${webServices} 个 Web · ${sshServices} 个 SSH`, action: "访问门户", view: "portal" as View },
   ];
@@ -3307,7 +3307,7 @@ function Overview({
         <div>
           <span className="eyebrow">I5CLOUD CONTROL CENTER</span>
           <h1>平台运行概览</h1>
-          <p>客户项目、接入节点、托管通道与远程访问的实时汇总</p>
+          <p>客户项目、接入节点、SOCKS隧道与远程访问的状态汇总</p>
         </div>
         <div className="overview-date">
           <i className="live-dot" />
@@ -3318,7 +3318,7 @@ function Overview({
       <div className="overview-metrics">
         <Metric label="客户项目" value={String(projects.length)} detail={`${onlineClients} 个 Client 在线`} tone="blue" />
         <Metric label="可用节点" value={`${availableNodes}/${nodes.length}`} detail="节点接口实时状态" tone="green" />
-        <Metric label="运行通道" value={`${runningTunnels}/${tunnels.length}`} detail="NPS SOCKS 实时状态" tone="violet" />
+        <Metric label="运行隧道" value={`${runningTunnels}/${tunnels.length}`} detail="NPS SOCKS 状态" tone="violet" />
         <Metric label="活动会话" value={String(sessions.length)} detail="Web 与 WebSSH 会话" tone="amber" />
       </div>
       <div className="overview-capability-grid">
@@ -3336,7 +3336,7 @@ function Overview({
           <div className="overview-status-list">
             <div><span>项目 Client</span><strong>{onlineClients} / {projects.length}</strong><Tag tone={onlineClients === projects.length && projects.length ? "green" : "amber"}>{onlineClients === projects.length && projects.length ? "全部在线" : "存在离线"}</Tag></div>
             <div><span>接入节点</span><strong>{availableNodes} / {nodes.length}</strong><Tag tone={availableNodes === nodes.length && nodes.length ? "green" : "amber"}>{availableNodes === nodes.length && nodes.length ? "全部可用" : "需要检查"}</Tag></div>
-            <div><span>托管 SOCKS</span><strong>{runningTunnels} / {tunnels.length}</strong><Tag tone={runningTunnels ? "green" : "gray"}>{runningTunnels ? "存在运行通道" : "全部关闭"}</Tag></div>
+            <div><span>SOCKS隧道</span><strong>{runningTunnels} / {tunnels.length}</strong><Tag tone={runningTunnels ? "green" : "gray"}>{runningTunnels ? "存在运行隧道" : "全部关闭"}</Tag></div>
             <div><span>远程访问会话</span><strong>{sessions.length}</strong><Tag tone={sessions.length ? "blue" : "gray"}>{sessions.length ? "正在访问" : "暂无会话"}</Tag></div>
           </div>
         </section>
@@ -3425,25 +3425,25 @@ function SocksView({
     const started = results.filter(
       (result) => result.status === "fulfilled",
     ).length;
-    onToast(`已启动 ${started} 个通道，${results.length - started} 个失败`);
+    onToast(`已启动 ${started} 个 SOCKS隧道，${results.length - started} 个失败`);
   };
   return (
     <>
       <div className="page-heading">
         <div>
           <div className="breadcrumb">网络服务</div>
-          <h1>托管通道</h1>
-          <p>展示并控制节点实际存在的全部 SOCKS 通道</p>
+          <h1>SOCKS隧道</h1>
+          <p>展示并控制节点实际存在的全部 SOCKS隧道</p>
         </div>
         <div className="heading-actions">
           <button
             className="btn secondary"
             onClick={() =>
               void onRefresh()
-                .then(() => onToast("已从节点刷新全部 SOCKS 通道和流量状态"))
+                .then(() => onToast("已从节点刷新全部 SOCKS隧道和流量状态"))
                 .catch((error) =>
                   onToast(
-                    error instanceof Error ? error.message : "通道状态刷新失败",
+                    error instanceof Error ? error.message : "SOCKS隧道状态刷新失败",
                   ),
                 )
             }
@@ -3455,37 +3455,37 @@ function SocksView({
             disabled={!rows.some((row) => !row.tunnel.running)}
             onClick={startAvailable}
           >
-            启动全部已关闭通道
+            启动全部已关闭隧道
           </button>
         </div>
       </div>
       <div className="socks-summary">
         <div>
-          <span>托管实例</span>
+          <span>隧道总数</span>
           <strong>{rows.length}</strong>
-          <small>节点实际返回的 SOCKS 通道</small>
+          <small>节点实际返回的 SOCKS隧道</small>
         </div>
         <div>
           <span>运行中</span>
           <strong className="teal-text">{runningCount}</strong>
-          <small>通道已由节点开启</small>
+          <small>隧道已由节点开启</small>
         </div>
         <div>
           <span>流量活跃</span>
           <strong className="teal-text">{activeCount}</strong>
-          <small>当前有 SOCKS 流量的通道</small>
+          <small>当前有 SOCKS 流量的隧道</small>
         </div>
         <div>
           <span>空闲倒计时</span>
           <strong>{countdownCount}</strong>
-          <small>等待 NPS 自动关闭的通道</small>
+          <small>等待 NPS 自动关闭的隧道</small>
         </div>
       </div>
       <div className="content-card">
         <div className="card-header search-card-header">
           <div>
-            <h2>节点 SOCKS 通道</h2>
-            <p>状态与活跃状态直接来自节点实时数据</p>
+            <h2>节点 SOCKS隧道</h2>
+            <p>状态与活跃情况来自最近一次节点同步</p>
           </div>
           <div className="management-tools">
             <div className="table-search">
@@ -3519,7 +3519,7 @@ function SocksView({
               <table className="socks-table">
                 <thead>
                   <tr>
-                    <th>通道</th>
+                    <th>隧道</th>
                     <th>节点 / Client</th>
                     <th>访问地址</th>
                     <th>项目绑定</th>
@@ -3543,14 +3543,14 @@ function SocksView({
                       void onToggle(row.tunnel, !isRunning)
                         .then(() =>
                           onToast(
-                            `${row.title}通道已${isRunning ? "停止" : "启动"}`,
+                            `${row.title} SOCKS隧道已${isRunning ? "停止" : "启动"}`,
                           ),
                         )
                         .catch((error) =>
                           onToast(
                             error instanceof Error
                               ? error.message
-                              : "通道操作失败",
+                              : "SOCKS隧道操作失败",
                           ),
                         );
                     return (
@@ -3675,11 +3675,11 @@ function SocksView({
           </>
         ) : (
           <EmptyState
-            title={rows.length ? "没有匹配的通道" : "节点未返回 SOCKS 通道"}
+            title={rows.length ? "没有匹配的隧道" : "节点未返回 SOCKS隧道"}
             detail={
               rows.length
                 ? "请调整搜索词或状态筛选条件"
-                : "请检查节点上是否已经创建 SOCKS 类型通道"
+                : "请检查节点上是否已经创建 SOCKS 类型隧道"
             }
             onClear={
               rows.length
@@ -4359,11 +4359,11 @@ function MonitorView({
         <div>
           <div className="breadcrumb">运行中心</div>
           <h1>系统监控</h1>
-          <p>平台、接入节点、托管通道与远程会话当前状态</p>
+          <p>平台、接入节点、SOCKS隧道与远程会话当前状态</p>
         </div>
         <div className="heading-actions">
           <Tag tone={snapshot ? "green" : "gray"}>
-            {loading ? "正在采集" : "实时快照"}
+            {loading ? "正在采集" : "状态快照"}
           </Tag>
           <button
             className="btn secondary"
@@ -4392,7 +4392,7 @@ function MonitorView({
           value={
             snapshot ? `${snapshot.nodeReachable}/${snapshot.nodeTotal}` : "—"
           }
-          detail="通过节点通道接口验证"
+          detail="通过节点 SOCKS隧道接口验证"
           tone="blue"
         />
         <Metric
@@ -4408,7 +4408,7 @@ function MonitorView({
               ? formatBytes(snapshot.inletFlow + snapshot.exportFlow)
               : "—"
           }
-          detail="节点托管通道累计计数"
+          detail="节点 SOCKS隧道累计计数"
           tone="amber"
         />
       </div>
@@ -4416,14 +4416,14 @@ function MonitorView({
         <div className="monitor-chart">
           <div className="monitor-head">
             <div>
-              <h2>远程访问实时指标</h2>
-              <p>来自节点托管通道计数器与平台数据库 · {collectedAt}</p>
+              <h2>远程访问状态指标</h2>
+              <p>来自节点 SOCKS隧道计数器与平台数据库 · {collectedAt}</p>
             </div>
           </div>
           {snapshot ? (
             <div className="monitor-current-grid">
               <div>
-                <span>托管通道</span>
+                <span>SOCKS隧道</span>
                 <strong>
                   {snapshot.tunnelRunning} / {snapshot.tunnelTotal}
                 </strong>
@@ -4456,7 +4456,7 @@ function MonitorView({
           <div className="monitor-head">
             <div>
               <h2>节点健康度</h2>
-              <p>每次刷新都实际读取节点托管通道接口</p>
+              <p>点击刷新时读取节点 SOCKS隧道接口</p>
             </div>
           </div>
           {nodeSnapshots.length ? (
@@ -4496,7 +4496,7 @@ function MonitorView({
                       <b>{node.reachable ? `${node.latencyMs} ms` : "—"}</b>
                     </span>
                     <span>
-                      通道{" "}
+                      隧道{" "}
                       <b>
                         {node.runningTunnels}/{node.tunnelCount}
                       </b>
@@ -4669,7 +4669,7 @@ function ProjectAccessSummary({
       <div className="project-access-head">
         <div>
           <h2>网络与访问</h2>
-          <p>关联 Client、托管通道和设备发现范围</p>
+          <p>关联 Client、SOCKS隧道和设备发现范围</p>
         </div>
         {canManage && (
           <div>
@@ -4692,8 +4692,8 @@ function ProjectAccessSummary({
         </div>
         <div className="access-fact access-channel">
           <span className="label-with-help">
-            托管 SOCKS{" "}
-            <HelpTip text="只供平台远程访问服务使用。普通用户和浏览器不会直接获得地址或认证信息；启停请在托管通道页面操作。" />
+            SOCKS隧道{" "}
+            <HelpTip text="只供平台远程访问服务使用。普通用户和浏览器不会直接获得地址或认证信息；启停请在 SOCKS隧道页面操作。" />
           </span>
           <div>
             <strong>Client ID {project.clientId}</strong>
@@ -5087,7 +5087,7 @@ function Workspace({
                     <th>
                       <span className="label-with-help">
                         状态{" "}
-                        <HelpTip text="手工添加的设备初始为待检测。点击该设备的检测服务后，平台只通过项目托管通道探测已经登记的端口。" />
+                        <HelpTip text="手工添加的设备初始为待检测。点击该设备的检测服务后，平台只通过项目 SOCKS隧道探测已经登记的端口。" />
                       </span>
                     </th>
                     <th>
@@ -5100,7 +5100,7 @@ function Workspace({
                     <th className="remote-actions-column">
                       <span className="label-with-help">
                         远程访问{" "}
-                        <HelpTip text="打开独立标签页，经平台远程访问服务和项目托管通道访问设备，不会新建 Web 端口转发。" />
+                        <HelpTip text="打开独立标签页，经平台远程访问服务和项目 SOCKS隧道访问设备，不会新建 Web 端口转发。" />
                       </span>
                     </th>
                     {canManage && (
@@ -5345,7 +5345,7 @@ function NodesView({
         <Metric
           label="活跃 SOCKS"
           value={String(activeTunnels)}
-          detail={`${nodes.reduce((total, node) => total + node.tunnels, 0)} 个托管通道`}
+          detail={`${nodes.reduce((total, node) => total + node.tunnels, 0)} 个 SOCKS隧道`}
           tone="violet"
         />
         <Metric
@@ -5392,7 +5392,7 @@ function NodesView({
                   <th>状态</th>
                   <th>项目</th>
                   <th>Client</th>
-                  <th>托管通道</th>
+                  <th>SOCKS隧道</th>
                   <th>API 延迟</th>
                   <th>端口池</th>
                   <th>操作</th>
@@ -8834,7 +8834,7 @@ function SocksDetailModal({
       <div className="form-modal">
         <div className="form-head">
           <div>
-            <h2>托管通道详情</h2>
+            <h2>SOCKS隧道详情</h2>
             <p>
               {title} · Client ID {tunnel.clientId}
             </p>
@@ -8863,7 +8863,7 @@ function SocksDetailModal({
                 ? `${nodeServiceHost(node)}:${tunnel.port}`
                 : "节点未返回端口"}
             </strong>
-            <small>端口由 NPS 实时通道详情返回</small>
+            <small>端口由 NPS SOCKS隧道详情返回</small>
           </div>
           <div>
             <span>关联 Client</span>
