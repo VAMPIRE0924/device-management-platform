@@ -40,18 +40,20 @@ Compose 不设置宿主机 `ports` 映射。容器默认监听 HTTP 80；在系�
 ## 镜像
 
 ```bash
+# 跟随最新正式版本
 docker pull vampirerune/device-management-platform:main
+
+# 固定部署当前正式版本
+docker pull vampirerune/device-management-platform:v1.0.11
 ```
 
 已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，仅在接受自动跟随最新正式版时使用 `main`。
 
-镜像渠道严格分离：
+镜像标签：
 
 - `v1.0.11`：当前正式版本；
-- `main`：始终与 `main` 分支的最新正式版本一致；
-- `dev`：仅用于 `dev` 分支测试，不得部署到生产环境。
-
-`dev` 每次推送都会自动构建只带固定 `dev` 标签的开发镜像，不生成正式版本号。日常开发和修复必须先进入 `dev`；完成验证、更新版本信息并合并到 `main` 后，GitHub Actions 自动创建 `vX.Y.Z` 标签与 GitHub Release，并发布同版本号及 `main` 镜像。
+- `main`：最新正式版本的滚动标签；
+- `dev`：开发测试镜像，不用于生产环境。
 
 ## 数据与安全
 
