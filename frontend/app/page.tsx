@@ -287,6 +287,26 @@ const formatObservedTime = (value: string) => {
     : parsed.toLocaleString("zh-CN", { hour12: false });
 };
 
+const useLocalClock = (enabled: boolean) => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
+  return now;
+};
+
+const localTunnelRemainingSeconds = (
+  tunnel: Pick<APIManagedTunnel, "countdown" | "remainingSeconds" | "autoCloseAt">,
+  now: number,
+) => {
+  if (!tunnel.countdown) return 0;
+  if (tunnel.autoCloseAt > 0)
+    return Math.max(0, Math.ceil(tunnel.autoCloseAt - now / 1000));
+  return Math.max(0, tunnel.remainingSeconds);
+};
+
 const ipv4ToNumber = (value: string) => {
   const parts = value.split(".");
   if (
@@ -1749,6 +1769,11 @@ export default function Home() {
   useEffect(() => {
     if (!scanActive || !scanJobId) return;
     let stopped = false;
+    let timer: number | undefined;
+    const schedulePoll = () => {
+      if (stopped || document.visibilityState !== "visible") return;
+      timer = window.setTimeout(() => void poll(), 5000);
+    };
     const poll = async () => {
       try {
         const result = await api.discoveryJob(scanJobId);
@@ -1767,7 +1792,9 @@ export default function Home() {
             );
           } else if (result.job.status === "failed")
             setToast("扫描任务失败，请检查项目通道与扫描网段");
+          return;
         }
+        schedulePoll();
       } catch (error) {
         if (!stopped) {
           setScanActive(false);
@@ -1775,11 +1802,17 @@ export default function Home() {
         }
       }
     };
+    const handleVisibilityChange = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+      if (document.visibilityState === "visible") void poll();
+    };
     void poll();
-    const timer = window.setInterval(() => void poll(), 1000);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [activeProject.code, scanActive, scanJobId]);
 
@@ -3345,13 +3378,9 @@ function SocksView({
   >("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
-  useEffect(() => {
-    const refresh = window.setInterval(
-      () => void onRefresh().catch(() => undefined),
-      10000,
-    );
-    return () => window.clearInterval(refresh);
-  }, [onRefresh]);
+  const localClock = useLocalClock(
+    tunnels.some((tunnel) => tunnel.countdown),
+  );
   const rows = tunnels.map((tunnel) => {
     const project = projects.find(
       (item) =>
@@ -3504,6 +3533,12 @@ function SocksView({
                   {pagedRows.map((row) => {
                     const isRunning = row.tunnel.running;
                     const isActive = row.tunnel.active;
+                    const remainingSeconds = localTunnelRemainingSeconds(
+                      row.tunnel,
+                      localClock,
+                    );
+                    const countdownExpired =
+                      row.tunnel.countdown && remainingSeconds === 0;
                     const toggleRunning = () =>
                       void onToggle(row.tunnel, !isRunning)
                         .then(() =>
@@ -3570,21 +3605,26 @@ function SocksView({
                           >
                             {isActive
                               ? "流量活跃"
+                              : countdownExpired
+                                ? "等待刷新确认"
                               : row.tunnel.countdown
                                 ? "空闲倒计时"
                                 : isRunning
                                   ? "等待流量"
                                   : "已停止"}
                           </Tag>
-                          {row.tunnel.countdown && (
+                          {row.tunnel.countdown && !countdownExpired && (
                             <>
                               <small>
-                                剩余 {formatDuration(row.tunnel.remainingSeconds)}
+                                剩余 {formatDuration(remainingSeconds)}
                               </small>
                               <small>
                                 预计关闭 {formatUnixTime(row.tunnel.autoCloseAt)}
                               </small>
                             </>
+                          )}
+                          {countdownExpired && (
+                            <small>本地倒计时已结束，请刷新确认节点状态</small>
                           )}
                           {isActive && row.tunnel.lastActiveAt > 0 && (
                             <small>
@@ -8773,6 +8813,7 @@ function SocksDetailModal({
   const tunnel = tunnels.find(
     (item) => `${item.nodeId}:${item.clientId}` === tunnelKey,
   );
+  const localClock = useLocalClock(Boolean(tunnel?.countdown));
   if (!tunnel) return null;
   const project = projects.find(
     (item) =>
@@ -8787,6 +8828,7 @@ function SocksDetailModal({
       : tunnel.running
         ? "等待流量"
         : "已停止";
+  const remainingSeconds = localTunnelRemainingSeconds(tunnel, localClock);
   return (
     <ModalFrame onClose={onClose}>
       <div className="form-modal">
@@ -8848,7 +8890,9 @@ function SocksDetailModal({
             <span>剩余时长</span>
             <strong>
               {tunnel.countdown
-                ? formatDuration(tunnel.remainingSeconds)
+                ? remainingSeconds > 0
+                  ? formatDuration(remainingSeconds)
+                  : "倒计时已结束，等待刷新确认"
                 : "未进入倒计时"}
             </strong>
             <small>
