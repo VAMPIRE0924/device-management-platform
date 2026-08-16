@@ -185,13 +185,11 @@ type CreateAccessSessionInput struct {
 	ProjectID     string
 	EndpointID    string
 	TokenHash     string
+	RouteLabel    string
 	GrantHash     string
 	Mode          string
 	SourceIP      string
 	ExpiresAt     time.Time
-	// RouteIdleCutoff lets a stable Web origin replace an inactive session and
-	// also provides safe recovery in the unlikely event of a label collision.
-	RouteIdleCutoff time.Time
 }
 
 type PortForward struct {

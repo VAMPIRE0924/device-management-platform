@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
@@ -33,7 +34,7 @@ func New(store storage, nodes nodeControl, interval, idleTTL time.Duration) *Man
 		interval = 30 * time.Second
 	}
 	if idleTTL <= 0 {
-		idleTTL = 15 * time.Minute
+		idleTTL = nodeadapter.ManagedSOCKSIdleTTL
 	}
 	return &Manager{store: store, nodes: nodes, interval: interval, idleTTL: idleTTL, now: time.Now}
 }

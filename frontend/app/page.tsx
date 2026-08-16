@@ -6017,7 +6017,7 @@ function SettingsView({
                     placeholder="admin.example.com"
                   />
                 </div>
-                <small>同一登录会话内，每个 Web 服务使用独立且稳定的子域名</small>
+                <small>每次创建 Web 访问会话时生成独立的 8 位随机域名前缀</small>
               </label>
               <label className="full">
                 反代端口

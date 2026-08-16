@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/VAMPIRE0924/device-management-platform/backend/internal/nodeadapter"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
@@ -76,7 +77,7 @@ type storedSSHCredential struct {
 }
 
 func NewSSHGateway(sessions sessionResolver, routes routeResolver, secrets SecretResolver, idleTTLs ...time.Duration) *SSHGateway {
-	idleTTL := 15 * time.Minute
+	idleTTL := nodeadapter.ManagedSOCKSIdleTTL
 	if len(idleTTLs) > 0 && idleTTLs[0] > 0 {
 		idleTTL = idleTTLs[0]
 	}

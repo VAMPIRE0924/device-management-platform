@@ -66,7 +66,7 @@ type WebGateway struct {
 }
 
 func NewWebGateway(sessions sessionResolver, routes routeResolver, idleTTLs ...time.Duration) *WebGateway {
-	idleTTL := 15 * time.Minute
+	idleTTL := nodeadapter.ManagedSOCKSIdleTTL
 	if len(idleTTLs) > 0 && idleTTLs[0] > 0 {
 		idleTTL = idleTTLs[0]
 	}
@@ -109,10 +109,7 @@ func (g *WebGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func validGatewayRouteToken(token string) bool {
-	if webroutelabel.IsAllowed(token) {
-		return true
-	}
-	return len(token) >= 32 && len(token) <= 128 && !strings.ContainsAny(token, "/\\ ")
+	return webroutelabel.IsCurrent(token)
 }
 
 const accessGrantCookie = "dmp_access_grant"
@@ -206,25 +203,16 @@ func serveGrantExchangeComplete(w http.ResponseWriter, destination string) {
 }
 
 func clearUpstreamSchemeCookies(w http.ResponseWriter, r *http.Request, cookiePath string) {
-	paths := []string{cookiePath}
-	// Older releases stored this marker at the origin root. Expire that legacy
-	// cookie as well so a newly opened HTTP endpoint cannot inherit an obsolete
-	// HTTPS upgrade from an earlier visit.
-	if cookiePath != "/" {
-		paths = append(paths, "/")
-	}
-	for _, path := range paths {
-		http.SetCookie(w, &http.Cookie{
-			Name:     upstreamSchemeCookie,
-			Value:    "",
-			Path:     path,
-			HttpOnly: true,
-			Secure:   accessRequestUsesHTTPS(r),
-			SameSite: http.SameSiteStrictMode,
-			MaxAge:   -1,
-			Expires:  time.Unix(1, 0),
-		})
-	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     upstreamSchemeCookie,
+		Value:    "",
+		Path:     cookiePath,
+		HttpOnly: true,
+		Secure:   accessRequestUsesHTTPS(r),
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0),
+	})
 }
 
 func serveGrantBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -311,10 +299,8 @@ func resolveAuthorizedAccess(w http.ResponseWriter, r *http.Request, sessions se
 
 func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, requestPath string, session store.AccessSession, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) {
 	basePrefix := "/access/web/" + token
-	deviceCookiePrefix := ""
 	if usesSessionSubdomain(r) {
 		basePrefix = ""
-		deviceCookiePrefix = deviceCookieNamespace(session)
 	}
 	stickyHTTPS := false
 	if cookie, err := r.Cookie(upstreamSchemeCookie); err == nil && cookie.Value == "https" {
@@ -327,12 +313,12 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, reques
 		upstreamHost = strings.TrimSpace(route.TLSServerName)
 	}
 	upstreamAuthority := net.JoinHostPort(upstreamHost, strconv.Itoa(upstreamPort))
-	transport := g.proxyTransport(token, route, socksRoute)
+	transport := g.proxyTransport(token, session.ID, route, socksRoute)
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
 			request := proxyRequest.Out
-			stripControlPlaneHeaders(request.Header, deviceCookiePrefix)
+			stripControlPlaneHeaders(request.Header)
 			// Path-prefix access needs textual response rewriting. Removing the
 			// browser's Accept-Encoding lets net/http transparently decompress the
 			// upstream body before ModifyResponse sees it.
@@ -354,7 +340,7 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, reques
 			// names reserved by the platform, so the trusted gateway marker must be
 			// appended afterwards instead of being mistaken for an injected device
 			// cookie and removed again.
-			rewriteCookies(response.Header, responsePrefix, deviceCookiePrefix)
+			rewriteCookies(response.Header, responsePrefix)
 			appendTrustedUpstreamSchemeCookie(response.Header, r, token, route.Protocol, upstreamScheme)
 			if err := rewriteTextResponse(response, responsePrefix, usesSessionSubdomain(r)); err != nil {
 				return err
@@ -391,6 +377,7 @@ func appendTrustedUpstreamSchemeCookie(header http.Header, r *http.Request, toke
 }
 
 type proxyTransportConfig struct {
+	sessionID  string
 	protocol   string
 	host       string
 	targetPort int
@@ -406,8 +393,9 @@ type proxyTransportEntry struct {
 	lastUsed  time.Time
 }
 
-func (g *WebGateway) proxyTransport(token string, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) *http.Transport {
+func (g *WebGateway) proxyTransport(token, sessionID string, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) *http.Transport {
 	config := proxyTransportConfig{
+		sessionID:  sessionID,
 		protocol:   route.Protocol,
 		host:       route.Host,
 		targetPort: route.TargetPort,
@@ -420,9 +408,8 @@ func (g *WebGateway) proxyTransport(token string, route store.EndpointRoute, soc
 	if endpointSlot == "" {
 		endpointSlot = route.Protocol + "://" + net.JoinHostPort(route.Host, strconv.Itoa(route.TargetPort))
 	}
-	// Keep upstream connection pools inside one browser access origin. Some
-	// legacy device UIs use connection-bound authentication, so sharing a TCP
-	// connection between two users would defeat cookie and hostname isolation.
+	// Keep upstream connection pools inside one random browser access origin so
+	// connection-bound device authentication cannot cross access sessions.
 	slot := token + "\x00" + endpointSlot
 	g.transportsMu.Lock()
 	defer g.transportsMu.Unlock()
@@ -439,19 +426,27 @@ func (g *WebGateway) proxyTransport(token string, route store.EndpointRoute, soc
 		return cached.transport
 	}
 	dialer := SOCKSDialer{ProxyAddress: socksRoute.Address, Username: socksRoute.Username, Password: socksRoute.Password, Timeout: g.timeout}
+	tracker := newWebSessionActivityTracker(g.sessions, sessionID, g.idleTTL)
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			connection, err := dialer.DialContext(ctx, network, address)
-			if err == nil || !errors.Is(err, errSOCKSProxyUnavailable) {
-				return connection, err
+			if err == nil {
+				return newWebActivityConn(connection, tracker), nil
 			}
-			// NPS persistently stops a managed SOCKS listener after 30 minutes
-			// without flow changes. A still-authorized platform session should
+			if !errors.Is(err, errSOCKSProxyUnavailable) {
+				return nil, err
+			}
+			// NPS stops a managed SOCKS listener after 30 minutes without traffic.
+			// A still-authorized platform session may be inside the cleanup race, so
 			// lazily resume that listener once, then retry the original dial.
 			if restartErr := g.restartManagedTunnel(ctx, route.NodeID, route.ClientID); restartErr != nil {
 				return nil, err
 			}
-			return dialer.DialContext(ctx, network, address)
+			connection, err = dialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			return newWebActivityConn(connection, tracker), nil
 		},
 		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          128,
@@ -473,6 +468,91 @@ func (g *WebGateway) proxyTransport(token string, route store.EndpointRoute, soc
 	}
 	g.transports[slot] = proxyTransportEntry{config: config, transport: transport, lastUsed: now}
 	return transport
+}
+
+const webActivityPersistInterval = 30 * time.Second
+
+type webSessionActivityTracker struct {
+	toucher         accessSessionToucher
+	sessionID       string
+	idleTTL         time.Duration
+	persistInterval time.Duration
+	mu              sync.Mutex
+	lastPersisted   time.Time
+}
+
+func newWebSessionActivityTracker(sessions sessionResolver, sessionID string, idleTTL time.Duration) *webSessionActivityTracker {
+	toucher, _ := sessions.(accessSessionToucher)
+	return &webSessionActivityTracker{toucher: toucher, sessionID: sessionID, idleTTL: idleTTL, persistInterval: webActivityPersistInterval}
+}
+
+func (t *webSessionActivityTracker) touch(now time.Time) error {
+	if t == nil || t.toucher == nil || t.sessionID == "" {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.lastPersisted.IsZero() && now.Sub(t.lastPersisted) < t.persistInterval {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := t.toucher.TouchAccessSession(ctx, t.sessionID, now, now.Add(-t.idleTTL)); err != nil {
+		return err
+	}
+	t.lastPersisted = now
+	return nil
+}
+
+type webActivityConn struct {
+	net.Conn
+	tracker *webSessionActivityTracker
+	idleTTL time.Duration
+}
+
+func newWebActivityConn(connection net.Conn, tracker *webSessionActivityTracker) net.Conn {
+	if connection == nil || tracker == nil {
+		return connection
+	}
+	tracked := &webActivityConn{Conn: connection, tracker: tracker, idleTTL: tracker.idleTTL}
+	tracked.refreshDeadline(time.Now())
+	return tracked
+}
+
+func (c *webActivityConn) Read(buffer []byte) (int, error) {
+	count, err := c.Conn.Read(buffer)
+	if count == 0 {
+		return count, err
+	}
+	now := time.Now().UTC()
+	if touchErr := c.tracker.touch(now); touchErr != nil {
+		_ = c.Conn.Close()
+		return 0, touchErr
+	}
+	c.refreshDeadline(now)
+	return count, err
+}
+
+func (c *webActivityConn) Write(buffer []byte) (int, error) {
+	if len(buffer) == 0 {
+		return c.Conn.Write(buffer)
+	}
+	now := time.Now().UTC()
+	if err := c.tracker.touch(now); err != nil {
+		_ = c.Conn.Close()
+		return 0, err
+	}
+	count, err := c.Conn.Write(buffer)
+	if count > 0 {
+		c.refreshDeadline(now)
+	}
+	return count, err
+}
+
+func (c *webActivityConn) refreshDeadline(now time.Time) {
+	if c.idleTTL > 0 {
+		_ = c.Conn.SetDeadline(now.Add(c.idleTTL))
+	}
 }
 
 func (g *WebGateway) restartManagedTunnel(ctx context.Context, nodeID string, clientID int) error {
@@ -625,26 +705,13 @@ func isURLPathStart(value byte) bool {
 // stripControlPlaneHeaders prevents platform credentials and caller-supplied
 // forwarding metadata from crossing the trust boundary into a customer device.
 // Device cookies issued by the proxied application are preserved.
-func stripControlPlaneHeaders(header http.Header, cookiePrefixes ...string) {
-	cookiePrefix := ""
-	if len(cookiePrefixes) > 0 {
-		cookiePrefix = cookiePrefixes[0]
-	}
+func stripControlPlaneHeaders(header http.Header) {
 	cookieRequest := &http.Request{Header: http.Header{"Cookie": append([]string(nil), header.Values("Cookie")...)}}
 	header.Del("Cookie")
 	deviceCookies := make([]string, 0)
 	for _, cookie := range cookieRequest.Cookies() {
 		if cookie.Name == "dmp_session" || cookie.Name == "dmp_csrf" || cookie.Name == upstreamSchemeCookie || cookie.Name == accessGrantCookie {
 			continue
-		}
-		if cookiePrefix != "" {
-			if !strings.HasPrefix(cookie.Name, cookiePrefix) {
-				continue
-			}
-			cookie.Name = strings.TrimPrefix(cookie.Name, cookiePrefix)
-			if cookie.Name == "" || cookie.Name == "dmp_session" || cookie.Name == "dmp_csrf" || cookie.Name == upstreamSchemeCookie || cookie.Name == accessGrantCookie {
-				continue
-			}
 		}
 		deviceCookies = append(deviceCookies, cookie.String())
 	}
@@ -760,11 +827,7 @@ func defaultURLPort(scheme, explicit string) int {
 	return 0
 }
 
-func rewriteCookies(header http.Header, prefix string, cookiePrefixes ...string) {
-	cookiePrefix := ""
-	if len(cookiePrefixes) > 0 {
-		cookiePrefix = cookiePrefixes[0]
-	}
+func rewriteCookies(header http.Header, prefix string) {
 	response := &http.Response{Header: header}
 	cookies := response.Cookies()
 	if len(cookies) == 0 {
@@ -775,9 +838,6 @@ func rewriteCookies(header http.Header, prefix string, cookiePrefixes ...string)
 		if cookie.Name == "dmp_session" || cookie.Name == "dmp_csrf" || cookie.Name == upstreamSchemeCookie || cookie.Name == accessGrantCookie {
 			continue
 		}
-		if cookiePrefix != "" {
-			cookie.Name = cookiePrefix + cookie.Name
-		}
 		cookie.Domain = ""
 		if cookie.Path == "" || cookie.Path == "/" {
 			cookie.Path = prefix + "/"
@@ -786,15 +846,6 @@ func rewriteCookies(header http.Header, prefix string, cookiePrefixes ...string)
 		}
 		header.Add("Set-Cookie", cookie.String())
 	}
-}
-
-func deviceCookieNamespace(session store.AccessSession) string {
-	userID := ""
-	if session.UserID != nil {
-		userID = *session.UserID
-	}
-	digest := sha256.Sum256([]byte("device-cookie-v1\x00" + userID + "\x00" + session.EndpointID))
-	return "dmpu_" + hex.EncodeToString(digest[:12]) + "_"
 }
 
 func directSourceIP(r *http.Request) string {

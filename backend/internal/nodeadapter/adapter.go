@@ -20,6 +20,11 @@ import (
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/store"
 )
 
+// ManagedSOCKSIdleTTL is the inactivity limit enforced by the managed NPS
+// SOCKS implementation. Platform Web and SSH access sessions must never remain
+// active beyond this limit without real proxied traffic.
+const ManagedSOCKSIdleTTL = 30 * time.Minute
+
 var ErrDuplicateVerifyKey = errors.New("client verify key already exists")
 
 type nodeSource interface {

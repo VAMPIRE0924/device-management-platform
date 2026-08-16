@@ -76,7 +76,7 @@ test("keeps node configuration minimal and Client management add-only", async ()
 
 test("shows all node tunnels with independent state and activity", async () => {
   const page = await readFile(pageURL, "utf8");
-  contains(page, ["节点实际返回的 SOCKS 通道", "未绑定", "运行中", "已关闭", "活跃中", "非活跃", "域名前缀", "session.domainPrefix", 'className="socks-table"', "api.setManagedTunnel", "markProjectTunnelOpen(project)"]);
+  contains(page, ["节点实际返回的 SOCKS 通道", "未绑定", "运行中", "已关闭", "活跃中", "非活跃", "域名前缀", "session.domainPrefix", "每次创建 Web 访问会话时生成独立的 8 位随机域名前缀", 'className="socks-table"', "api.setManagedTunnel", "markProjectTunnelOpen(project)"]);
   assert.doesNotMatch(page, /<th>会话<\/th>|session\.id\.slice\(0, 8\)<\/code>/);
   assert.doesNotMatch(page, /inactiveCountdown|非活跃倒计时|activityClock|空闲倒计时|className="socks-card"/);
 });

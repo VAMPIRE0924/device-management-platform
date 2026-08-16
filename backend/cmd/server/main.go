@@ -131,8 +131,9 @@ func run() error {
 
 	nodes := nodeadapter.New(db, nodeCredentialVault)
 	discoveryManager := discovery.NewManager(db, nodes)
-	sshGateway := access.NewSSHGateway(db, nodes, nodeCredentialVault, cfg.AuthSessionIdleTTL)
-	lifecycleManager := lifecycle.New(db, nodes, 30*time.Second, cfg.AuthSessionIdleTTL)
+	accessIdleTTL := min(cfg.AuthSessionIdleTTL, nodeadapter.ManagedSOCKSIdleTTL)
+	sshGateway := access.NewSSHGateway(db, nodes, nodeCredentialVault, accessIdleTTL)
+	lifecycleManager := lifecycle.New(db, nodes, 30*time.Second, accessIdleTTL)
 	restartRequested := make(chan struct{}, 1)
 	handler := api.New(api.Dependencies{
 		Store:              db,
@@ -284,7 +285,7 @@ func accessOnlyHandler(application http.Handler, accessDomain string) http.Handl
 }
 
 func validAccessHostLabel(label string) bool {
-	return webroutelabel.IsAllowed(label)
+	return webroutelabel.IsCurrent(label)
 }
 
 func loadTLSCertificates(cfg config.Config) ([]tls.Certificate, error) {

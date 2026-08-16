@@ -1,6 +1,6 @@
 package store
 
-const schemaVersion = 24
+const schemaVersion = 25
 
 var migrations = []string{`
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -336,4 +336,9 @@ UPDATE access_sessions
 SET last_seen_at = COALESCE(grant_exchanged_at, started_at)
 WHERE last_seen_at = '';
 CREATE INDEX idx_access_sessions_activity ON access_sessions(status,last_seen_at,expires_at);
+`, `
+ALTER TABLE access_sessions ADD COLUMN route_label TEXT NOT NULL DEFAULT '';
+UPDATE access_sessions
+SET status = 'revoked', ended_at = COALESCE(ended_at, datetime('now'))
+WHERE mode = 'web' AND route_label = '' AND status = 'active';
 `}

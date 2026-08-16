@@ -307,7 +307,7 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("POST /api/v1/discovery-jobs/{jobID}/cancel", s.requireAuth(http.HandlerFunc(s.cancelDiscoveryJob)))
 	mux.Handle("POST /api/v1/discovery-jobs/{jobID}/import", s.requireAuth(http.HandlerFunc(s.importDiscoveryDevice)))
 	if s.nodes != nil {
-		mux.Handle("/access/web/{token}/{path...}", access.NewWebGateway(s.store, s.nodes, s.authSessionIdleTTL))
+		mux.Handle("/access/web/{token}/{path...}", access.NewWebGateway(s.store, s.nodes, s.accessSessionIdleTTL()))
 	}
 	if s.sshGateway != nil {
 		mux.Handle("GET /access/ssh/{token}", s.sshGateway)
@@ -679,7 +679,7 @@ func (s *server) monitorSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取监控项目失败", nil)
 		return
 	}
-	sessions, err := s.store.ListActiveAccessSessions(ctx, time.Now().UTC().Add(-s.authSessionIdleTTL))
+	sessions, err := s.store.ListActiveAccessSessions(ctx, time.Now().UTC().Add(-s.accessSessionIdleTTL()))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取活动会话失败", nil)
 		return
@@ -1078,7 +1078,7 @@ func (s *server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "project_in_use", "项目仍有端口转发，请先在项目的端口转发页删除并释放节点端口", nil)
 		return
 	}
-	sessions, err := s.store.ListActiveAccessSessions(r.Context(), time.Now().UTC().Add(-s.authSessionIdleTTL))
+	sessions, err := s.store.ListActiveAccessSessions(r.Context(), time.Now().UTC().Add(-s.accessSessionIdleTTL()))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "无法检查项目活动访问会话", nil)
 		return
@@ -1516,16 +1516,22 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 	userID := current.UserID
 	var token, tokenHash string
 	var session store.AccessSession
-	createInput := store.CreateAccessSessionInput{UserID: &userID, AuthSessionID: current.AuthSessionID, ProjectID: route.ProjectID, EndpointID: route.EndpointID, GrantHash: grantHash, Mode: input.Mode, SourceIP: requestSourceIP(r), ExpiresAt: expiresAt, RouteIdleCutoff: time.Now().UTC().Add(-s.authSessionIdleTTL)}
+	createInput := store.CreateAccessSessionInput{UserID: &userID, AuthSessionID: current.AuthSessionID, ProjectID: route.ProjectID, EndpointID: route.EndpointID, GrantHash: grantHash, Mode: input.Mode, SourceIP: requestSourceIP(r), ExpiresAt: expiresAt}
 	if input.Mode == "web" {
-		// Each user/endpoint pair receives its own long-lived opaque origin. It is
-		// stable across reopen operations, but unlike the former shared slot pool it
-		// has no global concurrency ceiling. The label remains routing information
-		// only: the one-time grant, source binding and live platform session are the
-		// authorization boundary.
-		for _, candidate := range webroutelabel.StableCandidates(current.UserID, route.EndpointID) {
-			token, tokenHash = candidate, accessTokenHash(candidate)
+		// Each Web access session receives an independent short random origin. This
+		// is not a bounded pool and the hostname remains routing information only:
+		// the one-time grant, source binding and live platform session are the
+		// authorization boundary. A few retries handle the practically impossible
+		// case where a random label collides with a live route.
+		for candidate := 0; candidate < webroutelabel.CollisionCandidateCount; candidate++ {
+			token, err = webroutelabel.New()
+			if err != nil {
+				writeError(w, r, http.StatusInternalServerError, "web_route_generation_failed", "无法生成 Web 访问入口", nil)
+				return createdAccessSession{}, false
+			}
+			tokenHash = accessTokenHash(token)
 			createInput.TokenHash = tokenHash
+			createInput.RouteLabel = token
 			session, err = s.store.CreateAccessSession(r.Context(), createInput, auditFromRequest(r, "access_session.create", "access_session"))
 			if !errors.Is(err, store.ErrInUse) {
 				break
@@ -1568,9 +1574,8 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 		launchURL += "?grant=" + url.QueryEscape(grant)
 	} else {
 		// The fragment never leaves the browser in the HTTP request, access log or
-		// Referer header. A dedicated authorization path always processes a newly
-		// issued grant, even when this stable route already has an older access
-		// cookie from a previous launch.
+		// Referer header. A dedicated authorization path processes the one-time
+		// grant before this random origin can proxy any device response.
 		launchURL = strings.TrimSuffix(launchURL, "/") + "/.dmp/authorize#grant=" + grant
 	}
 	return createdAccessSession{Session: session, LaunchURL: launchURL, WebBaseURL: webBaseURL, Grant: grant, DeviceName: route.DeviceName, EndpointName: route.EndpointName}, true
@@ -1636,7 +1641,7 @@ func webAccessLaunchURL(r *http.Request, scheme, accessDomain, mode, token strin
 }
 
 func (s *server) listAccessSessions(w http.ResponseWriter, r *http.Request) {
-	sessions, err := s.store.ListActiveAccessSessions(r.Context(), time.Now().UTC().Add(-s.authSessionIdleTTL))
+	sessions, err := s.store.ListActiveAccessSessions(r.Context(), time.Now().UTC().Add(-s.accessSessionIdleTTL()))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取活动访问会话失败", nil)
 		return
@@ -1648,15 +1653,17 @@ func (s *server) listAccessSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func accessSessionDomainPrefix(session store.AccessSession) string {
-	if session.Mode != "web" || session.UserID == nil || session.TokenHash == "" {
+	if session.Mode != "web" || session.TokenHash == "" {
 		return ""
 	}
-	for _, candidate := range webroutelabel.KnownCandidates(*session.UserID, session.EndpointID) {
-		if subtle.ConstantTimeCompare([]byte(accessTokenHash(candidate)), []byte(session.TokenHash)) == 1 {
-			return candidate
-		}
+	if label := strings.TrimSpace(session.DomainPrefix); webroutelabel.IsCurrent(label) && subtle.ConstantTimeCompare([]byte(accessTokenHash(label)), []byte(session.TokenHash)) == 1 {
+		return label
 	}
 	return ""
+}
+
+func (s *server) accessSessionIdleTTL() time.Duration {
+	return min(s.authSessionIdleTTL, nodeadapter.ManagedSOCKSIdleTTL)
 }
 
 func (s *server) revokeAccessSession(w http.ResponseWriter, r *http.Request) {
@@ -3362,7 +3369,7 @@ func isLoopbackHealthRequest(r *http.Request, host string) bool {
 }
 
 func validAccessRouteLabel(token string) bool {
-	return webroutelabel.IsAllowed(token)
+	return webroutelabel.IsCurrent(token)
 }
 
 func (s *server) securityHeaders(next http.Handler) http.Handler {

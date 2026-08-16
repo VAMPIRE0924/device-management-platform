@@ -44,7 +44,7 @@ curl -fsS "$acceptance_url/health/live" >/dev/null
 curl -fsS "$acceptance_url/health/ready" >/dev/null
 meta=$(curl -fsS -H "Authorization: Bearer $api_token" "$acceptance_url/api/v1/meta")
 printf '%s' "$meta" | grep -q '"mode":"pro"'
-printf '%s' "$meta" | grep -q '"schemaVersion":24'
+printf '%s' "$meta" | grep -q '"schemaVersion":25'
 
 unauthorized=$(curl -sS -o "$acceptance_dir/unauthorized.json" -w '%{http_code}' "$acceptance_url/api/v1/nodes")
 unknown=$(curl -sS -o "$acceptance_dir/unknown.json" -w '%{http_code}' -H "Authorization: Bearer $api_token" "$acceptance_url/api/v1/not-a-route")
@@ -53,7 +53,7 @@ test "$unknown" = "404"
 
 curl -fsS -H "Authorization: Bearer $api_token" "$acceptance_url/api/v1/data/backup" -o "$acceptance_dir/backup.db"
 test "$(sqlite3 "$acceptance_dir/backup.db" 'pragma integrity_check;')" = "ok"
-test "$(sqlite3 "$acceptance_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "24"
+test "$(sqlite3 "$acceptance_dir/backup.db" 'select version from schema_migrations order by version desc limit 1;')" = "25"
 
 stop_server
 server_pid=""

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestAccessSessionIdleExpiryAndRouteRotation(t *testing.T) {
+func TestAccessSessionIdleExpiryAndRandomRouteIsolation(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "access-sessions.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -40,34 +40,29 @@ func TestAccessSessionIdleExpiryAndRouteRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := CreateAccessSessionInput{UserID: &user.ID, AuthSessionID: authSession.ID, ProjectID: project.ID, EndpointID: device.Endpoints[0].ID, TokenHash: "stable-route-hash", GrantHash: "grant-one", Mode: "web", SourceIP: "127.0.0.1", ExpiresAt: now.Add(time.Hour)}
+	input := CreateAccessSessionInput{UserID: &user.ID, AuthSessionID: authSession.ID, ProjectID: project.ID, EndpointID: device.Endpoints[0].ID, TokenHash: "route-hash", RouteLabel: "web-01234567", GrantHash: "grant-one", Mode: "web", SourceIP: "127.0.0.1", ExpiresAt: now.Add(time.Hour)}
 	first, err := db.CreateAccessSession(ctx, input, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	input.GrantHash = "grant-two"
-	second, err := db.CreateAccessSession(ctx, input, audit)
+	secondInput := input
+	secondInput.TokenHash = "route-hash-two"
+	secondInput.RouteLabel = "web-76543210"
+	secondInput.GrantHash = "grant-two"
+	second, err := db.CreateAccessSession(ctx, secondInput, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.ID == second.ID {
-		t.Fatal("route rotation must replace the logical access session")
+		t.Fatal("independent random routes reused an access session")
 	}
-	otherUser, err := db.CreateUser(ctx, CreateUserInput{Username: "operator", DisplayName: "Operator", PasswordHash: "not-used", Role: "operator", Enabled: true, ProjectIDs: []string{project.ID}}, audit)
-	if err != nil {
+	collisionInput := input
+	collisionInput.GrantHash = "collision-grant"
+	if _, err := db.CreateAccessSession(ctx, collisionInput, audit); err != ErrInUse {
+		t.Fatalf("active route collision error = %v, want ErrInUse", err)
+	}
+	if err := db.RevokeAccessSession(ctx, first.ID, audit); err != nil {
 		t.Fatal(err)
-	}
-	otherAuth, err := db.CreateAuthSession(ctx, otherUser.ID, "other-auth-token-hash", "other-csrf-hash", now.Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	otherInput := input
-	otherInput.UserID = &otherUser.ID
-	otherInput.AuthSessionID = otherAuth.ID
-	otherInput.GrantHash = "other-grant"
-	otherInput.RouteIdleCutoff = now.Add(-15 * time.Minute)
-	if _, err := db.CreateAccessSession(ctx, otherInput, audit); err != ErrInUse {
-		t.Fatalf("active stable route collision error = %v, want ErrInUse", err)
 	}
 	touchAt := now.Add(10 * time.Minute)
 	if err := db.TouchAccessSession(ctx, second.ID, touchAt, now.Add(-time.Minute)); err != nil {
@@ -82,14 +77,20 @@ func TestAccessSessionIdleExpiryAndRouteRotation(t *testing.T) {
 	}
 	active, err := db.ListActiveAccessSessions(ctx, now.Add(-15*time.Minute))
 	if err != nil || len(active) != 1 || active[0].ID != second.ID {
-		t.Fatalf("active sessions after route rotation = %#v, err=%v", active, err)
+		t.Fatalf("active sessions after revocation = %#v, err=%v", active, err)
 	}
-	if active[0].TokenHash != input.TokenHash {
-		t.Fatalf("active session token hash = %q, want %q", active[0].TokenHash, input.TokenHash)
+	if active[0].TokenHash != secondInput.TokenHash {
+		t.Fatalf("active session token hash = %q, want %q", active[0].TokenHash, secondInput.TokenHash)
+	}
+	if active[0].DomainPrefix != secondInput.RouteLabel {
+		t.Fatalf("active session route label = %q, want %q", active[0].DomainPrefix, secondInput.RouteLabel)
 	}
 	idleAt := now.Add(-20 * time.Minute).Format(time.RFC3339Nano)
 	if _, err := db.db.ExecContext(ctx, `UPDATE access_sessions SET last_seen_at=? WHERE id=?`, idleAt, second.ID); err != nil {
 		t.Fatal(err)
+	}
+	if _, _, err := db.ExchangeAccessGrant(ctx, secondInput.TokenHash, secondInput.GrantHash, now.Add(-15*time.Minute)); err != ErrNotFound {
+		t.Fatalf("idle grant exchange error = %v, want ErrNotFound", err)
 	}
 	active, err = db.ListActiveAccessSessions(ctx, now.Add(-15*time.Minute))
 	if err != nil || len(active) != 0 {

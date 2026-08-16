@@ -633,17 +633,15 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reopenedURL.Hostname() != launchURL.Hostname() {
-		t.Fatalf("reopened access changed the stable routing host: first=%s reopened=%s", launchURL.Hostname(), reopenedURL.Hostname())
+	if reopenedURL.Hostname() == launchURL.Hostname() {
+		t.Fatalf("independent Web sessions reused a routing host: first=%s reopened=%s", launchURL.Hostname(), reopenedURL.Hostname())
 	}
 	if reopenedURL.Fragment == launchURL.Fragment {
 		t.Fatal("reopened access reused the one-time grant")
 	}
-	// A stable Web hostname retains the previous host-scoped cookie. Opening a
-	// new launch URL must reach the authorization page before that stale cookie
-	// is resolved, then replace it through the one-time grant exchange.
+	// Every random Web hostname must bootstrap its own host-scoped grant before
+	// proxying device content.
 	reopenBootstrapRequest := httptest.NewRequest(http.MethodGet, reopenedURL.Scheme+"://"+reopenedURL.Host+reopenedURL.EscapedPath(), nil)
-	reopenBootstrapRequest.AddCookie(accessCookie)
 	reopenBootstrapResponse := httptest.NewRecorder()
 	handler.ServeHTTP(reopenBootstrapResponse, reopenBootstrapRequest)
 	if reopenBootstrapResponse.Code != http.StatusOK || !strings.Contains(reopenBootstrapResponse.Body.String(), ".dmp/session") {
@@ -653,21 +651,21 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	reopenExchangeRequest := httptest.NewRequest(http.MethodPost, "https://"+reopenedURL.Host+"/.dmp/session", strings.NewReader(`{"grant":"`+reopenedGrant+`"}`))
 	reopenExchangeRequest.Header.Set("Content-Type", "application/json")
 	reopenExchangeRequest.Header.Set("Origin", "https://"+reopenedURL.Host)
-	reopenExchangeRequest.AddCookie(accessCookie)
 	reopenExchangeResponse := httptest.NewRecorder()
 	handler.ServeHTTP(reopenExchangeResponse, reopenExchangeRequest)
 	reopenedAccessCookie := namedCookie(reopenExchangeResponse.Result().Cookies(), "dmp_access_grant")
 	if reopenExchangeResponse.Code != http.StatusNoContent || reopenedAccessCookie == nil {
 		t.Fatalf("reopen grant exchange = %d cookies=%d: %s", reopenExchangeResponse.Code, len(reopenExchangeResponse.Result().Cookies()), reopenExchangeResponse.Body.String())
 	}
-	rotatedRequest := httptest.NewRequest(http.MethodGet, "https://"+token+".remote.example.test/", nil)
-	rotatedRequest.AddCookie(accessCookie)
-	rotatedResponse := httptest.NewRecorder()
-	handler.ServeHTTP(rotatedResponse, rotatedRequest)
-	if rotatedResponse.Code != http.StatusGone {
-		t.Fatalf("previous grant remained usable after reopening: status=%d", rotatedResponse.Code)
+	previousRequest := httptest.NewRequest(http.MethodGet, "https://"+token+".remote.example.test/", nil)
+	previousRequest.AddCookie(accessCookie)
+	previousResponse := httptest.NewRecorder()
+	handler.ServeHTTP(previousResponse, previousRequest)
+	if previousResponse.Code == http.StatusUnauthorized || previousResponse.Code == http.StatusGone || previousResponse.Code == http.StatusForbidden {
+		t.Fatalf("independent previous Web session stopped working: status=%d", previousResponse.Code)
 	}
-	refreshedRequest := httptest.NewRequest(http.MethodGet, "https://"+token+".remote.example.test/", nil)
+	reopenedToken := strings.TrimSuffix(reopenedURL.Hostname(), ".remote.example.test")
+	refreshedRequest := httptest.NewRequest(http.MethodGet, "https://"+reopenedToken+".remote.example.test/", nil)
 	refreshedRequest.AddCookie(reopenedAccessCookie)
 	refreshedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(refreshedResponse, refreshedRequest)
@@ -684,46 +682,85 @@ func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	if err := json.Unmarshal(activeResponse.Body.Bytes(), &active); err != nil {
 		t.Fatal(err)
 	}
-	if len(active.Items) != 1 || active.Items[0].ID == "" {
-		t.Fatalf("reopening must rotate one logical session, got %#v", active.Items)
+	prefixes := make(map[string]struct{}, len(active.Items))
+	for _, item := range active.Items {
+		if item.ID == "" || !webroutelabel.IsCurrent(item.DomainPrefix) {
+			t.Fatalf("active Web session omitted its short random prefix: %#v", item)
+		}
+		prefixes[item.DomainPrefix] = struct{}{}
+	}
+	if len(active.Items) != 3 || len(prefixes) != len(active.Items) {
+		t.Fatalf("independent Web sessions were not listed with distinct random prefixes: %#v", active.Items)
 	}
 }
 
 func TestOpaqueWebRouteLabelsAreAcceptedWithoutOpeningArbitraryHosts(t *testing.T) {
-	label := webroutelabel.StableCandidates("user-one", "endpoint-one")[0]
+	label, err := webroutelabel.New()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !validAccessRouteLabel(label) {
 		t.Fatalf("generated opaque route label was rejected: %q", label)
 	}
-	if validAccessRouteLabel("web-00") || validAccessRouteLabel("web-33") || validAccessRouteLabel("web-deadbee") {
+	if validAccessRouteLabel("web-short") || validAccessRouteLabel("web-iiiiiiii") || validAccessRouteLabel("arbitrary") {
 		t.Fatal("invalid Web route labels were accepted")
 	}
 }
 
-func TestAccessSessionDomainPrefixMatchesCurrentAndMigrationRoutes(t *testing.T) {
-	userID := "user-one"
-	endpointID := "endpoint-one"
-	known := webroutelabel.KnownCandidates(userID, endpointID)
-	for _, label := range []string{known[0], known[webroutelabel.CollisionCandidateCount], known[webroutelabel.CollisionCandidateCount*2], known[len(known)-1]} {
-		session := store.AccessSession{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(label)}
-		if actual := accessSessionDomainPrefix(session); actual != label {
-			t.Fatalf("domain prefix = %q, want %q", actual, label)
+func TestAccessSessionIdleTTLNeverExceedsManagedSOCKSLimit(t *testing.T) {
+	for _, test := range []struct {
+		authIdle time.Duration
+		want     time.Duration
+	}{
+		{authIdle: 15 * time.Minute, want: 15 * time.Minute},
+		{authIdle: 30 * time.Minute, want: nodeadapter.ManagedSOCKSIdleTTL},
+		{authIdle: 2 * time.Hour, want: nodeadapter.ManagedSOCKSIdleTTL},
+	} {
+		server := &server{authSessionIdleTTL: test.authIdle}
+		if got := server.accessSessionIdleTTL(); got != test.want {
+			t.Fatalf("access idle TTL for auth %s = %s, want %s", test.authIdle, got, test.want)
 		}
 	}
-	if actual := accessSessionDomainPrefix(store.AccessSession{Mode: "ssh", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(known[0])}); actual != "" {
-		t.Fatalf("SSH session exposed a domain prefix: %q", actual)
-	}
-	encoded, err := json.Marshal(store.AccessSession{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: "sensitive-hash", DomainPrefix: known[0]})
+}
+
+func TestAccessSessionDomainPrefixAcceptsOnlyStoredCurrentRoute(t *testing.T) {
+	userID := "user-one"
+	endpointID := "endpoint-one"
+	randomLabel, err := webroutelabel.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "sensitive-hash") || !strings.Contains(string(encoded), `"domainPrefix":"`+known[0]+`"`) {
+	randomSession := store.AccessSession{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(randomLabel), DomainPrefix: randomLabel}
+	if actual := accessSessionDomainPrefix(randomSession); actual != randomLabel {
+		t.Fatalf("random domain prefix = %q, want %q", actual, randomLabel)
+	}
+	for _, session := range []store.AccessSession{
+		{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(randomLabel)},
+		{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(randomLabel), DomainPrefix: "fixed-slot"},
+		{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash("web-deadbeef"), DomainPrefix: randomLabel},
+	} {
+		if actual := accessSessionDomainPrefix(session); actual != "" {
+			t.Fatalf("obsolete, missing, or mismatched domain prefix was exposed: %q", actual)
+		}
+	}
+	if actual := accessSessionDomainPrefix(store.AccessSession{Mode: "ssh", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(randomLabel), DomainPrefix: randomLabel}); actual != "" {
+		t.Fatalf("SSH session exposed a domain prefix: %q", actual)
+	}
+	encoded, err := json.Marshal(store.AccessSession{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: "sensitive-hash", DomainPrefix: randomLabel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "sensitive-hash") || !strings.Contains(string(encoded), `"domainPrefix":"`+randomLabel+`"`) {
 		t.Fatalf("serialized access session leaked the token hash or omitted its domain prefix: %s", encoded)
 	}
 }
 
 func TestConfiguredPanelAndAccessDomainsAreStrictlySeparated(t *testing.T) {
 	server := &server{panelDomain: "dmp.example.test", accessDomain: "console.example.test"}
-	opaqueRoute := webroutelabel.StableCandidates("user", "endpoint")[0]
+	opaqueRoute, err := webroutelabel.New()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name       string
 		host       string
@@ -733,8 +770,8 @@ func TestConfiguredPanelAndAccessDomainsAreStrictlySeparated(t *testing.T) {
 	}{
 		{name: "panel", host: "dmp.example.test:4043", path: "/login", wantStatus: http.StatusNoContent, wantPath: "/login"},
 		{name: "opaque access route", host: opaqueRoute + ".console.example.test:4043", path: "/cgi-bin/luci/", wantStatus: http.StatusNoContent, wantPath: "/access/web/" + opaqueRoute + "/cgi-bin/luci/"},
-		{name: "legacy access slot", host: "web-01.console.example.test:4043", path: "/cgi-bin/luci/", wantStatus: http.StatusNoContent, wantPath: "/access/web/web-01/cgi-bin/luci/"},
-		{name: "invalid legacy slot", host: "web-99.console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
+		{name: "invalid short child", host: "web-short.console.example.test:4043", path: "/cgi-bin/luci/", wantStatus: http.StatusNotFound},
+		{name: "invalid long child", host: "invalid-route-label-that-is-too-long.console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
 		{name: "arbitrary access child", host: "anything.console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
 		{name: "bare access domain", host: "console.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
 		{name: "unknown panel host", host: "other.example.test:4043", path: "/login", wantStatus: http.StatusNotFound},
@@ -760,7 +797,7 @@ func TestConfiguredPanelAndAccessDomainsAreStrictlySeparated(t *testing.T) {
 func TestWebAccessLaunchPageSupportsSameOriginPathMode(t *testing.T) {
 	response := httptest.NewRecorder()
 	serveWebAccessLaunchPage(response, createdAccessSession{
-		WebBaseURL: "/access/web/device-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+		WebBaseURL: "/access/web/web-01234567/",
 		Grant:      strings.Repeat("b", 48),
 		DeviceName: "路径模式设备",
 	})
@@ -770,52 +807,52 @@ func TestWebAccessLaunchPageSupportsSameOriginPathMode(t *testing.T) {
 	if got := response.Header().Get("Content-Security-Policy"); !strings.Contains(got, "form-action 'self'") {
 		t.Fatalf("path-mode launch CSP = %q", got)
 	}
-	if !strings.Contains(response.Body.String(), `action="/access/web/device-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.dmp/session"`) {
+	if !strings.Contains(response.Body.String(), `action="/access/web/web-01234567/.dmp/session"`) {
 		t.Fatalf("path-mode launch action missing: %s", response.Body.String())
 	}
 }
 
 func TestDevelopmentAccessDomainLaunchPreservesLocalPort(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://localhost:3000/api/v1/access-sessions", nil)
-	launchURL := webAccessLaunchURL(request, "http", "localhost", "dev", strings.Repeat("a", 48), 3000, true)
-	want := "http://" + strings.Repeat("a", 48) + ".localhost:3000/"
+	launchURL := webAccessLaunchURL(request, "http", "localhost", "dev", "web-01234567", 3000, true)
+	want := "http://web-01234567.localhost:3000/"
 	if launchURL != want {
 		t.Fatalf("launch URL = %q, want %q", launchURL, want)
 	}
 
-	productionURL := webAccessLaunchURL(request, "https", "remote.example.test", "pro", strings.Repeat("b", 48), 443, true)
-	productionWant := "https://" + strings.Repeat("b", 48) + ".remote.example.test/"
+	productionURL := webAccessLaunchURL(request, "https", "remote.example.test", "pro", "web-12345678", 443, true)
+	productionWant := "https://web-12345678.remote.example.test/"
 	if productionURL != productionWant {
 		t.Fatalf("production launch URL = %q, want %q", productionURL, productionWant)
 	}
 
 	customHTTPSRequest := httptest.NewRequest(http.MethodPost, "https://console.example.test:4043/api/v1/access-sessions", nil)
-	customHTTPSURL := webAccessLaunchURL(customHTTPSRequest, "https", "console.example.test", "pro", strings.Repeat("e", 48), 4043, true)
-	customHTTPSWant := "https://" + strings.Repeat("e", 48) + ".console.example.test:4043/"
+	customHTTPSURL := webAccessLaunchURL(customHTTPSRequest, "https", "console.example.test", "pro", "web-23456789", 4043, true)
+	customHTTPSWant := "https://web-23456789.console.example.test:4043/"
 	if customHTTPSURL != customHTTPSWant {
 		t.Fatalf("custom HTTPS launch URL = %q, want %q", customHTTPSURL, customHTTPSWant)
 	}
 	proxiedHTTPSRequest := httptest.NewRequest(http.MethodPost, "https://console.example.test/api/v1/access-sessions", nil)
-	proxiedHTTPSURL := webAccessLaunchURL(proxiedHTTPSRequest, "https", "console.example.test", "pro", strings.Repeat("a", 48), 4043, true)
-	proxiedHTTPSWant := "https://" + strings.Repeat("a", 48) + ".console.example.test/"
+	proxiedHTTPSURL := webAccessLaunchURL(proxiedHTTPSRequest, "https", "console.example.test", "pro", "web-3456789a", 4043, true)
+	proxiedHTTPSWant := "https://web-3456789a.console.example.test/"
 	if proxiedHTTPSURL != proxiedHTTPSWant {
 		t.Fatalf("default external HTTPS launch URL = %q, want %q", proxiedHTTPSURL, proxiedHTTPSWant)
 	}
 
-	localProductionURL := webAccessLaunchURL(request, "http", "admin.platform.localhost", "pro", strings.Repeat("c", 48), 3000, true)
-	localProductionWant := "http://" + strings.Repeat("c", 48) + ".admin.platform.localhost:3000/"
+	localProductionURL := webAccessLaunchURL(request, "http", "admin.platform.localhost", "pro", "web-456789ab", 3000, true)
+	localProductionWant := "http://web-456789ab.admin.platform.localhost:3000/"
 	if localProductionURL != localProductionWant {
 		t.Fatalf("local production launch URL = %q, want %q", localProductionURL, localProductionWant)
 	}
 
-	localDNSURL := webAccessLaunchURL(request, "http", "admin.platform.127.0.0.1.nip.io", "pro", strings.Repeat("d", 48), 3000, true)
-	localDNSWant := "http://" + strings.Repeat("d", 48) + ".admin.platform.127.0.0.1.nip.io:3000/"
+	localDNSURL := webAccessLaunchURL(request, "http", "admin.platform.127.0.0.1.nip.io", "pro", "web-56789abc", 3000, true)
+	localDNSWant := "http://web-56789abc.admin.platform.127.0.0.1.nip.io:3000/"
 	if localDNSURL != localDNSWant {
 		t.Fatalf("local wildcard DNS launch URL = %q, want %q", localDNSURL, localDNSWant)
 	}
 
-	independentURL := webAccessLaunchURL(customHTTPSRequest, "https", "console.example.test", "pro", strings.Repeat("f", 48), 5443, false)
-	independentWant := "https://" + strings.Repeat("f", 48) + ".console.example.test:5443/"
+	independentURL := webAccessLaunchURL(customHTTPSRequest, "https", "console.example.test", "pro", "web-6789abcd", 5443, false)
+	independentWant := "https://web-6789abcd.console.example.test:5443/"
 	if independentURL != independentWant {
 		t.Fatalf("independent access port URL = %q, want %q", independentURL, independentWant)
 	}

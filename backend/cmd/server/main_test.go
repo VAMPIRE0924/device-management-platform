@@ -158,7 +158,10 @@ func TestTLSCertificatesSelectAccessCertificateBySNI(t *testing.T) {
 
 func TestIndependentAccessListenerRejectsControlPlaneHosts(t *testing.T) {
 	forwarded := 0
-	opaqueRoute := webroutelabel.StableCandidates("user", "endpoint")[0]
+	opaqueRoute, err := webroutelabel.New()
+	if err != nil {
+		t.Fatal(err)
+	}
 	handler := accessOnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		forwarded++
 		w.WriteHeader(http.StatusNoContent)
@@ -169,13 +172,13 @@ func TestIndependentAccessListenerRejectsControlPlaneHosts(t *testing.T) {
 		path       string
 		wantStatus int
 	}{
-		{"panel.example.test", "/access/web/device-0123456789abcdef0123456789abcdef/", http.StatusNotFound},
+		{"panel.example.test", "/access/web/web-01234567/", http.StatusNotFound},
 		{"remote.example.test", "/", http.StatusNotFound},
 		{"remote.example.test", "/api/v1/projects", http.StatusNotFound},
-		{"remote.example.test:28443", "/access/web/device-0123456789abcdef0123456789abcdef/", http.StatusNotFound},
+		{"remote.example.test:28443", "/access/web/web-01234567/", http.StatusNotFound},
 		{"invalid.remote.example.test:28443", "/", http.StatusNotFound},
 		{opaqueRoute + ".remote.example.test:28443", "/", http.StatusNoContent},
-		{"device-0123456789abcdef0123456789abcdef.remote.example.test:28443", "/", http.StatusNoContent},
+		{"invalid-route.remote.example.test:28443", "/", http.StatusNotFound},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "http://"+test.host+test.path, nil)
 		response := httptest.NewRecorder()
@@ -184,8 +187,8 @@ func TestIndependentAccessListenerRejectsControlPlaneHosts(t *testing.T) {
 			t.Fatalf("host %s path %s status = %d, want %d", test.host, test.path, response.Code, test.wantStatus)
 		}
 	}
-	if forwarded != 2 {
-		t.Fatalf("forwarded request count = %d, want 2", forwarded)
+	if forwarded != 1 {
+		t.Fatalf("forwarded request count = %d, want 1", forwarded)
 	}
 }
 
