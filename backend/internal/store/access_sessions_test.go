@@ -84,6 +84,9 @@ func TestAccessSessionIdleExpiryAndRouteRotation(t *testing.T) {
 	if err != nil || len(active) != 1 || active[0].ID != second.ID {
 		t.Fatalf("active sessions after route rotation = %#v, err=%v", active, err)
 	}
+	if active[0].TokenHash != input.TokenHash {
+		t.Fatalf("active session token hash = %q, want %q", active[0].TokenHash, input.TokenHash)
+	}
 	idleAt := now.Add(-20 * time.Minute).Format(time.RFC3339Nano)
 	if _, err := db.db.ExecContext(ctx, `UPDATE access_sessions SET last_seen_at=? WHERE id=?`, idleAt, second.ID); err != nil {
 		t.Fatal(err)

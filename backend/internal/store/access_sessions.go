@@ -99,7 +99,7 @@ WHERE access_sessions.user_id IS excluded.user_id AND access_sessions.endpoint_i
 	if err := tx.Commit(); err != nil {
 		return AccessSession{}, err
 	}
-	return AccessSession{ID: sessionID, UserID: input.UserID, AuthSessionID: input.AuthSessionID, ProjectID: input.ProjectID, EndpointID: input.EndpointID, Mode: input.Mode, SourceIP: input.SourceIP, Status: "active", ExpiresAt: input.ExpiresAt.UTC(), StartedAt: now, LastSeenAt: now}, nil
+	return AccessSession{ID: sessionID, TokenHash: input.TokenHash, UserID: input.UserID, AuthSessionID: input.AuthSessionID, ProjectID: input.ProjectID, EndpointID: input.EndpointID, Mode: input.Mode, SourceIP: input.SourceIP, Status: "active", ExpiresAt: input.ExpiresAt.UTC(), StartedAt: now, LastSeenAt: now}, nil
 }
 
 // ExchangeAccessGrant consumes the one-time browser grant before issuing the
@@ -255,7 +255,7 @@ WHERE id = (SELECT auth_session_id FROM access_sessions WHERE id = ?)
 func (s *Store) ListActiveAccessSessions(ctx context.Context, idleCutoff time.Time) ([]AccessSession, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	rows, err := s.db.QueryContext(ctx, `
-SELECT s.id,s.user_id,s.project_id,s.endpoint_id,e.name,d.name,s.mode,s.source_ip,s.status,s.expires_at,s.started_at,s.last_seen_at,s.ended_at
+SELECT s.id,s.token_hash,s.user_id,s.project_id,s.endpoint_id,e.name,d.name,s.mode,s.source_ip,s.status,s.expires_at,s.started_at,s.last_seen_at,s.ended_at
 FROM access_sessions s
 JOIN auth_sessions a ON a.id = s.auth_session_id AND a.user_id = s.user_id
 JOIN users u ON u.id = a.user_id AND u.enabled = 1
@@ -331,7 +331,7 @@ func scanAccessSession(scanner rowScanner) (AccessSession, error) {
 	var session AccessSession
 	var userID, endedAt sql.NullString
 	var expiresAt, startedAt, lastSeenAt string
-	if err := scanner.Scan(&session.ID, &userID, &session.ProjectID, &session.EndpointID, &session.EndpointName, &session.DeviceName, &session.Mode, &session.SourceIP, &session.Status, &expiresAt, &startedAt, &lastSeenAt, &endedAt); err != nil {
+	if err := scanner.Scan(&session.ID, &session.TokenHash, &userID, &session.ProjectID, &session.EndpointID, &session.EndpointName, &session.DeviceName, &session.Mode, &session.SourceIP, &session.Status, &expiresAt, &startedAt, &lastSeenAt, &endedAt); err != nil {
 		return AccessSession{}, err
 	}
 	var err error

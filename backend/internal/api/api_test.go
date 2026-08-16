@@ -699,6 +699,28 @@ func TestOpaqueWebRouteLabelsAreAcceptedWithoutOpeningArbitraryHosts(t *testing.
 	}
 }
 
+func TestAccessSessionDomainPrefixMatchesCurrentAndMigrationRoutes(t *testing.T) {
+	userID := "user-one"
+	endpointID := "endpoint-one"
+	known := webroutelabel.KnownCandidates(userID, endpointID)
+	for _, label := range []string{known[0], known[webroutelabel.CollisionCandidateCount], known[webroutelabel.CollisionCandidateCount*2], known[len(known)-1]} {
+		session := store.AccessSession{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(label)}
+		if actual := accessSessionDomainPrefix(session); actual != label {
+			t.Fatalf("domain prefix = %q, want %q", actual, label)
+		}
+	}
+	if actual := accessSessionDomainPrefix(store.AccessSession{Mode: "ssh", UserID: &userID, EndpointID: endpointID, TokenHash: accessTokenHash(known[0])}); actual != "" {
+		t.Fatalf("SSH session exposed a domain prefix: %q", actual)
+	}
+	encoded, err := json.Marshal(store.AccessSession{Mode: "web", UserID: &userID, EndpointID: endpointID, TokenHash: "sensitive-hash", DomainPrefix: known[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "sensitive-hash") || !strings.Contains(string(encoded), `"domainPrefix":"`+known[0]+`"`) {
+		t.Fatalf("serialized access session leaked the token hash or omitted its domain prefix: %s", encoded)
+	}
+}
+
 func TestConfiguredPanelAndAccessDomainsAreStrictlySeparated(t *testing.T) {
 	server := &server{panelDomain: "dmp.example.test", accessDomain: "console.example.test"}
 	opaqueRoute := webroutelabel.StableCandidates("user", "endpoint")[0]

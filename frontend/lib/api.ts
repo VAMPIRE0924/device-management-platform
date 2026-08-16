@@ -253,6 +253,7 @@ export type APISession = {
 
 export type APIAccessSession = {
   id: string;
+  domainPrefix?: string;
   userId: string | null;
   projectId: string;
   endpointId: string;

@@ -4430,7 +4430,7 @@ function MonitorView({
               <table className="device-table">
                 <thead>
                   <tr>
-                    <th>会话</th>
+                    <th>域名前缀</th>
                     <th>用户</th>
                     <th>项目</th>
                     <th>目标</th>
@@ -4444,7 +4444,7 @@ function MonitorView({
                   {pagedSessions.map((session) => (
                     <tr key={session.id}>
                       <td>
-                        <code>{session.id.slice(0, 8)}</code>
+                        <code>{session.domainPrefix || "—"}</code>
                       </td>
                       <td>
                         <strong>{userName(session.userId)}</strong>

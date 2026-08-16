@@ -54,3 +54,16 @@ func TestAllowedLabelsKeepOnlyExplicitMigrationFormats(t *testing.T) {
 		}
 	}
 }
+
+func TestKnownCandidatesIncludeCurrentAndRollingUpgradeFormats(t *testing.T) {
+	known := KnownCandidates("user", "endpoint")
+	if len(known) != CollisionCandidateCount*2+1+32 {
+		t.Fatalf("known candidate count = %d", len(known))
+	}
+	if !IsCurrent(known[0]) || len(known[CollisionCandidateCount]) <= len(known[0]) {
+		t.Fatalf("current and previous opaque labels were not ordered correctly: %#v", known[:CollisionCandidateCount+1])
+	}
+	if !strings.HasPrefix(known[CollisionCandidateCount*2], "device-") || known[len(known)-32] != "web-01" || known[len(known)-1] != "web-32" {
+		t.Fatalf("migration candidates are incomplete: first=%q last=%q", known[len(known)-32], known[len(known)-1])
+	}
+}

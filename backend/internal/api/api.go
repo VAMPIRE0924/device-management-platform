@@ -1641,7 +1641,22 @@ func (s *server) listAccessSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取活动访问会话失败", nil)
 		return
 	}
+	for index := range sessions {
+		sessions[index].DomainPrefix = accessSessionDomainPrefix(sessions[index])
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": sessions, "total": len(sessions)})
+}
+
+func accessSessionDomainPrefix(session store.AccessSession) string {
+	if session.Mode != "web" || session.UserID == nil || session.TokenHash == "" {
+		return ""
+	}
+	for _, candidate := range webroutelabel.KnownCandidates(*session.UserID, session.EndpointID) {
+		if subtle.ConstantTimeCompare([]byte(accessTokenHash(candidate)), []byte(session.TokenHash)) == 1 {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func (s *server) revokeAccessSession(w http.ResponseWriter, r *http.Request) {

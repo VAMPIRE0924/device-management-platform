@@ -162,6 +162,8 @@ type EndpointRoute struct {
 
 type AccessSession struct {
 	ID            string     `json:"id"`
+	TokenHash     string     `json:"-"`
+	DomainPrefix  string     `json:"domainPrefix,omitempty"`
 	UserID        *string    `json:"userId"`
 	AuthSessionID string     `json:"-"`
 	ProjectID     string     `json:"projectId"`
