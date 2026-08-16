@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/secrets"
@@ -28,7 +29,9 @@ func TestNodeCredentialVaultEncryptsPersistsAndRotates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reference, _, err := vault.Save(t.Context(), "node-1", "", secrets.NodeCredentialPatch{Type: "session", Username: "node-admin", Password: "first-password"})
+	const firstKey = "first-auth-key-0123456789-abcdef"
+	const replacementKey = "replacement-auth-key-0123456789-abcd"
+	reference, _, err := vault.Save(t.Context(), "node-1", "", secrets.NodeCredentialPatch{Type: "signed", AuthKey: firstKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +42,7 @@ func TestNodeCredentialVaultEncryptsPersistsAndRotates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nonce) == 0 || bytes.Contains(ciphertext, []byte("node-admin")) || bytes.Contains(ciphertext, []byte("first-password")) {
+	if len(nonce) == 0 || bytes.Contains(ciphertext, []byte(firstKey)) {
 		t.Fatalf("credential was not stored as opaque ciphertext: %q", ciphertext)
 	}
 
@@ -55,11 +58,11 @@ func TestNodeCredentialVaultEncryptsPersistsAndRotates(t *testing.T) {
 	if err := json.Unmarshal([]byte(resolved), &credential); err != nil {
 		t.Fatal(err)
 	}
-	if credential.Username != "node-admin" || credential.Password != "first-password" {
+	if credential.Type != "signed" || credential.AuthKey != firstKey {
 		t.Fatalf("resolved credential = %#v", credential)
 	}
 
-	if _, _, err := reopened.Save(t.Context(), "node-1", reference, secrets.NodeCredentialPatch{Type: "session", Password: "replacement-password"}); err != nil {
+	if _, _, err := reopened.Save(t.Context(), "node-1", reference, secrets.NodeCredentialPatch{AuthKey: replacementKey}); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err = reopened.Resolve(t.Context(), reference)
@@ -69,7 +72,7 @@ func TestNodeCredentialVaultEncryptsPersistsAndRotates(t *testing.T) {
 	if err := json.Unmarshal([]byte(resolved), &credential); err != nil {
 		t.Fatal(err)
 	}
-	if credential.Username != "node-admin" || credential.Password != "replacement-password" {
+	if credential.Type != "signed" || credential.AuthKey != replacementKey {
 		t.Fatalf("rotated credential = %#v", credential)
 	}
 
@@ -96,7 +99,7 @@ func TestNodeCredentialVaultRejectsWrongMasterKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reference, _, err := vault.Save(t.Context(), "node-2", "", secrets.NodeCredentialPatch{Type: "session", Username: "admin", Password: "secret"})
+	reference, _, err := vault.Save(t.Context(), "node-2", "", secrets.NodeCredentialPatch{Type: "signed", AuthKey: "wrong-master-key-test-0123456789"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,5 +113,27 @@ func TestNodeCredentialVaultRejectsWrongMasterKey(t *testing.T) {
 	}
 	if _, err := wrongVault.Resolve(t.Context(), reference); err == nil {
 		t.Fatal("credential decrypted with the wrong master key")
+	}
+}
+
+func TestNodeCredentialVaultRejectsLegacySessionAndShortHMACKeys(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "vault.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	vault, err := secrets.LoadOrCreateNodeCredentialVault(db, filepath.Join(dir, "credentials.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := vault.Save(t.Context(), "legacy", "", secrets.NodeCredentialPatch{Type: "session"}); err == nil || !strings.Contains(err.Error(), "旧会话认证已停用") {
+		t.Fatalf("legacy session credential error = %v", err)
+	}
+	if _, _, err := vault.Save(t.Context(), "short", "", secrets.NodeCredentialPatch{Type: "signed", AuthKey: "too-short"}); err == nil || !strings.Contains(err.Error(), "至少需要 32") {
+		t.Fatalf("short HMAC key error = %v", err)
 	}
 }

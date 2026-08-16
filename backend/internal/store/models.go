@@ -202,6 +202,7 @@ type PortForward struct {
 	ClientID     int        `json:"clientId"`
 	Target       string     `json:"target"`
 	ServerPort   int        `json:"serverPort"`
+	NodeTaskType string     `json:"nodeTaskType"`
 	NodeTaskID   *int       `json:"nodeTaskId"`
 	Status       string     `json:"status"`
 	ExpiresAt    *time.Time `json:"expiresAt"`

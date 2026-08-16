@@ -68,17 +68,18 @@ test("opens opaque Web and SSH sessions without exposing routes", async () => {
 
 test("keeps node configuration minimal and Client management add-only", async () => {
   const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
-  contains(page, ["API 地址", "TLS 校验主机名", "认证账号", "认证密码", "AES-GCM 加密后写入数据库", "现有 Client 只读", "Basic 认证用户名", "Basic 认证密码", "唯一验证密钥", "留空自动生成"]);
+  contains(page, ["API 地址", "TLS 校验主机名", "NPS API 密钥", "HMAC-SHA256", "AES-GCM 加密保存", "现有 Client 只读", "Basic 认证用户名", "Basic 认证密码", "唯一验证密钥", "留空自动生成"]);
   for (const removed of ["接入方式", "通道访问主机", "客户端接入主机", "客户端接入端口", "来源限制", "高级密钥引用", "删除 Client", "编辑 Client"]) assert.doesNotMatch(page, new RegExp(removed));
   contains(api, ["createNodeClient", "nodeClientCredentials"]);
   assert.doesNotMatch(api, /deleteNodeClient|updateNodeClient/);
 });
 
 test("shows all node tunnels with independent state and activity", async () => {
-  const page = await readFile(pageURL, "utf8");
-  contains(page, ["节点实际返回的 SOCKS 通道", "未绑定", "运行中", "已关闭", "活跃中", "非活跃", "域名前缀", "session.domainPrefix", "每次创建 Web 访问会话时生成独立的 8 位随机域名前缀", 'className="socks-table"', "api.setManagedTunnel", "markProjectTunnelOpen(project)"]);
+  const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
+  contains(page, ["节点实际返回的 SOCKS 通道", "未绑定", "运行中", "已关闭", "流量活跃", "空闲倒计时", "剩余时长", "自动关闭时间", "最近活动", "采样于", "formatDuration", "remainingSeconds", "autoCloseAt", "observedAt", "端口由 NPS 实时通道详情返回", "域名前缀", "session.domainPrefix", "每次创建 Web 访问会话时生成独立的 8 位随机域名前缀", 'className="socks-table"', "api.setManagedTunnel", "const status = await api.setManagedTunnel", "markProjectTunnelOpen(project)"]);
+  contains(api, ["return request<APIManagedTunnel>", "/managed-tunnels/"]);
   assert.doesNotMatch(page, /<th>会话<\/th>|session\.id\.slice\(0, 8\)<\/code>/);
-  assert.doesNotMatch(page, /inactiveCountdown|非活跃倒计时|activityClock|空闲倒计时|className="socks-card"/);
+  assert.doesNotMatch(page, /inactiveCountdown|非活跃倒计时|activityClock|className="socks-card"|按 Client ID 推算 SOCKS 端口/);
 });
 
 test("creates projects by binding an existing Client and scopes CIDRs to discovery", async () => {

@@ -46,6 +46,13 @@ func TestMigrateAndCreateControlPlaneObjects(t *testing.T) {
 	if legacyInsecureTLSColumns != 0 {
 		t.Fatalf("endpoints.allow_insecure_tls must be physically removed, found %d column", legacyInsecureTLSColumns)
 	}
+	var taskTypeColumns int
+	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('port_forwards') WHERE name='node_task_type'`).Scan(&taskTypeColumns); err != nil {
+		t.Fatal(err)
+	}
+	if taskTypeColumns != 1 {
+		t.Fatalf("port_forwards.node_task_type migration count = %d", taskTypeColumns)
+	}
 	for _, column := range []string{"gateway_mode", "gateway_name", "gateway_status", "runtime_type", "runtime_address"} {
 		var count int
 		if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name=?`, column).Scan(&count); err != nil {
@@ -136,6 +143,49 @@ func TestMigrateAndCreateControlPlaneObjects(t *testing.T) {
 	}
 	if len(discovered.Endpoints) != 3 || discovered.Endpoints[0].VerificationStatus != "verified" || discovered.Endpoints[2].VerificationStatus != "unverified" {
 		t.Fatalf("unexpected imported device: %#v", discovered)
+	}
+}
+
+func TestPortForwardPersistsCompoundNPSTaskReference(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "compound-task.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := t.Context()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	audit := AuditInput{Actor: "test", ResourceType: "test", Result: "success"}
+	node, err := db.CreateNode(ctx, CreateNodeInput{Name: "复合任务节点", APIURL: "https://node.test", CredentialRef: "db://node/test", PortStart: 22000, PortEnd: 22999}, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientID := 7
+	project, err := db.CreateProject(ctx, "COMPOUND-TASK", CreateProjectInput{Name: "复合任务项目", NodeID: node.ID, OwnerName: "test", ClientID: &clientID}, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := db.CreateDevice(ctx, project.ID, CreateDeviceInput{Host: "10.0.0.7", Name: "SSH", Source: "manual", Endpoints: []CreateEndpointInput{{Name: "SSH", Protocol: "ssh", TargetPort: 22}}}, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward, err := db.ReservePortForward(ctx, ReservePortForwardInput{ProjectID: project.ID, EndpointID: device.Endpoints[0].ID}, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ActivatePortForward(ctx, forward.ID, "portForward", 1); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.PortForwardByID(ctx, forward.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.NodeTaskType != "portForward" || stored.NodeTaskID == nil || *stored.NodeTaskID != 1 {
+		t.Fatalf("compound NPS task reference = %q:%v", stored.NodeTaskType, stored.NodeTaskID)
+	}
+	if err := db.ActivatePortForward(ctx, forward.ID, "udp", 2); err == nil {
+		t.Fatal("invalid standalone UDP task type was accepted")
 	}
 }
 
