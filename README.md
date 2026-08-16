@@ -40,7 +40,7 @@ Compose 不设置宿主机 `ports` 映射。容器默认监听 HTTP 80；在系�
 ## 镜像
 
 ```bash
-docker pull vampirerune/device-management-platform:v1.0.11
+docker pull vampirerune/device-management-platform:main
 ```
 
 已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，仅在接受自动跟随最新正式版时使用 `main`。
