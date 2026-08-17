@@ -1278,11 +1278,7 @@ main {
   color: #7c8b8f;
   font-size: 9px;
 }
-.table-footer div {
-  display: flex;
-  gap: 3px;
-}
-.table-footer button {
+.pagination-footer .pagination-buttons > button {
   width: 25px;
   height: 25px;
   background: white;
@@ -1291,7 +1287,7 @@ main {
   color: #6d7d81;
   font-size: 9px;
 }
-.table-footer button.current {
+.pagination-footer .pagination-buttons > button.current {
   color: white;
   background: var(--teal);
   border-color: var(--teal);
@@ -1323,7 +1319,7 @@ main {
   gap: 3px;
   margin-left: auto;
 }
-.pagination-footer button:disabled {
+.pagination-footer .pagination-buttons > button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
@@ -5105,10 +5101,6 @@ main {
   padding: 5px 8px;
   border-radius: 5px;
   color: #52666b;
-}
-.pagination-summary .unified-select-menu {
-  top: auto;
-  bottom: calc(100% + 5px);
 }
 .table-tools .unified-select,
 .management-tools .unified-select,
