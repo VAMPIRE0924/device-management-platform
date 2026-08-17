@@ -312,6 +312,15 @@ type AuthSession struct {
 	CSRFHash   string
 }
 
+type ChangePasswordInput struct {
+	UserID       string
+	PasswordHash string
+	TokenHash    string
+	CSRFHash     string
+	ExpiresAt    time.Time
+	Audit        AuditInput
+}
+
 type MFAChallenge struct {
 	ID                  string
 	User                User

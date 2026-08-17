@@ -86,6 +86,7 @@ type storage interface {
 	CreateAuthSession(context.Context, string, string, string, time.Time) (store.AuthSession, error)
 	ResolveAuthSession(context.Context, string) (store.AuthSession, error)
 	RevokeAuthSession(context.Context, string) error
+	ChangePassword(context.Context, store.ChangePasswordInput) (store.AuthSession, error)
 	CreateMFAChallenge(context.Context, string, string, string, string, string, time.Time) (store.MFAChallenge, error)
 	SetMFAChallengeMethod(context.Context, string, string, string, string, time.Time) error
 	SetOnboardingPassword(context.Context, string, string) error
@@ -189,6 +190,7 @@ type server struct {
 	trustedProxyCIDRs  []netip.Prefix
 	loginLimiter       *auth.LoginLimiter
 	loginIPLimiter     *auth.LoginLimiter
+	passwordLimiter    *auth.LoginLimiter
 	mfa                *auth.MFA
 	mfaEnabled         bool
 	mfaMethods         []string
@@ -224,7 +226,7 @@ type apiError struct {
 }
 
 func New(deps Dependencies) http.Handler {
-	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, panelDomain: normalizeConfiguredDomain(deps.PanelDomain), accessDomain: normalizeConfiguredDomain(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), loginIPLimiter: auth.NewLoginLimiter(30, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, authSessionTTL: deps.AuthSessionTTL, authSessionIdleTTL: deps.AuthSessionIdleTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials, restart: deps.Restart}
+	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, panelDomain: normalizeConfiguredDomain(deps.PanelDomain), accessDomain: normalizeConfiguredDomain(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), loginIPLimiter: auth.NewLoginLimiter(30, 10*time.Minute), passwordLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, authSessionTTL: deps.AuthSessionTTL, authSessionIdleTTL: deps.AuthSessionIdleTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials, restart: deps.Restart}
 	if s.emailCodeTTL == 0 {
 		s.emailCodeTTL = 10 * time.Minute
 	}
@@ -257,6 +259,7 @@ func New(deps Dependencies) http.Handler {
 	mux.HandleFunc("GET /api/v1/setup/status", s.setupStatus)
 	mux.HandleFunc("POST /api/v1/setup", s.setup)
 	mux.Handle("GET /api/v1/auth/me", s.requireAuth(http.HandlerFunc(s.me)))
+	mux.Handle("PUT /api/v1/auth/password", s.requireAuth(http.HandlerFunc(s.changePassword)))
 	mux.Handle("POST /api/v1/auth/logout", s.requireAuth(http.HandlerFunc(s.logout)))
 	mux.Handle("GET /api/v1/users", s.requireAuth(http.HandlerFunc(s.listUsers)))
 	mux.Handle("POST /api/v1/users", s.requireAuth(http.HandlerFunc(s.createUser)))
@@ -1133,6 +1136,39 @@ func (s *server) listDevices(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取项目设备失败", nil)
 		return
+	}
+	current := principalFromRequest(r)
+	if !current.Bootstrap && current.Role == "temporary" {
+		projectID := r.PathValue("projectID")
+		webAllowed, _ := s.store.HasPolicyCapability(r.Context(), current.UserID, projectID, "web", time.Now().UTC())
+		sshAllowed, _ := s.store.HasPolicyCapability(r.Context(), current.UserID, projectID, "webssh", time.Now().UTC())
+		filtered := make([]store.Device, 0, len(devices))
+		for _, device := range devices {
+			endpoints := make([]store.DeviceEndpoint, 0, len(device.Endpoints))
+			for _, endpoint := range device.Endpoints {
+				if endpoint.AccessType == "web_proxy" && !webAllowed || endpoint.AccessType == "web_ssh" && !sshAllowed {
+					continue
+				}
+				if endpoint.AccessType != "web_proxy" && endpoint.AccessType != "web_ssh" {
+					continue
+				}
+				endpoint.TargetPort = 0
+				endpoint.TLSServerName = ""
+				endpoint.CredentialConfigured = false
+				endpoint.SSHAuthMethod = ""
+				endpoint.SSHUsername = ""
+				endpoint.SSHKeyPath = ""
+				endpoint.SSHHostKeyFingerprint = ""
+				endpoints = append(endpoints, endpoint)
+			}
+			if len(endpoints) == 0 {
+				continue
+			}
+			device.Host = ""
+			device.Endpoints = endpoints
+			filtered = append(filtered, device)
+		}
+		devices = filtered
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": devices, "total": len(devices)})
 }
@@ -2837,6 +2873,80 @@ func (s *server) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": current.UserID, "username": current.Username, "displayName": current.DisplayName, "email": credential.Email, "role": current.Role, "projectIds": current.ProjectIDs, "bootstrap": current.Bootstrap, "mfaEnabled": current.Bootstrap || credential.MFAEnabled, "passwordChangeRequired": !current.Bootstrap && credential.PasswordChangeRequired})
 }
 
+type changePasswordRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewPassword     string `json:"newPassword"`
+}
+
+func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
+	current := principalFromRequest(r)
+	if current.Bootstrap || current.UserID == "" {
+		writeError(w, r, http.StatusForbidden, "bootstrap_password_unsupported", "平台访问令牌不能修改用户密码", nil)
+		return
+	}
+	var input changePasswordRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if len(input.CurrentPassword) > 4096 || len(input.NewPassword) > 4096 {
+		writeError(w, r, http.StatusBadRequest, "invalid_password_input", "密码参数无效", nil)
+		return
+	}
+	now := time.Now().UTC()
+	limiterKey := requestSourceIP(r) + "\x00password-change\x00" + current.UserID
+	if blocked, retry := s.passwordLimiter.Blocked(limiterKey, now); blocked {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Round(time.Second).Seconds())))
+		writeError(w, r, http.StatusTooManyRequests, "password_change_rate_limited", "当前密码验证失败次数过多，请稍后重试", nil)
+		return
+	}
+	credential, err := s.store.UserCredentialByUsername(r.Context(), current.Username)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "database_error", "无法读取当前用户凭据", nil)
+		return
+	}
+	if !auth.VerifyPassword(credential.PasswordHash, input.CurrentPassword) {
+		s.passwordLimiter.Failure(limiterKey, now)
+		_ = s.store.AppendAudit(r.Context(), store.AuditInput{Actor: current.Username, Action: "auth.password_change", ResourceType: "auth_session", ResourceID: current.UserID, Result: "failed", RequestID: requestID(r), SourceIP: requestSourceIP(r)})
+		writeError(w, r, http.StatusUnauthorized, "current_password_invalid", "当前密码不正确", map[string]string{"currentPassword": "当前密码不正确"})
+		return
+	}
+	passwordHash, err := auth.HashPassword(input.NewPassword)
+	if err != nil {
+		writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "新密码必须为 12-1024 个字符", map[string]string{"newPassword": "请输入至少 12 个字符"})
+		return
+	}
+	if auth.VerifyPassword(credential.PasswordHash, input.NewPassword) {
+		writeError(w, r, http.StatusUnprocessableEntity, "password_unchanged", "新密码不能与当前密码相同", map[string]string{"newPassword": "必须使用不同密码"})
+		return
+	}
+	token, err := newOpaqueSecret(32)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成密码修改", nil)
+		return
+	}
+	csrfToken, err := newOpaqueSecret(32)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成密码修改", nil)
+		return
+	}
+	expiresAt := now.Add(s.authSessionTTL)
+	sessionRecord, err := s.store.ChangePassword(r.Context(), store.ChangePasswordInput{
+		UserID:       current.UserID,
+		PasswordHash: passwordHash,
+		TokenHash:    digestString(token),
+		CSRFHash:     digestString(csrfToken),
+		ExpiresAt:    expiresAt,
+		Audit:        store.AuditInput{Actor: current.Username, Action: "auth.password_change", ResourceType: "auth_session", Result: "success", RequestID: requestID(r), SourceIP: requestSourceIP(r)},
+	})
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "password_change_failed", "无法完成密码修改", nil)
+		return
+	}
+	s.passwordLimiter.Success(limiterKey)
+	s.setAuthCookies(w, r, token, csrfToken, expiresAt)
+	writeJSON(w, http.StatusOK, map[string]any{"user": sessionRecord.User, "csrfToken": csrfToken, "expiresAt": expiresAt})
+}
+
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(authCookieName); err == nil {
 		_ = s.store.RevokeAuthSession(r.Context(), digestString(cookie.Value))
@@ -3363,7 +3473,7 @@ func (s *server) authorizeRequest(r *http.Request, current principal) bool {
 		job, err := s.store.DiscoveryJob(r.Context(), jobID)
 		return err == nil && current.Role == "project_admin" && canAccessProject(current, job.ProjectID)
 	}
-	if path == "/api/v1/access-sessions" && r.Method == http.MethodPost {
+	if (path == "/api/v1/access-sessions" || path == "/api/v1/access-sessions/launch") && r.Method == http.MethodPost {
 		return current.Role == "project_admin" || current.Role == "operator" || current.Role == "temporary"
 	}
 	return false

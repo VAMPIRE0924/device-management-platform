@@ -613,7 +613,7 @@ code {
   background: rgba(255, 255, 255, 0.045);
   border-radius: 10px;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 30px;
+  grid-template-columns: minmax(0, 1fr) 30px;
   align-items: center;
   gap: 9px;
 }
@@ -627,7 +627,27 @@ code {
   color: white;
   font-weight: 800;
 }
-.sidebar-account > div:nth-child(2) {
+.sidebar-account .account-avatar {
+  width: 34px;
+  height: 34px;
+  color: white;
+  font-size: 13px;
+}
+.account-profile {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.account-profile-copy {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -646,7 +666,7 @@ code {
   color: #86a5ab;
   font-size: 9px;
 }
-.sidebar-account button {
+.sidebar-account .account-logout {
   width: 30px;
   height: 30px;
   border: 0;
@@ -654,7 +674,8 @@ code {
   color: #b7cbcf;
   background: transparent;
 }
-.sidebar-account button:hover {
+.sidebar-account .account-logout:hover,
+.sidebar-account .account-profile:hover {
   color: white;
   background: rgba(255, 255, 255, 0.09);
 }
@@ -4937,6 +4958,10 @@ main {
   right: 0;
   max-height: 236px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   padding: 5px;
   border: 1px solid #d5dfe1;
   border-radius: 8px;
@@ -5041,6 +5066,10 @@ main {
   right: 0;
   max-height: 236px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   padding: 5px;
   border: 1px solid #d5dfe1;
   border-radius: 8px;
