@@ -3680,7 +3680,8 @@ function SocksView({
                     <th>访问地址</th>
                     <th>项目绑定</th>
                     <th>累计流量</th>
-                    <th>运行 / 活跃状态</th>
+                    <th>运行状态</th>
+                    <th>活跃状态</th>
                     <th className="socks-actions-heading">操作</th>
                   </tr>
                 </thead>
@@ -3744,34 +3745,40 @@ function SocksView({
                           <strong className="socks-flow">{row.flow}</strong>
                         </td>
                         <td>
+                          <div className={`socks-run-state ${isRunning ? "running" : "stopped"}`}>
+                            <i aria-hidden="true" />
+                            <strong>{isRunning ? "运行中" : "已关闭"}</strong>
+                          </div>
+                        </td>
+                        <td>
                           <div
-                            className={`socks-state-card ${!isRunning ? "stopped" : isActive ? "active" : countdownExpired ? "stale" : row.tunnel.countdown ? "countdown" : "waiting"}`}
+                            className={`socks-activity-state ${!isRunning ? "stopped" : isActive ? "active" : countdownExpired ? "stale" : row.tunnel.countdown ? "countdown" : "waiting"}`}
                           >
-                            <div className="socks-state-heading">
-                              <i aria-hidden="true" />
-                              <div>
-                                <strong>
-                                  {!isRunning ? "隧道已关闭" : isActive ? "运行中 · 流量活跃" : countdownExpired ? "倒计时结束 · 待确认" : row.tunnel.countdown ? "运行中 · 空闲倒计时" : "运行中 · 等待流量"}
-                                </strong>
-                                <span>
-                                  {isActive ? "节点检测到 SOCKS 流量" : !isRunning ? "可手动重新启动" : "状态来自最近一次节点同步"}
-                                </span>
-                              </div>
-                            </div>
+                            <strong>
+                              {!isRunning
+                                ? "未运行"
+                                : isActive
+                                  ? "流量活跃"
+                                  : countdownExpired
+                                    ? "待刷新确认"
+                                    : row.tunnel.countdown
+                                      ? "空闲倒计时"
+                                      : "等待流量"}
+                            </strong>
                             {row.tunnel.countdown && !countdownExpired && (
                               <div className="socks-countdown-detail">
                                 <div>
-                                  <span>剩余时长</span>
+                                  <span>剩余</span>
                                   <strong>{formatDuration(remainingSeconds)}</strong>
                                 </div>
                                 <div>
-                                  <span>预计关闭</span>
+                                  <span>关闭于</span>
                                   <strong>{formatUnixTime(row.tunnel.autoCloseAt)}</strong>
                                 </div>
                               </div>
                             )}
                             {countdownExpired && (
-                              <small>本地计时已归零，手动刷新后确认节点最终状态</small>
+                              <small>本地计时已归零，刷新后确认节点状态</small>
                             )}
                             {isActive && row.tunnel.lastActiveAt > 0 && (
                               <small>最近活动 {formatUnixTime(row.tunnel.lastActiveAt)}</small>
