@@ -1,17 +1,15 @@
 package nodeadapter
 
 import (
+	"bytes"
 	"context"
-	"crypto/md5"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"strconv"
 	"strings"
@@ -42,13 +40,13 @@ type Adapter struct {
 	timeout   time.Duration
 	stateWait time.Duration
 	newClient func(store.NodeConnection) (*http.Client, error)
+	now       func() time.Time
+	nonce     func() (string, error)
 }
 
 type Credential struct {
-	Type     string `json:"type"`
-	AuthKey  string `json:"authKey,omitempty"`
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
+	Type    string `json:"type"`
+	AuthKey string `json:"authKey,omitempty"`
 }
 
 type Client struct {
@@ -68,19 +66,47 @@ type ClientCredentials struct {
 	VerifyKey     string `json:"verifyKey"`
 }
 
+// ClientUpdate is a patch at the platform boundary. UpdateClient always reads
+// the current NPS Client first and sends a complete edit form, because the NPS
+// edit endpoint is replacement-based rather than PATCH-based.
+type ClientUpdate struct {
+	Remark          *string
+	VerifyKey       *string
+	BasicUsername   *string
+	BasicPassword   *string
+	Compress        *bool
+	Crypt           *bool
+	ConfigConnAllow *bool
+	RateLimit       *int
+	FlowLimit       *int64
+	MaxConn         *int
+	MaxTunnel       *int
+	WebUsername     *string
+	WebPassword     *string
+}
+
 type ManagedTunnel struct {
-	ID         int    `json:"id"`
-	ClientID   int    `json:"clientId"`
-	ClientName string `json:"clientName"`
-	Port       int    `json:"port"`
-	Configured bool   `json:"configured"`
-	Running    bool   `json:"running"`
-	InletFlow  int64  `json:"inletFlow"`
-	ExportFlow int64  `json:"exportFlow"`
+	ID                      int       `json:"id"`
+	ClientID                int       `json:"clientId"`
+	ClientName              string    `json:"clientName"`
+	Port                    int       `json:"port"`
+	Configured              bool      `json:"configured"`
+	Running                 bool      `json:"running"`
+	Active                  bool      `json:"active"`
+	Countdown               bool      `json:"countdown"`
+	LastActiveAt            int64     `json:"lastActiveAt"`
+	IdleSeconds             int64     `json:"idleSeconds"`
+	RemainingSeconds        int64     `json:"remainingSeconds"`
+	AutoCloseAt             int64     `json:"autoCloseAt"`
+	AutoCloseTimeoutSeconds int64     `json:"autoCloseTimeoutSeconds"`
+	InletFlow               int64     `json:"inletFlow"`
+	ExportFlow              int64     `json:"exportFlow"`
+	ObservedAt              time.Time `json:"observedAt"`
 }
 
 type PortForward struct {
 	ID         int    `json:"id"`
+	Type       string `json:"type"`
 	ClientID   int    `json:"clientId"`
 	ClientName string `json:"clientName"`
 	Port       int    `json:"port"`
@@ -115,6 +141,7 @@ type tableResponse[T any] struct {
 type rawFlow struct {
 	InletFlow  int64
 	ExportFlow int64
+	FlowLimit  int64
 }
 
 type rawClient struct {
@@ -127,11 +154,19 @@ type rawClient struct {
 	Flow      *rawFlow   `json:"Flow"`
 	Config    *rawConfig `json:"Cnf"`
 	VerifyKey string     `json:"VerifyKey"`
+	RateLimit int        `json:"RateLimit"`
+	MaxConn   int        `json:"MaxConn"`
+	MaxTunnel int        `json:"MaxTunnelNum"`
+	WebUser   string     `json:"WebUserName"`
+	WebPass   string     `json:"WebPassword"`
+	ConfigOK  bool       `json:"ConfigConnAllow"`
 }
 
 type rawConfig struct {
 	Username string `json:"U"`
 	Password string `json:"P"`
+	Compress bool   `json:"Compress"`
+	Crypt    bool   `json:"Crypt"`
 }
 
 type rawTunnel struct {
@@ -150,6 +185,22 @@ type rawTarget struct {
 	Target string `json:"TargetStr"`
 }
 
+type rawSocksStatus struct {
+	ID                      int   `json:"id"`
+	ClientID                int   `json:"client_id"`
+	Enabled                 bool  `json:"enabled"`
+	Running                 bool  `json:"running"`
+	Active                  bool  `json:"active"`
+	Countdown               bool  `json:"countdown"`
+	LastActiveAt            int64 `json:"last_active_at"`
+	IdleSeconds             int64 `json:"idle_seconds"`
+	RemainingSeconds        int64 `json:"remaining_seconds"`
+	AutoCloseAt             int64 `json:"auto_close_at"`
+	AutoCloseTimeoutSeconds int64 `json:"auto_close_timeout_seconds"`
+	InletFlow               int64 `json:"inlet_flow"`
+	ExportFlow              int64 `json:"export_flow"`
+}
+
 type actionResponse struct {
 	Status int    `json:"status"`
 	Msg    string `json:"msg"`
@@ -160,8 +211,21 @@ type clientResponse struct {
 	Data rawClient `json:"data"`
 }
 
+type tunnelResponse struct {
+	Code int       `json:"code"`
+	Data rawTunnel `json:"data"`
+}
+
+type socksStatusResponse struct {
+	Code int            `json:"code"`
+	Data rawSocksStatus `json:"data"`
+}
+
 func New(nodes nodeSource, secrets secretResolver) *Adapter {
-	a := &Adapter{nodes: nodes, secrets: secrets, timeout: 12 * time.Second, stateWait: 5 * time.Second}
+	a := &Adapter{
+		nodes: nodes, secrets: secrets, timeout: 12 * time.Second, stateWait: 5 * time.Second,
+		now: time.Now, nonce: newNonce,
+	}
 	a.newClient = a.defaultHTTPClient
 	return a
 }
@@ -182,7 +246,7 @@ func (a *Adapter) Health(ctx context.Context, nodeID string) Health {
 
 func (a *Adapter) ListClients(ctx context.Context, nodeID string) ([]Client, error) {
 	var response tableResponse[rawClient]
-	if err := a.call(ctx, nodeID, "/client/list", url.Values{"offset": {"0"}, "limit": {"10000"}}, &response); err != nil {
+	if err := a.call(ctx, nodeID, "/client/list/", url.Values{"offset": {"0"}, "limit": {"10000"}}, &response); err != nil {
 		return nil, err
 	}
 	clients := make([]Client, 0, len(response.Rows))
@@ -202,7 +266,7 @@ func (a *Adapter) ClientCredentials(ctx context.Context, nodeID string, clientID
 		return ClientCredentials{}, fmt.Errorf("client id must be positive")
 	}
 	var response clientResponse
-	if err := a.call(ctx, nodeID, "/client/getclient", url.Values{"id": {strconv.Itoa(clientID)}}, &response); err != nil {
+	if err := a.call(ctx, nodeID, "/client/getclient/", url.Values{"id": {strconv.Itoa(clientID)}}, &response); err != nil {
 		return ClientCredentials{}, err
 	}
 	if response.Code != 1 || response.Data.ID != clientID {
@@ -216,12 +280,131 @@ func (a *Adapter) ClientCredentials(ctx context.Context, nodeID string, clientID
 	return credentials, nil
 }
 
+func (a *Adapter) getRawClient(ctx context.Context, nodeID string, clientID int) (rawClient, error) {
+	if clientID < 1 {
+		return rawClient{}, fmt.Errorf("client id must be positive")
+	}
+	var response clientResponse
+	if err := a.call(ctx, nodeID, "/client/getclient/", url.Values{"id": {strconv.Itoa(clientID)}}, &response); err != nil {
+		return rawClient{}, err
+	}
+	if response.Code != 1 || response.Data.ID != clientID {
+		return rawClient{}, fmt.Errorf("client %d was not found on node", clientID)
+	}
+	return response.Data, nil
+}
+
+func boolForm(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+func completeClientForm(client rawClient) url.Values {
+	form := url.Values{
+		"id": {strconv.Itoa(client.ID)}, "remark": {client.Remark}, "vkey": {client.VerifyKey},
+		"rate_limit": {strconv.Itoa(client.RateLimit)}, "max_conn": {strconv.Itoa(client.MaxConn)},
+		"max_tunnel": {strconv.Itoa(client.MaxTunnel)}, "web_username": {client.WebUser},
+		"web_password": {client.WebPass}, "config_conn_allow": {boolForm(client.ConfigOK)},
+	}
+	if client.Config != nil {
+		form.Set("u", client.Config.Username)
+		form.Set("p", client.Config.Password)
+		form.Set("compress", boolForm(client.Config.Compress))
+		form.Set("crypt", boolForm(client.Config.Crypt))
+	} else {
+		form.Set("u", "")
+		form.Set("p", "")
+		form.Set("compress", "0")
+		form.Set("crypt", "0")
+	}
+	flowLimit := int64(0)
+	if client.Flow != nil {
+		flowLimit = client.Flow.FlowLimit
+	}
+	form.Set("flow_limit", strconv.FormatInt(flowLimit, 10))
+	return form
+}
+
+func (a *Adapter) UpdateClient(ctx context.Context, nodeID string, clientID int, update ClientUpdate) error {
+	client, err := a.getRawClient(ctx, nodeID, clientID)
+	if err != nil {
+		return err
+	}
+	if client.Config == nil {
+		client.Config = &rawConfig{}
+	}
+	if client.Flow == nil {
+		client.Flow = &rawFlow{}
+	}
+	if update.Remark != nil {
+		client.Remark = *update.Remark
+	}
+	if update.VerifyKey != nil {
+		client.VerifyKey = *update.VerifyKey
+	}
+	if update.BasicUsername != nil {
+		client.Config.Username = *update.BasicUsername
+	}
+	if update.BasicPassword != nil {
+		client.Config.Password = *update.BasicPassword
+	}
+	if update.Compress != nil {
+		client.Config.Compress = *update.Compress
+	}
+	if update.Crypt != nil {
+		client.Config.Crypt = *update.Crypt
+	}
+	if update.ConfigConnAllow != nil {
+		client.ConfigOK = *update.ConfigConnAllow
+	}
+	if update.RateLimit != nil {
+		client.RateLimit = *update.RateLimit
+	}
+	if update.FlowLimit != nil {
+		client.Flow.FlowLimit = *update.FlowLimit
+	}
+	if update.MaxConn != nil {
+		client.MaxConn = *update.MaxConn
+	}
+	if update.MaxTunnel != nil {
+		client.MaxTunnel = *update.MaxTunnel
+	}
+	if update.WebUsername != nil {
+		client.WebUser = *update.WebUsername
+	}
+	if update.WebPassword != nil {
+		client.WebPass = *update.WebPassword
+	}
+	var response actionResponse
+	if err := a.call(ctx, nodeID, "/client/edit/", completeClientForm(client), &response); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (a *Adapter) UpdateClientBasic(ctx context.Context, nodeID string, clientIDs []int, username, password string) error {
+	if len(clientIDs) == 0 {
+		return fmt.Errorf("at least one client id is required")
+	}
+	ids := make([]string, len(clientIDs))
+	for index, clientID := range clientIDs {
+		if clientID < 1 {
+			return fmt.Errorf("client id must be positive")
+		}
+		ids[index] = strconv.Itoa(clientID)
+	}
+	var response actionResponse
+	return a.call(ctx, nodeID, "/client/basic/", url.Values{"ids": {strings.Join(ids, ",")}, "u": {username}, "p": {password}}, &response)
+}
+
 func (a *Adapter) CreateClient(ctx context.Context, nodeID, remark, verifyKey, socksUsername, socksPassword string) (Client, error) {
 	if strings.TrimSpace(remark) == "" || strings.TrimSpace(verifyKey) == "" || socksUsername == "" || socksPassword == "" {
 		return Client{}, fmt.Errorf("client remark and generated credentials are required")
 	}
 	var existing tableResponse[rawClient]
-	if err := a.call(ctx, nodeID, "/client/list", url.Values{"offset": {"0"}, "limit": {"10000"}}, &existing); err != nil {
+	if err := a.call(ctx, nodeID, "/client/list/", url.Values{"offset": {"0"}, "limit": {"10000"}}, &existing); err != nil {
 		return Client{}, err
 	}
 	for _, raw := range existing.Rows {
@@ -230,9 +413,11 @@ func (a *Adapter) CreateClient(ctx context.Context, nodeID, remark, verifyKey, s
 		}
 	}
 	var response actionResponse
-	if err := a.call(ctx, nodeID, "/client/add", url.Values{
+	if err := a.call(ctx, nodeID, "/client/add/", url.Values{
 		"remark": {remark}, "vkey": {verifyKey}, "u": {socksUsername}, "p": {socksPassword},
-		"compress": {"false"}, "crypt": {"true"}, "config_conn_allow": {"false"},
+		"compress": {"0"}, "crypt": {"1"}, "config_conn_allow": {"0"},
+		"rate_limit": {"0"}, "flow_limit": {"0"}, "max_conn": {"0"}, "max_tunnel": {"0"},
+		"web_username": {""}, "web_password": {""},
 	}, &response); err != nil {
 		return Client{}, err
 	}
@@ -240,7 +425,7 @@ func (a *Adapter) CreateClient(ctx context.Context, nodeID, remark, verifyKey, s
 		return Client{}, fmt.Errorf("node rejected client creation: %s", response.Msg)
 	}
 	var listing tableResponse[rawClient]
-	if err := a.call(ctx, nodeID, "/client/list", url.Values{"offset": {"0"}, "limit": {"10000"}}, &listing); err != nil {
+	if err := a.call(ctx, nodeID, "/client/list/", url.Values{"offset": {"0"}, "limit": {"10000"}}, &listing); err != nil {
 		return Client{}, err
 	}
 	for _, raw := range listing.Rows {
@@ -256,7 +441,7 @@ func (a *Adapter) DeleteClient(ctx context.Context, nodeID string, clientID int)
 		return fmt.Errorf("client id must be positive")
 	}
 	var response actionResponse
-	if err := a.call(ctx, nodeID, "/client/del", url.Values{"id": {strconv.Itoa(clientID)}}, &response); err != nil {
+	if err := a.call(ctx, nodeID, "/client/del/", url.Values{"id": {strconv.Itoa(clientID)}}, &response); err != nil {
 		return err
 	}
 	if response.Status != 1 {
@@ -267,23 +452,60 @@ func (a *Adapter) DeleteClient(ctx context.Context, nodeID string, clientID int)
 
 func (a *Adapter) ListManagedTunnels(ctx context.Context, nodeID string) ([]ManagedTunnel, error) {
 	var response tableResponse[rawTunnel]
-	if err := a.call(ctx, nodeID, "/index/gettunnel", url.Values{"offset": {"0"}, "limit": {"10000"}, "type": {"socks5"}}, &response); err != nil {
+	if err := a.call(ctx, nodeID, "/index/gettunnel/", url.Values{"offset": {"0"}, "limit": {"10000"}, "type": {"socks5"}}, &response); err != nil {
 		return nil, err
 	}
 	tunnels := make([]ManagedTunnel, 0, len(response.Rows))
 	for _, raw := range response.Rows {
-		tunnel := ManagedTunnel{ID: raw.ID, Port: raw.Port, Configured: raw.Status, Running: raw.RunStatus}
+		tunnel := ManagedTunnel{ID: raw.ID, Port: raw.Port, Configured: raw.Status}
 		if raw.Client != nil {
 			tunnel.ClientID = raw.Client.ID
 			tunnel.ClientName = raw.Client.Remark
 		}
-		if raw.Flow != nil {
-			tunnel.InletFlow = raw.Flow.InletFlow
-			tunnel.ExportFlow = raw.Flow.ExportFlow
+		lookupID := tunnel.ClientID
+		if lookupID == 0 {
+			lookupID = tunnel.ID
 		}
+		status, err := a.ManagedTunnelStatus(ctx, nodeID, lookupID)
+		if err != nil {
+			return nil, fmt.Errorf("read managed SOCKS status for client %d: %w", lookupID, err)
+		}
+		tunnel.Configured = status.Configured
+		tunnel.Running = status.Running
+		tunnel.Active = status.Active
+		tunnel.Countdown = status.Countdown
+		tunnel.LastActiveAt = status.LastActiveAt
+		tunnel.IdleSeconds = status.IdleSeconds
+		tunnel.RemainingSeconds = status.RemainingSeconds
+		tunnel.AutoCloseAt = status.AutoCloseAt
+		tunnel.AutoCloseTimeoutSeconds = status.AutoCloseTimeoutSeconds
+		tunnel.InletFlow = status.InletFlow
+		tunnel.ExportFlow = status.ExportFlow
+		tunnel.ObservedAt = status.ObservedAt
 		tunnels = append(tunnels, tunnel)
 	}
 	return tunnels, nil
+}
+
+func (a *Adapter) ManagedTunnelStatus(ctx context.Context, nodeID string, clientID int) (ManagedTunnel, error) {
+	if clientID < 1 {
+		return ManagedTunnel{}, fmt.Errorf("client id must be positive")
+	}
+	var response socksStatusResponse
+	if err := a.call(ctx, nodeID, "/index/socksstatus/", url.Values{"client_id": {strconv.Itoa(clientID)}}, &response); err != nil {
+		return ManagedTunnel{}, err
+	}
+	raw := response.Data
+	if response.Code != 1 || raw.ClientID != clientID {
+		return ManagedTunnel{}, fmt.Errorf("managed tunnel for client %d was not found", clientID)
+	}
+	return ManagedTunnel{
+		ID: raw.ID, ClientID: raw.ClientID, Configured: raw.Enabled, Running: raw.Running,
+		Active: raw.Active, Countdown: raw.Countdown, LastActiveAt: raw.LastActiveAt,
+		IdleSeconds: raw.IdleSeconds, RemainingSeconds: raw.RemainingSeconds,
+		AutoCloseAt: raw.AutoCloseAt, AutoCloseTimeoutSeconds: raw.AutoCloseTimeoutSeconds,
+		InletFlow: raw.InletFlow, ExportFlow: raw.ExportFlow, ObservedAt: a.now().UTC(),
+	}, nil
 }
 
 func (a *Adapter) ListPortForwards(ctx context.Context, nodeID string, clientID int) ([]PortForward, error) {
@@ -292,12 +514,12 @@ func (a *Adapter) ListPortForwards(ctx context.Context, nodeID string, clientID 
 		form.Set("client_id", strconv.Itoa(clientID))
 	}
 	var response tableResponse[rawTunnel]
-	if err := a.call(ctx, nodeID, "/index/gettunnel", form, &response); err != nil {
+	if err := a.call(ctx, nodeID, "/index/gettunnel/", form, &response); err != nil {
 		return nil, err
 	}
 	result := make([]PortForward, 0, len(response.Rows))
 	for _, raw := range response.Rows {
-		item := PortForward{ID: raw.ID, Port: raw.Port, Remark: raw.Remark, Configured: raw.Status, Running: raw.RunStatus, Target: raw.TargetAddr}
+		item := PortForward{ID: raw.ID, Type: "portForward", Port: raw.Port, Remark: raw.Remark, Configured: raw.Status, Running: raw.RunStatus, Target: raw.TargetAddr}
 		if raw.Client != nil {
 			item.ClientID = raw.Client.ID
 			item.ClientName = raw.Client.Remark
@@ -341,7 +563,7 @@ func (a *Adapter) CreatePortForward(ctx context.Context, nodeID string, clientID
 		return PortForward{}, fmt.Errorf("server port %d is already in use", serverPort)
 	}
 	var response actionResponse
-	if err := a.call(ctx, nodeID, "/index/add", url.Values{
+	if err := a.call(ctx, nodeID, "/index/add/", url.Values{
 		"type": {"portForward"}, "client_id": {strconv.Itoa(clientID)}, "port": {strconv.Itoa(serverPort)},
 		"target": {target}, "remark": {remark}, "server_ip": {"0.0.0.0"},
 	}, &response); err != nil {
@@ -372,9 +594,9 @@ func (a *Adapter) SetPortForward(ctx context.Context, nodeID string, taskID int,
 	if taskID < 1 {
 		return fmt.Errorf("task id must be positive")
 	}
-	action := "/index/start"
+	action := "/index/start/"
 	if !running {
-		action = "/index/stop"
+		action = "/index/stop/"
 	}
 	var response actionResponse
 	if err := a.call(ctx, nodeID, action, url.Values{"id": {strconv.Itoa(taskID)}, "type": {"portForward"}}, &response); err != nil {
@@ -413,7 +635,7 @@ func (a *Adapter) DeletePortForward(ctx context.Context, nodeID string, taskID i
 		return fmt.Errorf("task id must be positive")
 	}
 	var response actionResponse
-	if err := a.call(ctx, nodeID, "/index/del", url.Values{"id": {strconv.Itoa(taskID)}, "type": {"portForward"}}, &response); err != nil {
+	if err := a.call(ctx, nodeID, "/index/del/", url.Values{"id": {strconv.Itoa(taskID)}, "type": {"portForward"}}, &response); err != nil {
 		return err
 	}
 	if response.Status != 1 {
@@ -426,27 +648,16 @@ func (a *Adapter) SetManagedTunnel(ctx context.Context, nodeID string, clientID 
 	if clientID < 1 {
 		return fmt.Errorf("client id must be positive")
 	}
-	tunnels, err := a.ListManagedTunnels(ctx, nodeID)
+	status, err := a.ManagedTunnelStatus(ctx, nodeID, clientID)
 	if err != nil {
 		return fmt.Errorf("inspect managed tunnel before operation: %w", err)
 	}
-	found := false
-	for _, tunnel := range tunnels {
-		if tunnel.ID != clientID && tunnel.ClientID != clientID {
-			continue
-		}
-		found = true
-		if tunnel.Running == running {
-			return nil
-		}
-		break
+	if status.Running == running {
+		return nil
 	}
-	if !found {
-		return fmt.Errorf("managed tunnel for client %d was not found", clientID)
-	}
-	action := "/index/start"
+	action := "/index/start/"
 	if !running {
-		action = "/index/stop"
+		action = "/index/stop/"
 	}
 	var response actionResponse
 	if err := a.call(ctx, nodeID, action, url.Values{"id": {strconv.Itoa(clientID)}, "type": {"socks5"}}, &response); err != nil {
@@ -460,13 +671,9 @@ func (a *Adapter) SetManagedTunnel(ctx context.Context, nodeID string, clientID 
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		tunnels, inspectErr := a.ListManagedTunnels(waitCtx, nodeID)
-		if inspectErr == nil {
-			for _, tunnel := range tunnels {
-				if (tunnel.ID == clientID || tunnel.ClientID == clientID) && tunnel.Running == running {
-					return nil
-				}
-			}
+		status, inspectErr := a.ManagedTunnelStatus(waitCtx, nodeID, clientID)
+		if inspectErr == nil && status.Running == running {
+			return nil
 		}
 		select {
 		case <-waitCtx.Done():
@@ -492,7 +699,7 @@ func (a *Adapter) SOCKSRoute(ctx context.Context, nodeID string, clientID int) (
 		return SOCKSRoute{}, fmt.Errorf("node API host is invalid")
 	}
 	var response clientResponse
-	if err := a.call(ctx, nodeID, "/client/getclient", url.Values{"id": {strconv.Itoa(clientID)}}, &response); err != nil {
+	if err := a.call(ctx, nodeID, "/client/getclient/", url.Values{"id": {strconv.Itoa(clientID)}}, &response); err != nil {
 		return SOCKSRoute{}, err
 	}
 	if response.Code != 1 || response.Data.ID != clientID {
@@ -501,8 +708,15 @@ func (a *Adapter) SOCKSRoute(ctx context.Context, nodeID string, clientID int) (
 	if response.Data.Config == nil {
 		return SOCKSRoute{}, fmt.Errorf("client %d has no SOCKS credential configuration", clientID)
 	}
+	var tunnel tunnelResponse
+	if err := a.call(ctx, nodeID, "/index/getonetunnel/", url.Values{"id": {strconv.Itoa(clientID)}, "type": {"socks5"}}, &tunnel); err != nil {
+		return SOCKSRoute{}, err
+	}
+	if tunnel.Code != 1 || tunnel.Data.ID != clientID || tunnel.Data.Port < 1 || tunnel.Data.Port > 65535 {
+		return SOCKSRoute{}, fmt.Errorf("managed tunnel for client %d has no valid route", clientID)
+	}
 	return SOCKSRoute{
-		Address:  net.JoinHostPort(apiURL.Hostname(), strconv.Itoa(10000+clientID)),
+		Address:  net.JoinHostPort(apiURL.Hostname(), strconv.Itoa(tunnel.Data.Port)),
 		Username: response.Data.Config.Username,
 		Password: response.Data.Config.Password,
 	}, nil
@@ -524,90 +738,66 @@ func (a *Adapter) call(ctx context.Context, nodeID, path string, form url.Values
 	if err := json.Unmarshal([]byte(secret), &credential); err != nil {
 		return fmt.Errorf("decode node credential bundle: %w", err)
 	}
-	client, err := a.newClient(node)
-	if err != nil {
-		return err
-	}
-	if credential.Type == "session" {
-		if err := a.login(ctx, client, node.APIURL, credential); err != nil {
-			return err
-		}
-	} else if credential.Type == "signed" {
-		if strings.TrimSpace(credential.AuthKey) == "" {
-			return fmt.Errorf("signed credential requires a non-empty auth key")
-		}
-		timestamp := time.Now().Unix()
-		sum := md5.Sum([]byte(credential.AuthKey + strconv.FormatInt(timestamp, 10)))
-		form.Set("timestamp", strconv.FormatInt(timestamp, 10))
-		form.Set("auth_key", hex.EncodeToString(sum[:]))
-	} else {
-		return fmt.Errorf("unsupported node credential type")
-	}
 	endpoint, err := resolveEndpoint(node.APIURL, path)
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	body := []byte(form.Encode())
+	if len(body) > 1<<20 {
+		return fmt.Errorf("NPS request body exceeds 1 MiB limit")
+	}
+	client, err := a.newClient(node)
+	if err != nil {
+		return err
+	}
+	if credential.Type == "signed" {
+		if strings.TrimSpace(credential.AuthKey) == "" {
+			return fmt.Errorf("signed credential requires a non-empty auth key")
+		}
+	} else {
+		return fmt.Errorf("unsupported node credential type")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if credential.Type == "signed" {
+		nonce, nonceErr := a.nonce()
+		if nonceErr != nil {
+			return nonceErr
+		}
+		applyNPSSignature(request, body, credential.AuthKey, nonce, a.now())
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("node request: %w", err)
 	}
 	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, 16<<20))
+	if err != nil {
+		return fmt.Errorf("read node response: %w", err)
+	}
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("node returned HTTP %d", response.StatusCode)
+		return classifyNPSHTTPError(response.StatusCode, payload)
 	}
 	if strings.Contains(response.Header.Get("Content-Type"), "text/html") {
 		return fmt.Errorf("node returned HTML instead of JSON; authentication may have failed")
 	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, 16<<20))
-	if err := decoder.Decode(target); err != nil {
+	if err := validateNPSBusinessResponse(payload); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(payload, target); err != nil {
 		return fmt.Errorf("decode node response: %w", err)
 	}
 	return nil
 }
 
-func (a *Adapter) login(ctx context.Context, client *http.Client, baseURL string, credential Credential) error {
-	if credential.Username == "" || credential.Password == "" {
-		return fmt.Errorf("session credential requires username and password")
-	}
-	endpoint, err := resolveEndpoint(baseURL, "/login/verify")
-	if err != nil {
-		return err
-	}
-	form := url.Values{"username": {credential.Username}, "password": {credential.Password}}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := client.Do(request)
-	if err != nil {
-		return fmt.Errorf("node login: %w", err)
-	}
-	defer response.Body.Close()
-	var result actionResponse
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decode node login: %w", err)
-	}
-	if result.Status != 1 {
-		return errors.New("node login rejected")
-	}
-	return nil
-}
-
 func (a *Adapter) defaultHTTPClient(node store.NodeConnection) (*http.Client, error) {
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, err
-	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: node.TLSServerName}
 	transport.ResponseHeaderTimeout = a.timeout
-	return &http.Client{Transport: transport, Jar: jar, Timeout: a.timeout}, nil
+	return &http.Client{Transport: transport, Timeout: a.timeout}, nil
 }
 
 func resolveEndpoint(baseURL, path string) (string, error) {

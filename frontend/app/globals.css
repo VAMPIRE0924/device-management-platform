@@ -613,7 +613,7 @@ code {
   background: rgba(255, 255, 255, 0.045);
   border-radius: 10px;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 30px;
+  grid-template-columns: minmax(0, 1fr) 30px;
   align-items: center;
   gap: 9px;
 }
@@ -627,7 +627,27 @@ code {
   color: white;
   font-weight: 800;
 }
-.sidebar-account > div:nth-child(2) {
+.sidebar-account .account-avatar {
+  width: 34px;
+  height: 34px;
+  color: white;
+  font-size: 13px;
+}
+.account-profile {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.account-profile-copy {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -646,7 +666,7 @@ code {
   color: #86a5ab;
   font-size: 9px;
 }
-.sidebar-account button {
+.sidebar-account .account-logout {
   width: 30px;
   height: 30px;
   border: 0;
@@ -654,7 +674,8 @@ code {
   color: #b7cbcf;
   background: transparent;
 }
-.sidebar-account button:hover {
+.sidebar-account .account-logout:hover,
+.sidebar-account .account-profile:hover {
   color: white;
   background: rgba(255, 255, 255, 0.09);
 }
@@ -1257,11 +1278,7 @@ main {
   color: #7c8b8f;
   font-size: 9px;
 }
-.table-footer div {
-  display: flex;
-  gap: 3px;
-}
-.table-footer button {
+.pagination-footer .pagination-buttons > button {
   width: 25px;
   height: 25px;
   background: white;
@@ -1270,7 +1287,7 @@ main {
   color: #6d7d81;
   font-size: 9px;
 }
-.table-footer button.current {
+.pagination-footer .pagination-buttons > button.current {
   color: white;
   background: var(--teal);
   border-color: var(--teal);
@@ -1302,7 +1319,7 @@ main {
   gap: 3px;
   margin-left: auto;
 }
-.pagination-footer button:disabled {
+.pagination-footer .pagination-buttons > button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
@@ -2495,7 +2512,7 @@ main {
 
 .socks-summary {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   background: #143135;
   border-radius: 11px;
   color: white;
@@ -2533,7 +2550,7 @@ main {
 }
 .socks-table {
   width: 100%;
-  min-width: 1050px;
+  min-width: 1180px;
   border-collapse: collapse;
   table-layout: auto;
 }
@@ -2614,6 +2631,134 @@ main {
 }
 .socks-flow {
   font-variant-numeric: tabular-nums;
+}
+.socks-run-state {
+  width: fit-content;
+  min-width: 72px;
+  padding: 6px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+}
+.socks-run-state > i {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+.socks-run-state > strong {
+  font-size: 9.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.socks-run-state.running {
+  border-color: #cae9e1;
+  background: #f0faf7;
+}
+.socks-run-state.running > i {
+  background: #0a9d82;
+  box-shadow: 0 0 0 3px #dff3ee;
+}
+.socks-run-state.running > strong {
+  color: #087963;
+}
+.socks-run-state.stopped {
+  border-color: #e1e7e8;
+  background: #f5f7f7;
+}
+.socks-run-state.stopped > i {
+  background: #aab6b9;
+  box-shadow: 0 0 0 3px #edf1f2;
+}
+.socks-run-state.stopped > strong {
+  color: #687a7e;
+}
+.socks-activity-state {
+  min-width: 210px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  white-space: normal;
+}
+.socks-activity-state > strong {
+  position: relative;
+  min-height: 25px;
+  padding: 6px 10px 6px 24px;
+  border: 1px solid #e1e7e8;
+  border-radius: 7px;
+  background: #f7f9f9;
+  color: #687a7e;
+  font-size: 10px;
+  line-height: 1.1;
+}
+.socks-activity-state > strong::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #aab6b9;
+  transform: translateY(-50%);
+}
+.socks-activity-state.active > strong {
+  border-color: #c8e9e1;
+  background: #f0faf7;
+  color: #087963;
+}
+.socks-activity-state.active > strong::before {
+  background: #0a9d82;
+  box-shadow: 0 0 0 3px #dff3ee;
+}
+.socks-activity-state.countdown > strong {
+  border-color: #f0dfbb;
+  background: #fff9ed;
+  color: #9b6215;
+}
+.socks-activity-state.countdown > strong::before {
+  background: #d59125;
+}
+.socks-activity-state.stale > strong {
+  border-color: #ecd8d2;
+  background: #fff8f6;
+  color: #a15143;
+}
+.socks-activity-state.stale > strong::before {
+  background: #bc6857;
+}
+.socks-activity-state.stopped > strong {
+  border-color: #e5e9ea;
+  background: #f5f7f7;
+  color: #9aa7aa;
+  font-weight: 600;
+}
+.socks-countdown-detail {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.socks-countdown-detail > div {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.socks-countdown-detail span {
+  color: #9a8057;
+  font-size: 8px;
+}
+.socks-countdown-detail strong {
+  color: #72501b;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.socks-activity-state > small {
+  margin-top: 0 !important;
+  padding-left: 1px;
+  line-height: 1.45;
 }
 .socks-actions-heading {
   text-align: right !important;
@@ -4817,6 +4962,10 @@ main {
   right: 0;
   max-height: 236px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   padding: 5px;
   border: 1px solid #d5dfe1;
   border-radius: 8px;
@@ -4921,6 +5070,10 @@ main {
   right: 0;
   max-height: 236px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   padding: 5px;
   border: 1px solid #d5dfe1;
   border-radius: 8px;
@@ -4979,10 +5132,10 @@ main {
   padding: 7px 9px;
   font-size: 10px;
 }
-.scan-port-row .unified-select-menu,
-.discovery-service-row .unified-select-menu,
-.discovery-port .unified-select-menu {
-  min-width: 150px;
+.scan-port-row .unified-select,
+.discovery-service-row .unified-select,
+.discovery-port .unified-select {
+  --floating-menu-min-width: 150px;
 }
 .settings-card .unified-select-control {
   min-height: 40px;

@@ -202,6 +202,7 @@ type PortForward struct {
 	ClientID     int        `json:"clientId"`
 	Target       string     `json:"target"`
 	ServerPort   int        `json:"serverPort"`
+	NodeTaskType string     `json:"nodeTaskType"`
 	NodeTaskID   *int       `json:"nodeTaskId"`
 	Status       string     `json:"status"`
 	ExpiresAt    *time.Time `json:"expiresAt"`
@@ -311,6 +312,15 @@ type AuthSession struct {
 	CSRFHash   string
 }
 
+type ChangePasswordInput struct {
+	UserID       string
+	PasswordHash string
+	TokenHash    string
+	CSRFHash     string
+	ExpiresAt    time.Time
+	Audit        AuditInput
+}
+
 type MFAChallenge struct {
 	ID                  string
 	User                User
@@ -328,17 +338,18 @@ type MFAChallenge struct {
 }
 
 type CompleteMFAInput struct {
-	ChallengeID string
-	Method      string
-	Counter     int64
-	CodeHash    string
-	TokenHash   string
-	CSRFHash    string
-	ExpiresAt   time.Time
-	Recovery    []string
-	Email       string
-	MethodBound string
-	Audit       AuditInput
+	ChallengeID  string
+	PasswordHash string
+	Method       string
+	Counter      int64
+	CodeHash     string
+	TokenHash    string
+	CSRFHash     string
+	ExpiresAt    time.Time
+	Recovery     []string
+	Email        string
+	MethodBound  string
+	Audit        AuditInput
 }
 
 type AccessPolicy struct {

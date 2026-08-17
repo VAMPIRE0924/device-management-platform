@@ -53,8 +53,8 @@ func (f *fakeNodes) DeletePortForward(_ context.Context, _ string, taskID int) e
 func TestSweepDeletesExpiredTasksAndRetainsFailedCleanup(t *testing.T) {
 	taskOne, taskTwo := 10, 20
 	database := &fakeStore{forwards: []store.PortForward{
-		{ID: "ok", NodeID: "node", NodeTaskID: &taskOne},
-		{ID: "retry", NodeID: "node", NodeTaskID: &taskTwo},
+		{ID: "ok", NodeID: "node", NodeTaskType: "portForward", NodeTaskID: &taskOne},
+		{ID: "retry", NodeID: "node", NodeTaskType: "portForward", NodeTaskID: &taskTwo},
 		{ID: "reserved-only", NodeID: "node"},
 	}}
 	nodes := &fakeNodes{failID: taskTwo}

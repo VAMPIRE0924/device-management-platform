@@ -77,7 +77,7 @@ func Load() (Config, error) {
 	}
 	dataDirectory = value("DMP_DATA_DIR", "data_dir", dataDirectory)
 	databasePath := value("DMP_DB_PATH", "database_path", filepath.Join(dataDirectory, "platform.db"))
-	mode := strings.ToLower(value("DMP_MODE", "run_mode", "dev"))
+	mode := strings.ToLower(value("DMP_MODE", "run_mode", "pro"))
 	apiToken, err := loadConfiguredSecret("DMP_API_TOKEN", "DMP_API_TOKEN_FILE", values["api_token"], values["api_token_file"])
 	if err != nil {
 		return Config{}, err

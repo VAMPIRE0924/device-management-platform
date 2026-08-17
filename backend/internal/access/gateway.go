@@ -665,7 +665,7 @@ func isHTMLContentType(contentType string) bool {
 	return mediaType == "text/html" || mediaType == "application/xhtml+xml"
 }
 
-var proxyDisclosure = []byte(`<div data-i5cloud-proxy-notice="true" role="banner" style="position:sticky;top:0;z-index:2147483647;box-sizing:border-box;width:100%;padding:8px 12px;background:#073b4c;color:#fff;text-align:center;font:600 13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">I5CLOUD 远程管理平台代理 · 当前页面由目标内网设备提供 · 仅在确认设备身份后输入凭据</div>`)
+var proxyDisclosure = []byte(`<div data-i5cloud-proxy-notice="true" role="banner" style="position:sticky;top:0;z-index:2147483647;box-sizing:border-box;width:100%;padding:8px 12px;background:#073b4c;color:#fff;text-align:center;font:600 13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">远程连接安全访问通道 · 已连接目标内网设备 · 页面内容由目标设备提供</div>`)
 
 func injectProxyDisclosure(input []byte) []byte {
 	lower := bytes.ToLower(input)

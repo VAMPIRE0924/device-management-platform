@@ -10,6 +10,18 @@ export class APIError extends Error {
 }
 
 type ErrorEnvelope = { error?: { code?: string; message?: string } };
+type ReadOptions = { cache?: boolean; fresh?: boolean; ttlMs?: number };
+type CachedRead = { storedAt: number; data: unknown };
+
+const readCachePrefix = "dmp.read-cache.v1:";
+const defaultReadCacheTTL = 10_000;
+const freshReadThrottleMs = 2_000;
+const inFlightReads = new Map<string, Promise<unknown>>();
+const inFlightFreshReads = new Map<string, Promise<unknown>>();
+const memoryReadCache = new Map<string, CachedRead>();
+const lastFreshReadAt = new Map<string, number>();
+const readPathGenerations = new Map<string, number>();
+let readCacheGeneration = 0;
 
 let csrfToken = typeof window === "undefined" ? "" : window.sessionStorage.getItem("dmp.csrf") || "";
 let lastUserActivityAt = 0;
@@ -26,6 +38,82 @@ function csrfCookie(): string {
   const prefix = "dmp_csrf=";
   const item = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(prefix));
   return item ? decodeURIComponent(item.slice(prefix.length)) : "";
+}
+
+function clearReadCache() {
+  readCacheGeneration++;
+  inFlightReads.clear();
+  inFlightFreshReads.clear();
+  lastFreshReadAt.clear();
+  readPathGenerations.clear();
+  memoryReadCache.clear();
+  if (typeof window === "undefined") return;
+  try {
+    for (let index = window.sessionStorage.length - 1; index >= 0; index--) {
+      const key = window.sessionStorage.key(index);
+      if (key?.startsWith(readCachePrefix)) window.sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Storage can be unavailable in hardened/private browser contexts.
+  }
+}
+
+function invalidateReadPath(path: string) {
+  inFlightReads.delete(path);
+  memoryReadCache.delete(path);
+  readPathGenerations.set(path, (readPathGenerations.get(path) || 0) + 1);
+  if (typeof window === "undefined") return;
+  try { window.sessionStorage.removeItem(readCachePrefix + path); } catch { /* ignore cache cleanup failure */ }
+}
+
+function cachedRead<T>(path: string, ttlMs: number): T | undefined {
+  const memory = memoryReadCache.get(path);
+  if (memory) {
+    const age = Date.now() - memory.storedAt;
+    if (Number.isFinite(memory.storedAt) && age >= 0 && age < ttlMs) return memory.data as T;
+    memoryReadCache.delete(path);
+  }
+  if (!readCanPersist(path) || typeof window === "undefined") return undefined;
+  const key = readCachePrefix + path;
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    if (!raw) return undefined;
+    const cached = JSON.parse(raw) as CachedRead;
+    const age = Date.now() - cached.storedAt;
+    if (!Number.isFinite(cached.storedAt) || age < 0 || age >= ttlMs) {
+      window.sessionStorage.removeItem(key);
+      return undefined;
+    }
+    return cached.data as T;
+  } catch {
+    try { window.sessionStorage.removeItem(key); } catch { /* ignore cleanup failure */ }
+    return undefined;
+  }
+}
+
+function storeCachedRead(path: string, data: unknown) {
+  const cached = { storedAt: Date.now(), data };
+  memoryReadCache.set(path, cached);
+  if (!readCanPersist(path) || typeof window === "undefined") return;
+  try {
+    const serialized = JSON.stringify(cached);
+    if (serialized.length <= 512_000)
+      window.sessionStorage.setItem(readCachePrefix + path, serialized);
+  } catch {
+    // A cache write must never make a successful API request fail.
+  }
+}
+
+function readCanPersist(path: string): boolean {
+  if (path.includes("/credentials")) return false;
+  return path === "/api/v1/setup/status" ||
+    path === "/api/v1/meta" ||
+    path === "/api/v1/nodes" ||
+    path.startsWith("/api/v1/nodes/") ||
+    path === "/api/v1/projects" ||
+    path.startsWith("/api/v1/projects/") ||
+    path.startsWith("/api/v1/discovery-jobs/") ||
+    path === "/api/v1/monitor/snapshot";
 }
 
 export function submitWebAccessLaunch(endpointId: string): boolean {
@@ -46,25 +134,75 @@ export function submitWebAccessLaunch(endpointId: string): boolean {
     form.appendChild(field);
   }
   document.body.appendChild(form);
+  clearReadCache();
   form.submit();
   form.remove();
   return true;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
-  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const currentCSRF = csrfToken || csrfCookie();
-  if (currentCSRF && init.method && !["GET", "HEAD", "OPTIONS"].includes(init.method)) headers.set("X-CSRF-Token", currentCSRF);
-  if (Date.now() - lastUserActivityAt < 30_000) headers.set("X-DMP-User-Activity", "1");
-  const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
-  if (!response.ok) {
-    let envelope: ErrorEnvelope = {};
-    try { envelope = await response.json() as ErrorEnvelope; } catch { /* response may be empty */ }
-    throw new APIError(response.status, envelope.error?.code || "request_failed", envelope.error?.message || `请求失败（${response.status}）`);
+async function request<T>(path: string, init: RequestInit = {}, options: ReadOptions = {}): Promise<T> {
+  const method = (init.method || "GET").toUpperCase();
+  const cacheable = method === "GET" && options.cache !== false;
+  const ttlMs = options.ttlMs ?? defaultReadCacheTTL;
+  if (cacheable && options.fresh) {
+    const pending = inFlightFreshReads.get(path);
+    if (pending) return pending as Promise<T>;
+    const lastFreshAt = lastFreshReadAt.get(path) || 0;
+    if (Date.now() - lastFreshAt < freshReadThrottleMs) {
+      const cached = cachedRead<T>(path, freshReadThrottleMs);
+      if (cached !== undefined) return cached;
+    }
+    invalidateReadPath(path);
   }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  if (cacheable && !options.fresh) {
+    const cached = cachedRead<T>(path, ttlMs);
+    if (cached !== undefined) return cached;
+    const pending = inFlightReads.get(path);
+    if (pending) return pending as Promise<T>;
+  }
+  const cacheGeneration = readCacheGeneration;
+  const pathGeneration = readPathGenerations.get(path) || 0;
+  const execute = async () => {
+    const headers = new Headers(init.headers);
+    if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    const currentCSRF = csrfToken || csrfCookie();
+    if (currentCSRF && !["GET", "HEAD", "OPTIONS"].includes(method)) headers.set("X-CSRF-Token", currentCSRF);
+    if (Date.now() - lastUserActivityAt < 30_000) headers.set("X-DMP-User-Activity", "1");
+    const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
+    if (!response.ok) {
+      let envelope: ErrorEnvelope = {};
+      try { envelope = await response.json() as ErrorEnvelope; } catch { /* response may be empty */ }
+      if (response.status === 401) clearReadCache();
+      throw new APIError(response.status, envelope.error?.code || "request_failed", envelope.error?.message || `请求失败（${response.status}）`);
+    }
+    if (response.status === 204) {
+      if (method !== "GET") clearReadCache();
+      return undefined as T;
+    }
+    const data = await response.json() as T;
+    if (method !== "GET") clearReadCache();
+    else if (
+      cacheable &&
+      cacheGeneration === readCacheGeneration &&
+      pathGeneration === (readPathGenerations.get(path) || 0) &&
+      !response.headers.get("Cache-Control")?.toLowerCase().includes("no-store") &&
+      !response.headers.get("Cache-Control")?.toLowerCase().includes("no-cache") &&
+      !response.headers.get("Pragma")?.toLowerCase().includes("no-cache")
+    )
+      storeCachedRead(path, data);
+    return data;
+  };
+  if (!cacheable) return execute();
+  const pending = execute();
+  const pendingReads = options.fresh ? inFlightFreshReads : inFlightReads;
+  pendingReads.set(path, pending);
+  try {
+    const data = await pending;
+    if (options.fresh) lastFreshReadAt.set(path, Date.now());
+    return data;
+  } finally {
+    if (pendingReads.get(path) === pending) pendingReads.delete(path);
+  }
 }
 
 export type APIUser = {
@@ -174,8 +312,16 @@ export type APIManagedTunnel = {
   port: number;
   configured: boolean;
   running: boolean;
+  active: boolean;
+  countdown: boolean;
+  lastActiveAt: number;
+  idleSeconds: number;
+  remainingSeconds: number;
+  autoCloseAt: number;
+  autoCloseTimeoutSeconds: number;
   inletFlow: number;
   exportFlow: number;
+  observedAt: string;
 };
 
 export type APIMonitorNode = {
@@ -296,8 +442,11 @@ export type APIPortForward = {
   endpointName: string;
   deviceName: string;
   nodeId: string;
+	clientId: number;
   target: string;
   serverPort: number;
+	nodeTaskType: "portForward" | "";
+	nodeTaskId: number | null;
   status: string;
   expiresAt: string | null;
 };
@@ -338,14 +487,21 @@ export const api = {
   async setup(username: string, displayName: string, password: string) {
     return request<APIUser>("/api/v1/setup", { method: "POST", body: JSON.stringify({ username, displayName, password }) });
   },
-  async me() { return request<APIUser>("/api/v1/auth/me"); },
+  async me() { return request<APIUser>("/api/v1/auth/me", {}, { cache: false, fresh: true }); },
   async login(username: string, password: string) {
     const result = await request<APIAuthSession | APILoginChallenge>("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ username, password }) });
     if ("user" in result) rememberSession(result);
     return result;
   },
   async setOnboardingPassword(challengeToken: string, newPassword: string) {
-    return request<{ next: "email" }>("/api/v1/auth/onboarding/password", { method: "POST", body: JSON.stringify({ challengeToken, newPassword }) });
+    const result = await request<{ next: "email" } | APIAuthSession>("/api/v1/auth/onboarding/password", { method: "POST", body: JSON.stringify({ challengeToken, newPassword }) });
+    if ("user" in result) rememberSession(result);
+    return result;
+  },
+  async changePassword(currentPassword: string, newPassword: string) {
+    const result = await request<APIAuthSession>("/api/v1/auth/password", { method: "PUT", body: JSON.stringify({ currentPassword, newPassword }) });
+    rememberSession(result);
+    return result;
   },
   async sendOnboardingEmail(challengeToken: string, email: string) {
     return request<{ maskedEmail: string; expiresAt: string; resendAfterSeconds: number }>("/api/v1/auth/onboarding/email/send", { method: "POST", body: JSON.stringify({ challengeToken, email }) });
@@ -370,9 +526,9 @@ export const api = {
   async createNode(input: Record<string, unknown>) { return request<APINode>("/api/v1/nodes", { method: "POST", body: JSON.stringify(input) }); },
   async updateNode(nodeId: string, input: Record<string, unknown>) { return request<APINode>(`/api/v1/nodes/${encodeURIComponent(nodeId)}`, { method: "PATCH", body: JSON.stringify(input) }); },
   async deleteNode(nodeId: string) { return request<void>(`/api/v1/nodes/${encodeURIComponent(nodeId)}`, { method: "DELETE" }); },
-  async nodeHealth(nodeId: string) { return request<APINodeHealth>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/health`); },
-  async nodeClients(nodeId: string) { return (await request<{ items: APINodeClient[] }>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/clients`)).items; },
-  async nodeClientCredentials(nodeId: string, clientId: number) { return request<APINodeClientCredentials>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/clients/${clientId}/credentials`); },
+  async nodeHealth(nodeId: string, fresh = false) { return request<APINodeHealth>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/health`, {}, { fresh }); },
+  async nodeClients(nodeId: string, fresh = false) { return (await request<{ items: APINodeClient[] }>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/clients`, {}, { fresh })).items; },
+  async nodeClientCredentials(nodeId: string, clientId: number) { return request<APINodeClientCredentials>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/clients/${clientId}/credentials`, {}, { cache: false, fresh: true }); },
   async createNodeClient(nodeId: string, input: { remark: string; basicUsername: string; basicPassword: string; verifyKey: string }) { return request<APINodeClientCreateResult>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/clients`, { method: "POST", body: JSON.stringify(input) }); },
   async projects() { return (await request<{ items: APIProject[] }>("/api/v1/projects")).items; },
   async createProject(input: Record<string, unknown>) { return request<APIProject>("/api/v1/projects", { method: "POST", body: JSON.stringify(input) }); },
@@ -400,22 +556,22 @@ export const api = {
   async updatePolicy(policyId: string, input: Record<string, unknown>) { return request<APIAccessPolicy>(`/api/v1/access-policies/${encodeURIComponent(policyId)}`, { method: "PATCH", body: JSON.stringify(input) }); },
   async deletePolicy(policyId: string) { return request<void>(`/api/v1/access-policies/${encodeURIComponent(policyId)}`, { method: "DELETE" }); },
   async sessions() { return (await request<{ items: APIAccessSession[] }>("/api/v1/access-sessions")).items; },
-  async monitorSnapshot() { return request<APIMonitorSnapshot>("/api/v1/monitor/snapshot"); },
+  async monitorSnapshot(fresh = false) { return request<APIMonitorSnapshot>("/api/v1/monitor/snapshot", {}, { fresh }); },
   async revokeSession(sessionId: string) { return request<void>(`/api/v1/access-sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }); },
   async auditLogs(search = "") { return (await request<{ items: APIAuditLog[] }>(`/api/v1/audit-logs?limit=200&search=${encodeURIComponent(search)}`)).items; },
   async portForwards(projectId: string) { return (await request<{ items: APIPortForward[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/port-forwards`)).items; },
   async createPortForward(projectId: string, input: { endpointId: string; serverPort: number; expiresAt: string | null }) { return request<APIPortForward>(`/api/v1/projects/${encodeURIComponent(projectId)}/port-forwards`, { method: "POST", body: JSON.stringify(input) }); },
   async setPortForward(forwardId: string, running: boolean) { return request<{ id: string; status: string }>(`/api/v1/port-forwards/${encodeURIComponent(forwardId)}/${running ? "start" : "stop"}`, { method: "POST" }); },
   async deletePortForward(forwardId: string) { return request<void>(`/api/v1/port-forwards/${encodeURIComponent(forwardId)}`, { method: "DELETE" }); },
-  async setManagedTunnel(nodeId: string, clientId: number, running: boolean) { return request<{ running: boolean }>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/managed-tunnels/${clientId}/${running ? "start" : "stop"}`, { method: "POST" }); },
-  async managedTunnels(nodeId: string) { return (await request<{ items: APIManagedTunnel[] }>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/managed-tunnels`)).items; },
+  async setManagedTunnel(nodeId: string, clientId: number, running: boolean) { return request<APIManagedTunnel>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/managed-tunnels/${clientId}/${running ? "start" : "stop"}`, { method: "POST" }); },
+  async managedTunnels(nodeId: string, fresh = false) { return (await request<{ items: APIManagedTunnel[] }>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/managed-tunnels`, {}, { fresh })).items; },
   async projectScanPorts(projectId: string) { return (await request<{ items: APIDiscoveryPort[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/scan-ports`)).items; },
   async updateProjectScanPorts(projectId: string, ports: APIDiscoveryPort[]) { return (await request<{ items: APIDiscoveryPort[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/scan-ports`, { method: "PUT", body: JSON.stringify({ ports }) })).items; },
   async createDiscoveryJob(projectId: string, networks: string[], ports: APIDiscoveryPort[]) {
     return request<APIDiscoveryJob>(`/api/v1/projects/${encodeURIComponent(projectId)}/discovery-jobs`, { method: "POST", body: JSON.stringify({ networks, ports }) });
   },
   async discoveryJob(jobId: string) {
-    return request<{ job: APIDiscoveryJob; results: APIDiscoveryResult[] }>(`/api/v1/discovery-jobs/${encodeURIComponent(jobId)}`);
+    return request<{ job: APIDiscoveryJob; results: APIDiscoveryResult[] }>(`/api/v1/discovery-jobs/${encodeURIComponent(jobId)}`, {}, { cache: false, fresh: true });
   },
   async cancelDiscoveryJob(jobId: string) {
     return request<{ id: string; status: string }>(`/api/v1/discovery-jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
@@ -426,6 +582,7 @@ export const api = {
 };
 
 function rememberSession(result: APIAuthSession) {
+  clearReadCache();
   csrfToken = result.csrfToken;
   if (typeof window !== "undefined") window.sessionStorage.setItem("dmp.csrf", csrfToken);
 }

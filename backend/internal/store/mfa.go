@@ -33,7 +33,7 @@ func (s *Store) CreateMFAChallenge(ctx context.Context, userID, tokenHash, purpo
 }
 
 func (s *Store) SetOnboardingPassword(ctx context.Context, challengeID, passwordHash string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE mfa_challenges SET new_password_hash=? WHERE id=? AND purpose='onboard' AND status='active' AND attempts<5`, passwordHash, challengeID)
+	result, err := s.db.ExecContext(ctx, `UPDATE mfa_challenges SET new_password_hash=? WHERE id=? AND purpose='onboard' AND status='active' AND expires_at>? AND attempts<5`, passwordHash, challengeID, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -41,6 +41,59 @@ func (s *Store) SetOnboardingPassword(ctx context.Context, challengeID, password
 		return ErrMFAChallenge
 	}
 	return nil
+}
+
+func (s *Store) CompletePasswordChange(ctx context.Context, input CompleteMFAInput) (AuthSession, error) {
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AuthSession{}, err
+	}
+	defer tx.Rollback()
+	var userID, purpose string
+	var enabled int
+	if err := tx.QueryRowContext(ctx, `SELECT c.user_id,c.purpose,u.enabled FROM mfa_challenges c JOIN users u ON u.id=c.user_id WHERE c.id=? AND c.status='active' AND c.expires_at>?`, input.ChallengeID, now.Format(time.RFC3339Nano)).Scan(&userID, &purpose, &enabled); errors.Is(err, sql.ErrNoRows) {
+		return AuthSession{}, ErrMFAChallenge
+	} else if err != nil {
+		return AuthSession{}, err
+	}
+	if purpose != "password" || input.PasswordHash == "" || enabled != 1 {
+		return AuthSession{}, ErrMFAChallenge
+	}
+	if result, err := tx.ExecContext(ctx, `UPDATE mfa_challenges SET status='consumed' WHERE id=? AND status='active'`, input.ChallengeID); err != nil {
+		return AuthSession{}, err
+	} else if count, _ := result.RowsAffected(); count != 1 {
+		return AuthSession{}, ErrMFAChallenge
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_change_required=0,updated_at=? WHERE id=?`, input.PasswordHash, now.Format(time.RFC3339Nano), userID); err != nil {
+		return AuthSession{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_sessions SET status='revoked' WHERE user_id=? AND status='active'`, userID); err != nil {
+		return AuthSession{}, err
+	}
+	sessionID, err := id.New()
+	if err != nil {
+		return AuthSession{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO auth_sessions(id,user_id,token_hash,csrf_hash,status,expires_at,created_at,last_seen_at) VALUES(?,?,?,?,'active',?,?,?)`, sessionID, userID, input.TokenHash, input.CSRFHash, input.ExpiresAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		return AuthSession{}, err
+	}
+	auditID, err := id.New()
+	if err != nil {
+		return AuthSession{}, err
+	}
+	input.Audit.ResourceID = userID
+	if err := insertAudit(ctx, tx, auditID, input.Audit, now); err != nil {
+		return AuthSession{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AuthSession{}, err
+	}
+	user, err := s.userByID(ctx, userID)
+	if err != nil {
+		return AuthSession{}, err
+	}
+	return AuthSession{ID: sessionID, User: user, ExpiresAt: input.ExpiresAt.UTC(), CSRFHash: input.CSRFHash}, nil
 }
 
 func (s *Store) SetOnboardingEmailDelivery(ctx context.Context, challengeID, email, emailCodeHash string, expiresAt time.Time) error {

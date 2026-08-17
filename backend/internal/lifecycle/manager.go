@@ -64,6 +64,13 @@ func (m *Manager) Sweep(ctx context.Context) error {
 		return err
 	}
 	for _, forward := range forwards {
+		if forward.NodeTaskID != nil && forward.NodeTaskType != "portForward" {
+			audit := systemAudit("port_forward.expire_cleanup_failed", "port_forward", forward.ID, "failed")
+			if updateErr := m.store.SetPortForwardStatus(ctx, forward.ID, "cleanup_failed", audit); updateErr != nil {
+				slog.Error("record invalid expired port forward reference", "forward_id", forward.ID, "error", updateErr)
+			}
+			continue
+		}
 		if forward.NodeTaskID != nil {
 			if err := m.nodes.DeletePortForward(ctx, forward.NodeID, *forward.NodeTaskID); err != nil {
 				audit := systemAudit("port_forward.expire_cleanup_failed", "port_forward", forward.ID, "failed")

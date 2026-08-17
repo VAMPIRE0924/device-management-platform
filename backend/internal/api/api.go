@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/access"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/auth"
@@ -64,7 +65,7 @@ type storage interface {
 	ResolveAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error)
 	ListPortForwards(context.Context, string) ([]store.PortForward, error)
 	ReservePortForward(context.Context, store.ReservePortForwardInput, store.AuditInput) (store.PortForward, error)
-	ActivatePortForward(context.Context, string, int) error
+	ActivatePortForward(context.Context, string, string, int) error
 	PortForwardByID(context.Context, string) (store.PortForward, error)
 	SetPortForwardStatus(context.Context, string, string, store.AuditInput) error
 	DeletePortForward(context.Context, string, store.AuditInput) error
@@ -85,9 +86,11 @@ type storage interface {
 	CreateAuthSession(context.Context, string, string, string, time.Time) (store.AuthSession, error)
 	ResolveAuthSession(context.Context, string) (store.AuthSession, error)
 	RevokeAuthSession(context.Context, string) error
+	ChangePassword(context.Context, store.ChangePasswordInput) (store.AuthSession, error)
 	CreateMFAChallenge(context.Context, string, string, string, string, string, time.Time) (store.MFAChallenge, error)
 	SetMFAChallengeMethod(context.Context, string, string, string, string, time.Time) error
 	SetOnboardingPassword(context.Context, string, string) error
+	CompletePasswordChange(context.Context, store.CompleteMFAInput) (store.AuthSession, error)
 	SetOnboardingEmailDelivery(context.Context, string, string, string, time.Time) error
 	VerifyOnboardingEmail(context.Context, string, string) error
 	ClearMFAEmailDelivery(context.Context, string, string) error
@@ -112,6 +115,7 @@ type nodeControl interface {
 	ListClients(context.Context, string) ([]nodeadapter.Client, error)
 	ClientCredentials(context.Context, string, int) (nodeadapter.ClientCredentials, error)
 	ListManagedTunnels(context.Context, string) ([]nodeadapter.ManagedTunnel, error)
+	ManagedTunnelStatus(context.Context, string, int) (nodeadapter.ManagedTunnel, error)
 	SetManagedTunnel(context.Context, string, int, bool) error
 	SOCKSRoute(context.Context, string, int) (nodeadapter.SOCKSRoute, error)
 	CreatePortForward(context.Context, string, int, int, string, string) (nodeadapter.PortForward, error)
@@ -185,6 +189,8 @@ type server struct {
 	version            string
 	trustedProxyCIDRs  []netip.Prefix
 	loginLimiter       *auth.LoginLimiter
+	loginIPLimiter     *auth.LoginLimiter
+	passwordLimiter    *auth.LoginLimiter
 	mfa                *auth.MFA
 	mfaEnabled         bool
 	mfaMethods         []string
@@ -220,7 +226,7 @@ type apiError struct {
 }
 
 func New(deps Dependencies) http.Handler {
-	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, panelDomain: normalizeConfiguredDomain(deps.PanelDomain), accessDomain: normalizeConfiguredDomain(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, authSessionTTL: deps.AuthSessionTTL, authSessionIdleTTL: deps.AuthSessionIdleTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials, restart: deps.Restart}
+	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, panelDomain: normalizeConfiguredDomain(deps.PanelDomain), accessDomain: normalizeConfiguredDomain(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), loginIPLimiter: auth.NewLoginLimiter(30, 10*time.Minute), passwordLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, authSessionTTL: deps.AuthSessionTTL, authSessionIdleTTL: deps.AuthSessionIdleTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials, restart: deps.Restart}
 	if s.emailCodeTTL == 0 {
 		s.emailCodeTTL = 10 * time.Minute
 	}
@@ -253,6 +259,7 @@ func New(deps Dependencies) http.Handler {
 	mux.HandleFunc("GET /api/v1/setup/status", s.setupStatus)
 	mux.HandleFunc("POST /api/v1/setup", s.setup)
 	mux.Handle("GET /api/v1/auth/me", s.requireAuth(http.HandlerFunc(s.me)))
+	mux.Handle("PUT /api/v1/auth/password", s.requireAuth(http.HandlerFunc(s.changePassword)))
 	mux.Handle("POST /api/v1/auth/logout", s.requireAuth(http.HandlerFunc(s.logout)))
 	mux.Handle("GET /api/v1/users", s.requireAuth(http.HandlerFunc(s.listUsers)))
 	mux.Handle("POST /api/v1/users", s.requireAuth(http.HandlerFunc(s.createUser)))
@@ -730,7 +737,7 @@ func (s *server) monitorSnapshot(w http.ResponseWriter, r *http.Request) {
 			nodeResult.LatencyMS = time.Since(started).Milliseconds()
 			if listErr != nil {
 				nodeResult.Status = "unreachable"
-				nodeResult.Message = "节点 API 或托管通道接口不可达"
+				nodeResult.Message = "节点 API 或 SOCKS隧道接口不可达"
 				return
 			}
 			nodeResult.Status = "healthy"
@@ -890,7 +897,7 @@ func (s *server) managedTunnels(w http.ResponseWriter, r *http.Request) {
 	}
 	tunnels, err := s.nodes.ListManagedTunnels(r.Context(), r.PathValue("nodeID"))
 	if err != nil {
-		writeError(w, r, http.StatusBadGateway, "node_request_failed", "读取托管通道失败", nil)
+		writeError(w, r, http.StatusBadGateway, "node_request_failed", "读取 SOCKS隧道失败", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": tunnels, "total": len(tunnels)})
@@ -908,21 +915,26 @@ func (s *server) setManagedTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	action := r.PathValue("action")
 	if action != "start" && action != "stop" {
-		writeError(w, r, http.StatusNotFound, "not_found", "不支持的通道操作", nil)
+		writeError(w, r, http.StatusNotFound, "not_found", "不支持的 SOCKS隧道操作", nil)
 		return
 	}
 	running := action == "start"
 	if err := s.nodes.SetManagedTunnel(r.Context(), r.PathValue("nodeID"), clientID, running); err != nil {
-		writeError(w, r, http.StatusBadGateway, "tunnel_operation_failed", "托管通道操作失败", nil)
+		writeError(w, r, http.StatusBadGateway, "tunnel_operation_failed", "SOCKS隧道操作失败", nil)
 		return
 	}
 	audit := auditFromRequest(r, "managed_tunnel."+action, "managed_tunnel")
 	audit.ResourceID = fmt.Sprintf("%s:socks5:%d", r.PathValue("nodeID"), clientID)
 	if err := s.store.AppendAudit(r.Context(), audit); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "audit_write_failed", "通道操作已执行，但审计写入失败，请立即核对节点状态", nil)
+		writeError(w, r, http.StatusInternalServerError, "audit_write_failed", "SOCKS隧道操作已执行，但审计写入失败，请立即核对节点状态", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"clientId": clientID, "running": running})
+	status, err := s.nodes.ManagedTunnelStatus(r.Context(), r.PathValue("nodeID"), clientID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "tunnel_status_failed", "SOCKS隧道操作已执行，但无法读取最新运行状态", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
@@ -1124,6 +1136,39 @@ func (s *server) listDevices(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取项目设备失败", nil)
 		return
+	}
+	current := principalFromRequest(r)
+	if !current.Bootstrap && current.Role == "temporary" {
+		projectID := r.PathValue("projectID")
+		webAllowed, _ := s.store.HasPolicyCapability(r.Context(), current.UserID, projectID, "web", time.Now().UTC())
+		sshAllowed, _ := s.store.HasPolicyCapability(r.Context(), current.UserID, projectID, "webssh", time.Now().UTC())
+		filtered := make([]store.Device, 0, len(devices))
+		for _, device := range devices {
+			endpoints := make([]store.DeviceEndpoint, 0, len(device.Endpoints))
+			for _, endpoint := range device.Endpoints {
+				if endpoint.AccessType == "web_proxy" && !webAllowed || endpoint.AccessType == "web_ssh" && !sshAllowed {
+					continue
+				}
+				if endpoint.AccessType != "web_proxy" && endpoint.AccessType != "web_ssh" {
+					continue
+				}
+				endpoint.TargetPort = 0
+				endpoint.TLSServerName = ""
+				endpoint.CredentialConfigured = false
+				endpoint.SSHAuthMethod = ""
+				endpoint.SSHUsername = ""
+				endpoint.SSHKeyPath = ""
+				endpoint.SSHHostKeyFingerprint = ""
+				endpoints = append(endpoints, endpoint)
+			}
+			if len(endpoints) == 0 {
+				continue
+			}
+			device.Host = ""
+			device.Endpoints = endpoints
+			filtered = append(filtered, device)
+		}
+		devices = filtered
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": devices, "total": len(devices)})
 }
@@ -1384,7 +1429,7 @@ func (s *server) verifyDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	route, err := s.store.DiscoveryRoute(r.Context(), projectID)
 	if err != nil {
-		writeError(w, r, http.StatusConflict, "gateway_not_bound", "项目尚未绑定可用通道", nil)
+		writeError(w, r, http.StatusConflict, "gateway_not_bound", "项目尚未绑定可用 SOCKS隧道", nil)
 		return
 	}
 	ports := make([]store.DiscoveryPort, 0, len(device.Endpoints))
@@ -1504,7 +1549,7 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 		return createdAccessSession{}, false
 	}
 	if err := s.nodes.SetManagedTunnel(r.Context(), route.NodeID, route.ClientID, true); err != nil {
-		writeError(w, r, http.StatusBadGateway, "managed_tunnel_unavailable", "远程访问前无法启动托管通道", nil)
+		writeError(w, r, http.StatusBadGateway, "managed_tunnel_unavailable", "远程访问前无法启动 SOCKS隧道", nil)
 		return createdAccessSession{}, false
 	}
 	grant, grantHash, err := newAccessToken()
@@ -1738,13 +1783,14 @@ func (s *server) createPortForward(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadGateway, "node_port_forward_failed", "接入节点创建端口转发失败，预留已释放", nil)
 		return
 	}
-	if err := s.store.ActivatePortForward(r.Context(), forward.ID, nodeTask.ID); err != nil {
+	if err := s.store.ActivatePortForward(r.Context(), forward.ID, nodeTask.Type, nodeTask.ID); err != nil {
 		_ = s.nodes.DeletePortForward(context.WithoutCancel(r.Context()), forward.NodeID, nodeTask.ID)
 		_ = s.store.DeletePortForward(context.WithoutCancel(r.Context()), forward.ID, auditFromRequest(r, "port_forward.rollback", "port_forward"))
 		writeError(w, r, http.StatusInternalServerError, "port_forward_commit_failed", "转发任务已回滚，请重试", nil)
 		return
 	}
 	forward.NodeTaskID = &nodeTask.ID
+	forward.NodeTaskType = nodeTask.Type
 	forward.Status = "running"
 	writeJSON(w, http.StatusCreated, forward)
 }
@@ -1760,7 +1806,7 @@ func (s *server) setPortForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	forward, err := s.store.PortForwardByID(r.Context(), r.PathValue("forwardID"))
-	if errors.Is(err, store.ErrNotFound) || forward.NodeTaskID == nil {
+	if errors.Is(err, store.ErrNotFound) || forward.NodeTaskID == nil || forward.NodeTaskType != "portForward" {
 		writeError(w, r, http.StatusNotFound, "port_forward_not_found", "端口转发不存在或尚未完成创建", nil)
 		return
 	}
@@ -1796,6 +1842,10 @@ func (s *server) deletePortForward(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取端口转发失败", nil)
+		return
+	}
+	if forward.NodeTaskID != nil && forward.NodeTaskType != "portForward" {
+		writeError(w, r, http.StatusConflict, "invalid_task_reference", "端口转发保存的 NPS 任务类型无效", nil)
 		return
 	}
 	if forward.NodeTaskID != nil {
@@ -1894,7 +1944,7 @@ func (s *server) createDiscoveryJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.discovery.Start(r.Context(), job, route); err != nil {
 		_ = s.store.SetDiscoveryJobState(context.WithoutCancel(r.Context()), job.ID, "failed", 0)
-		writeError(w, r, http.StatusUnprocessableEntity, "discovery_start_failed", "自动发现任务无法启动，请检查范围、端口数和项目通道", nil)
+		writeError(w, r, http.StatusUnprocessableEntity, "discovery_start_failed", "自动发现任务无法启动，请检查范围、端口数和项目 SOCKS隧道", nil)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
@@ -2327,10 +2377,18 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	limiterKey := requestSourceIP(r) + "\x00" + strings.ToLower(input.Username)
-	if blocked, retry := s.loginLimiter.Blocked(limiterKey, now); blocked {
+	sourceIP := requestSourceIP(r)
+	limiterKey := sourceIP + "\x00" + strings.ToLower(input.Username)
+	if blocked, retry := s.loginIPLimiter.Blocked(sourceIP, now); blocked {
+		// Failed attempts before the threshold are already audited. Do not append
+		// another database row for every rejected flood request.
 		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Round(time.Second).Seconds())))
-		s.auditLogin(r, input.Username, "rate_limited")
+		writeError(w, r, http.StatusTooManyRequests, "login_rate_limited", "登录失败次数过多，请稍后重试", nil)
+		return
+	}
+	if blocked, retry := s.loginLimiter.Blocked(limiterKey, now); blocked {
+		s.loginIPLimiter.Failure(sourceIP, now)
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Round(time.Second).Seconds())))
 		writeError(w, r, http.StatusTooManyRequests, "login_rate_limited", "登录失败次数过多，请稍后重试", nil)
 		return
 	}
@@ -2338,6 +2396,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrNotFound) {
 		auth.VerifyDummy(input.Password)
 		s.loginLimiter.Failure(limiterKey, now)
+		s.loginIPLimiter.Failure(sourceIP, now)
 		s.auditLogin(r, input.Username, "failed")
 		writeError(w, r, http.StatusUnauthorized, "login_failed", "用户名或密码错误", nil)
 		return
@@ -2348,18 +2407,19 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if !credential.Enabled || !auth.VerifyPassword(credential.PasswordHash, input.Password) {
 		s.loginLimiter.Failure(limiterKey, now)
+		s.loginIPLimiter.Failure(sourceIP, now)
 		s.auditLogin(r, input.Username, "failed")
 		writeError(w, r, http.StatusUnauthorized, "login_failed", "用户名或密码错误", nil)
 		return
 	}
-	if !s.mfaEnabled {
+	if !s.mfaEnabled && !credential.PasswordChangeRequired {
 		s.loginLimiter.Success(limiterKey)
 		if err := s.createPasswordSession(w, r, credential); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法创建登录会话", nil)
 		}
 		return
 	}
-	if s.mfa == nil {
+	if s.mfaEnabled && s.mfa == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "mfa_unavailable", "双重认证服务尚未配置", nil)
 		return
 	}
@@ -2370,7 +2430,12 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	purpose := "verify"
 	response := map[string]any{"next": "verify", "challengeToken": challengeToken}
-	if credential.PasswordChangeRequired || credential.Email == "" || !credential.MFAEnabled {
+	if !s.mfaEnabled {
+		purpose = "password"
+		response["next"] = "onboard"
+		response["methods"] = []string{}
+		response["steps"] = []string{"password"}
+	} else if credential.PasswordChangeRequired || credential.Email == "" || !credential.MFAEnabled {
 		purpose = "onboard"
 		response["next"] = "onboard"
 		response["methods"] = s.mfaMethods
@@ -2385,7 +2450,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "challenge_create_failed", "无法创建双重认证挑战", nil)
 		return
 	}
-	if credential.MFAEnabled && credential.MFAPreferredMethod == "totp" {
+	if s.mfaEnabled && credential.MFAEnabled && credential.MFAPreferredMethod == "totp" {
 		if err := s.store.SetMFAChallengeMethod(r.Context(), challenge.ID, "totp", "", "", expiresAt); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "challenge_create_failed", "无法创建双重认证挑战", nil)
 			return
@@ -2393,7 +2458,11 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	response["expiresAt"] = expiresAt
 	s.loginLimiter.Success(limiterKey)
-	s.auditLogin(r, input.Username, "mfa_required")
+	challengeResult := "mfa_required"
+	if purpose == "password" {
+		challengeResult = "password_change_required"
+	}
+	s.auditLogin(r, input.Username, challengeResult)
 	writeJSON(w, http.StatusAccepted, response)
 }
 
@@ -2427,7 +2496,7 @@ func (s *server) setOnboardingPassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	challenge, ok := s.loadOnboardingChallenge(w, r, input.ChallengeToken)
+	challenge, ok := s.loadPasswordChallenge(w, r, input.ChallengeToken)
 	if !ok {
 		return
 	}
@@ -2443,6 +2512,38 @@ func (s *server) setOnboardingPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	if auth.VerifyPassword(credential.PasswordHash, input.NewPassword) {
 		writeError(w, r, http.StatusUnprocessableEntity, "password_unchanged", "新密码不能与当前密码相同", map[string]string{"newPassword": "必须使用不同密码"})
+		return
+	}
+	if challenge.Purpose == "password" {
+		token, err := newOpaqueSecret(32)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成密码修改", nil)
+			return
+		}
+		csrfToken, err := newOpaqueSecret(32)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成密码修改", nil)
+			return
+		}
+		expiresAt := time.Now().UTC().Add(s.authSessionTTL)
+		sessionRecord, err := s.store.CompletePasswordChange(r.Context(), store.CompleteMFAInput{
+			ChallengeID:  challenge.ID,
+			PasswordHash: passwordHash,
+			TokenHash:    digestString(token),
+			CSRFHash:     digestString(csrfToken),
+			ExpiresAt:    expiresAt,
+			Audit:        store.AuditInput{Actor: challenge.User.Username, Action: "auth.password_change", ResourceType: "auth_session", Result: "success", RequestID: requestID(r), SourceIP: requestSourceIP(r)},
+		})
+		if errors.Is(err, store.ErrMFAChallenge) {
+			writeError(w, r, http.StatusGone, "mfa_challenge_expired", "密码修改已失效，请重新登录", nil)
+			return
+		}
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成密码修改", nil)
+			return
+		}
+		s.setAuthCookies(w, r, token, csrfToken, expiresAt)
+		writeJSON(w, http.StatusOK, map[string]any{"user": sessionRecord.User, "csrfToken": csrfToken, "expiresAt": expiresAt})
 		return
 	}
 	if err := s.store.SetOnboardingPassword(r.Context(), challenge.ID, passwordHash); err != nil {
@@ -2614,6 +2715,15 @@ func (s *server) loadOnboardingChallenge(w http.ResponseWriter, r *http.Request,
 	return challenge, true
 }
 
+func (s *server) loadPasswordChallenge(w http.ResponseWriter, r *http.Request, token string) (store.MFAChallenge, bool) {
+	challenge, err := s.store.MFAChallengeByToken(r.Context(), digestString(strings.TrimSpace(token)))
+	if err != nil || (challenge.Purpose != "onboard" && challenge.Purpose != "password") {
+		writeError(w, r, http.StatusGone, "mfa_challenge_expired", "密码修改已失效，请重新登录", nil)
+		return store.MFAChallenge{}, false
+	}
+	return challenge, true
+}
+
 func (s *server) mfaMethodAllowed(method string) bool {
 	for _, allowed := range s.mfaMethods {
 		if method == allowed {
@@ -2761,6 +2871,80 @@ func (s *server) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": current.UserID, "username": current.Username, "displayName": current.DisplayName, "email": credential.Email, "role": current.Role, "projectIds": current.ProjectIDs, "bootstrap": current.Bootstrap, "mfaEnabled": current.Bootstrap || credential.MFAEnabled, "passwordChangeRequired": !current.Bootstrap && credential.PasswordChangeRequired})
+}
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewPassword     string `json:"newPassword"`
+}
+
+func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
+	current := principalFromRequest(r)
+	if current.Bootstrap || current.UserID == "" {
+		writeError(w, r, http.StatusForbidden, "bootstrap_password_unsupported", "平台访问令牌不能修改用户密码", nil)
+		return
+	}
+	var input changePasswordRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if len(input.CurrentPassword) > 4096 || len(input.NewPassword) > 4096 {
+		writeError(w, r, http.StatusBadRequest, "invalid_password_input", "密码参数无效", nil)
+		return
+	}
+	now := time.Now().UTC()
+	limiterKey := requestSourceIP(r) + "\x00password-change\x00" + current.UserID
+	if blocked, retry := s.passwordLimiter.Blocked(limiterKey, now); blocked {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Round(time.Second).Seconds())))
+		writeError(w, r, http.StatusTooManyRequests, "password_change_rate_limited", "当前密码验证失败次数过多，请稍后重试", nil)
+		return
+	}
+	credential, err := s.store.UserCredentialByUsername(r.Context(), current.Username)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "database_error", "无法读取当前用户凭据", nil)
+		return
+	}
+	if !auth.VerifyPassword(credential.PasswordHash, input.CurrentPassword) {
+		s.passwordLimiter.Failure(limiterKey, now)
+		_ = s.store.AppendAudit(r.Context(), store.AuditInput{Actor: current.Username, Action: "auth.password_change", ResourceType: "auth_session", ResourceID: current.UserID, Result: "failed", RequestID: requestID(r), SourceIP: requestSourceIP(r)})
+		writeError(w, r, http.StatusUnauthorized, "current_password_invalid", "当前密码不正确", map[string]string{"currentPassword": "当前密码不正确"})
+		return
+	}
+	passwordHash, err := auth.HashPassword(input.NewPassword)
+	if err != nil {
+		writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "新密码必须为 12-1024 个字符", map[string]string{"newPassword": "请输入至少 12 个字符"})
+		return
+	}
+	if auth.VerifyPassword(credential.PasswordHash, input.NewPassword) {
+		writeError(w, r, http.StatusUnprocessableEntity, "password_unchanged", "新密码不能与当前密码相同", map[string]string{"newPassword": "必须使用不同密码"})
+		return
+	}
+	token, err := newOpaqueSecret(32)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成密码修改", nil)
+		return
+	}
+	csrfToken, err := newOpaqueSecret(32)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成密码修改", nil)
+		return
+	}
+	expiresAt := now.Add(s.authSessionTTL)
+	sessionRecord, err := s.store.ChangePassword(r.Context(), store.ChangePasswordInput{
+		UserID:       current.UserID,
+		PasswordHash: passwordHash,
+		TokenHash:    digestString(token),
+		CSRFHash:     digestString(csrfToken),
+		ExpiresAt:    expiresAt,
+		Audit:        store.AuditInput{Actor: current.Username, Action: "auth.password_change", ResourceType: "auth_session", Result: "success", RequestID: requestID(r), SourceIP: requestSourceIP(r)},
+	})
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "password_change_failed", "无法完成密码修改", nil)
+		return
+	}
+	s.passwordLimiter.Success(limiterKey)
+	s.setAuthCookies(w, r, token, csrfToken, expiresAt)
+	writeJSON(w, http.StatusOK, map[string]any{"user": sessionRecord.User, "csrfToken": csrfToken, "expiresAt": expiresAt})
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
@@ -3095,7 +3279,11 @@ func (s *server) exportAuditLogs(w http.ResponseWriter, r *http.Request) {
 	writer := csv.NewWriter(w)
 	_ = writer.Write([]string{"time", "actor", "action", "resource_type", "resource_id", "result", "request_id", "source_ip", "metadata"})
 	for _, item := range items {
-		_ = writer.Write([]string{item.CreatedAt.Format(time.RFC3339), item.Actor, item.Action, item.ResourceType, item.ResourceID, item.Result, item.RequestID, item.SourceIP, item.MetadataJSON})
+		row := []string{item.CreatedAt.Format(time.RFC3339), item.Actor, item.Action, item.ResourceType, item.ResourceID, item.Result, item.RequestID, item.SourceIP, item.MetadataJSON}
+		for index := range row {
+			row[index] = safeCSVCell(row[index])
+		}
+		_ = writer.Write(row)
 	}
 	writer.Flush()
 }
@@ -3174,11 +3362,7 @@ func digestString(value string) string {
 
 func (s *server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.apiToken == "" && s.mode == "dev" {
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, principal{Username: "bootstrap-admin", DisplayName: "Bootstrap Admin", Role: "system_admin", Bootstrap: true})))
-			return
-		}
-		if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
+		if authorization := r.Header.Get("Authorization"); s.apiToken != "" && strings.HasPrefix(authorization, "Bearer ") {
 			provided := strings.TrimPrefix(authorization, "Bearer ")
 			if len(provided) == len(s.apiToken) && subtle.ConstantTimeCompare([]byte(provided), []byte(s.apiToken)) == 1 {
 				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, principal{Username: "bootstrap-admin", DisplayName: "Bootstrap Admin", Role: "system_admin", Bootstrap: true})))
@@ -3289,7 +3473,7 @@ func (s *server) authorizeRequest(r *http.Request, current principal) bool {
 		job, err := s.store.DiscoveryJob(r.Context(), jobID)
 		return err == nil && current.Role == "project_admin" && canAccessProject(current, job.ProjectID)
 	}
-	if path == "/api/v1/access-sessions" && r.Method == http.MethodPost {
+	if (path == "/api/v1/access-sessions" || path == "/api/v1/access-sessions/launch") && r.Method == http.MethodPost {
 		return current.Role == "project_admin" || current.Role == "operator" || current.Role == "temporary"
 	}
 	return false
@@ -3308,12 +3492,25 @@ func principalFromRequest(r *http.Request) principal {
 func (s *server) requestContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-		if requestID == "" {
+		if !validRequestID(requestID) {
 			requestID, _ = id.New()
 		}
 		w.Header().Set("X-Request-ID", requestID)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey, requestID)))
 	})
+}
+
+func validRequestID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("._:-", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (s *server) accessDomainRouting(next http.Handler) http.Handler {
@@ -3394,6 +3591,12 @@ func (s *server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+		if sensitiveAPIResponse(r.URL.Path) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Add("Vary", "Cookie")
+			w.Header().Add("Vary", "Authorization")
+		}
 		if !strings.HasPrefix(r.URL.Path, "/access/ssh/") {
 			w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:")
 		}
@@ -3402,6 +3605,40 @@ func (s *server) securityHeaders(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func sensitiveAPIResponse(path string) bool {
+	if strings.Contains(path, "/credentials") {
+		return true
+	}
+	for _, prefix := range []string{
+		"/api/v1/auth/",
+		"/api/v1/users",
+		"/api/v1/access-policies",
+		"/api/v1/access-sessions",
+		"/api/v1/audit-logs",
+		"/api/v1/data/",
+		"/api/v1/settings/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func safeCSVCell(value string) string {
+	if value == "" {
+		return value
+	}
+	trimmed := strings.TrimLeftFunc(value, func(character rune) bool {
+		return character <= ' ' || unicode.IsSpace(character)
+	})
+	dangerousControl := value[0] == '\t' || value[0] == '\r'
+	if dangerousControl || (trimmed != "" && strings.ContainsRune("=+-@", rune(trimmed[0]))) {
+		return "'" + value
+	}
+	return value
 }
 
 func auditFromRequest(r *http.Request, action, resourceType string) store.AuditInput {

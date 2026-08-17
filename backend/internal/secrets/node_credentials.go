@@ -14,10 +14,8 @@ import (
 )
 
 type NodeCredentialPatch struct {
-	Type     string `json:"type"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	AuthKey  string `json:"authKey"`
+	Type    string `json:"type"`
+	AuthKey string `json:"authKey"`
 }
 
 type SSHCredentialPatch struct {
@@ -84,32 +82,20 @@ func (v *NodeCredentialVault) Save(ctx context.Context, nodeID, currentReference
 	if value := strings.TrimSpace(patch.Type); value != "" {
 		credential.Type = value
 	}
-	if value := strings.TrimSpace(patch.Username); value != "" {
-		credential.Username = value
-	}
-	if patch.Password != "" {
-		credential.Password = patch.Password
-	}
 	if patch.AuthKey != "" {
 		credential.AuthKey = patch.AuthKey
+		credential.Type = "signed"
 	}
 	if credential.Type == "" {
-		credential.Type = "session"
+		credential.Type = "signed"
 	}
 	switch credential.Type {
-	case "session":
-		if strings.TrimSpace(credential.Username) == "" || credential.Password == "" {
-			return "", nil, fmt.Errorf("账号密码认证必须填写认证账号和密码")
-		}
-		credential.AuthKey = ""
 	case "signed":
-		if strings.TrimSpace(credential.AuthKey) == "" {
-			return "", nil, fmt.Errorf("签名认证必须填写认证密钥")
+		if len([]byte(credential.AuthKey)) < 32 {
+			return "", nil, fmt.Errorf("NPS API 认证密钥至少需要 32 个 UTF-8 字节")
 		}
-		credential.Username = ""
-		credential.Password = ""
 	default:
-		return "", nil, fmt.Errorf("不支持的节点认证方式")
+		return "", nil, fmt.Errorf("旧会话认证已停用，请改用 NPS HMAC-SHA256 API 密钥")
 	}
 	plaintext, err := json.Marshal(credential)
 	if err != nil {

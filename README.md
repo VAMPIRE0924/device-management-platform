@@ -1,6 +1,6 @@
 # Device Management Platform（设备管理平台）
 
-面向客户内网设备的远程管理平台。系统接入重构版 NPS 节点，项目绑定既有 Client，并通过同 ID 的 SOCKS 通道完成设备发现、Web 服务访问和 WebSSH 运维。
+面向客户内网设备的远程管理平台。系统接入重构版 NPS 节点，项目绑定既有 Client，并通过同 ID 的 SOCKS隧道完成设备发现、Web 服务访问和 WebSSH 运维。
 
 [Docker Hub](https://hub.docker.com/r/vampirerune/device-management-platform)
 
@@ -8,7 +8,7 @@
 
 - 管理 NPS 接入节点，节点认证信息加密保存。
 - 查看和新增 NPS Client；项目只绑定既有 Client，不代替 NPS 管理 Client 生命周期。
-- 创建远程访问会话时启动项目 SOCKS 通道，Web/WebSocket/WebSSH 的真实流量续期；平台与 NPS 均按最长 30 分钟无流量回收，不在拨号失败后自动复活旧通道。
+- 创建远程访问会话时启动项目 SOCKS隧道，Web/WebSocket/WebSSH 的真实流量续期；平台与 NPS 均按最长 30 分钟无流量回收，不在拨号失败后自动复活旧隧道。
 - 按项目配置多个扫描网段与端口，发现 HTTP、HTTPS、SSH 等内网服务。
 - 每台设备可配置多个 Web 服务，HTTPS 参数按服务独立保存。
 - 每个 Web 访问会话使用独立的短随机子域名，支持独立反代证书、可选独立端口、原生 Cookie、重定向、动态接口和 WebSocket；面板域名不承载 Web 反代。
@@ -44,14 +44,14 @@ Compose 不设置宿主机 `ports` 映射。容器默认监听 HTTP 80；在系�
 docker pull vampirerune/device-management-platform:main
 
 # 固定部署当前正式版本
-docker pull vampirerune/device-management-platform:v1.0.11
+docker pull vampirerune/device-management-platform:v2.0.0
 ```
 
 已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，仅在接受自动跟随最新正式版时使用 `main`。
 
 镜像标签：
 
-- `v1.0.11`：当前正式版本；
+- `v2.0.0`：当前正式版本；
 - `main`：最新正式版本的滚动标签；
 - `dev`：开发测试镜像，不用于生产环境。
 
@@ -68,10 +68,10 @@ docker pull vampirerune/device-management-platform:v1.0.11
 
 ```bash
 docker build \
-  --build-arg VERSION=v1.0.11 \
+  --build-arg VERSION=v2.0.0 \
   --build-arg VCS_REF="$(git rev-parse HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -t device-management-platform:v1.0.11 .
+  -t device-management-platform:v2.0.0 .
 ```
 
 仓库未声明开源许可证。未经许可，不授予复制、修改或再分发权利。

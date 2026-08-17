@@ -91,7 +91,11 @@ func (f *fakeNodeControl) ClientCredentials(context.Context, string, int) (nodea
 }
 
 func (f *fakeNodeControl) ListManagedTunnels(context.Context, string) ([]nodeadapter.ManagedTunnel, error) {
-	return []nodeadapter.ManagedTunnel{{ID: 1, ClientID: 1, Port: 10001, Running: true, InletFlow: 1234, ExportFlow: 5678}}, nil
+	return []nodeadapter.ManagedTunnel{{ID: 1, ClientID: 1, Port: 10001, Running: true, Active: true, InletFlow: 1234, ExportFlow: 5678}}, nil
+}
+
+func (f *fakeNodeControl) ManagedTunnelStatus(context.Context, string, int) (nodeadapter.ManagedTunnel, error) {
+	return nodeadapter.ManagedTunnel{ID: 1, ClientID: 1, Port: 10001, Configured: f.started, Running: f.started, Active: f.started, RemainingSeconds: 1800}, nil
 }
 
 func (f *fakeNodeControl) SetManagedTunnel(_ context.Context, _ string, _ int, running bool) error {
@@ -104,7 +108,7 @@ func (f *fakeNodeControl) SOCKSRoute(context.Context, string, int) (nodeadapter.
 }
 
 func (f *fakeNodeControl) CreatePortForward(_ context.Context, _ string, clientID, serverPort int, target, remark string) (nodeadapter.PortForward, error) {
-	return nodeadapter.PortForward{ID: 91, ClientID: clientID, Port: serverPort, Target: target, Remark: remark, Running: true}, nil
+	return nodeadapter.PortForward{ID: 91, Type: "portForward", ClientID: clientID, Port: serverPort, Target: target, Remark: remark, Running: true}, nil
 }
 
 func (f *fakeNodeControl) SetPortForward(context.Context, string, int, bool) error { return nil }
@@ -306,6 +310,93 @@ func TestHealthAndAuthentication(t *testing.T) {
 	}
 }
 
+func TestDevelopmentModeDoesNotGrantImplicitAdministrator(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Dependencies{Store: db, Nodes: &fakeNodeControl{}, Mode: "dev", Version: "test"})
+	response := request(t, handler, http.MethodGet, "/api/v1/nodes", nil, false)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("implicit development authentication status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPasswordChangeRequiredWithoutMFA(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Dependencies{Store: db, Nodes: &fakeNodeControl{}, APIToken: "test-token", Mode: "pro", Version: "test", MFAEnabled: false})
+	created := request(t, handler, http.MethodPost, "/api/v1/users", map[string]any{
+		"username": "password-only-user", "displayName": "仅改密用户", "password": "temporary password value", "role": "operator", "enabled": true,
+	}, true)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create user = %d: %s", created.Code, created.Body.String())
+	}
+	login := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "password-only-user", "password": "temporary password value"}, false)
+	var challenge struct {
+		Next           string   `json:"next"`
+		ChallengeToken string   `json:"challengeToken"`
+		Steps          []string `json:"steps"`
+	}
+	if login.Code != http.StatusAccepted || json.Unmarshal(login.Body.Bytes(), &challenge) != nil || challenge.Next != "onboard" || len(challenge.Steps) != 1 || challenge.Steps[0] != "password" {
+		t.Fatalf("password challenge = %d: %s", login.Code, login.Body.String())
+	}
+	completed := request(t, handler, http.MethodPost, "/api/v1/auth/onboarding/password", map[string]any{"challengeToken": challenge.ChallengeToken, "newPassword": "permanent password value"}, false)
+	if completed.Code != http.StatusOK || !bytes.Contains(completed.Body.Bytes(), []byte(`"passwordChangeRequired":false`)) || len(completed.Result().Cookies()) != 2 {
+		t.Fatalf("password completion = %d: %s", completed.Code, completed.Body.String())
+	}
+	if completed.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("password completion cache policy = %q", completed.Header().Get("Cache-Control"))
+	}
+	if response := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "password-only-user", "password": "temporary password value"}, false); response.Code != http.StatusUnauthorized {
+		t.Fatalf("temporary password remained valid: %d: %s", response.Code, response.Body.String())
+	}
+	if response := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "password-only-user", "password": "permanent password value"}, false); response.Code != http.StatusOK {
+		t.Fatalf("permanent password login = %d: %s", response.Code, response.Body.String())
+	}
+	if response := request(t, handler, http.MethodPost, "/api/v1/auth/onboarding/password", map[string]any{"challengeToken": challenge.ChallengeToken, "newPassword": "another permanent password"}, false); response.Code != http.StatusGone {
+		t.Fatalf("consumed challenge reuse = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRequestIDValidationAndCSVFormulaNeutralization(t *testing.T) {
+	handler := testServer(t)
+	valid := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+	valid.Header.Set("X-Request-ID", "trace_123:child-1")
+	validResponse := httptest.NewRecorder()
+	handler.ServeHTTP(validResponse, valid)
+	if got := validResponse.Header().Get("X-Request-ID"); got != "trace_123:child-1" {
+		t.Fatalf("valid request id = %q", got)
+	}
+	invalid := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+	invalid.Header.Set("X-Request-ID", "=FORMULA("+strings.Repeat("x", 256))
+	invalidResponse := httptest.NewRecorder()
+	handler.ServeHTTP(invalidResponse, invalid)
+	if got := invalidResponse.Header().Get("X-Request-ID"); got == invalid.Header.Get("X-Request-ID") || !validRequestID(got) {
+		t.Fatalf("invalid request id was reflected or replacement invalid: %q", got)
+	}
+	for _, input := range []string{"=1+1", " +cmd", "-2", "@SUM(A1)", "\tformula", "\rformula"} {
+		if got := safeCSVCell(input); !strings.HasPrefix(got, "'") {
+			t.Errorf("unsafe CSV cell %q was not neutralized: %q", input, got)
+		}
+	}
+	if got := safeCSVCell("normal value"); got != "normal value" {
+		t.Fatalf("normal CSV cell changed: %q", got)
+	}
+}
+
 func TestAuthSessionIdleTimeoutRevokesSession(t *testing.T) {
 	handler, db, token, sessionID := idleSessionTestServer(t, 15*time.Minute)
 	if err := db.TouchAuthSession(t.Context(), sessionID, time.Now().UTC().Add(-16*time.Minute)); err != nil {
@@ -492,7 +583,7 @@ func TestSessionCookieSecurityFollowsRequestProtocol(t *testing.T) {
 func TestAccessDomainLaunchAndProxyHeaderIsolation(t *testing.T) {
 	handler := testServerWithAccessDomain(t, "remote.example.test")
 	nodeResponse := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
-		"name": "会话域名节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "session", "username": "admin", "password": "node-password"}, "portStart": 22000, "portEnd": 22999,
+		"name": "会话域名节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "signed", "authKey": "test-node-auth-key-0123456789-abcd"}, "portStart": 22000, "portEnd": 22999,
 	}, true)
 	if nodeResponse.Code != http.StatusCreated {
 		t.Fatalf("create node = %d: %s", nodeResponse.Code, nodeResponse.Body.String())
@@ -873,7 +964,7 @@ func TestCreateNodeAndProject(t *testing.T) {
 		t.Fatalf("unsupported credential reference status = %d: %s", unsupportedCredential.Code, unsupportedCredential.Body.String())
 	}
 	nodeResponse := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
-		"name": "测试节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "session", "username": "admin", "password": "node-password"}, "portStart": 22000, "portEnd": 22999,
+		"name": "测试节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "signed", "authKey": "test-node-auth-key-0123456789-abcd"}, "portStart": 22000, "portEnd": 22999,
 	}, true)
 	if nodeResponse.Code != http.StatusCreated {
 		t.Fatalf("create node status = %d: %s", nodeResponse.Code, nodeResponse.Body.String())
@@ -1033,17 +1124,17 @@ func TestCreateNodeAndProject(t *testing.T) {
 	}
 }
 
-func TestNodePasswordIsWriteOnlyAndCanBeReplaced(t *testing.T) {
+func TestNodeAuthKeyIsWriteOnlyAndCanBeReplaced(t *testing.T) {
 	handler := testServer(t)
 	created := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
 		"name": "加密认证节点", "apiUrl": "https://secure-node.test:6443", "tlsServerName": "secure-node.test",
-		"credential": map[string]any{"type": "session", "username": "node-admin", "password": "initial-node-password"},
+		"credential": map[string]any{"type": "signed", "authKey": "initial-node-auth-key-0123456789-ab"},
 		"portStart":  23000, "portEnd": 23999,
 	}, true)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create encrypted node = %d: %s", created.Code, created.Body.String())
 	}
-	if bytes.Contains(created.Body.Bytes(), []byte("node-admin")) || bytes.Contains(created.Body.Bytes(), []byte("initial-node-password")) || bytes.Contains(created.Body.Bytes(), []byte("db://")) {
+	if bytes.Contains(created.Body.Bytes(), []byte("initial-node-auth-key-0123456789-ab")) || bytes.Contains(created.Body.Bytes(), []byte("db://")) {
 		t.Fatalf("node credential leaked in response: %s", created.Body.String())
 	}
 	var node store.Node
@@ -1056,13 +1147,13 @@ func TestNodePasswordIsWriteOnlyAndCanBeReplaced(t *testing.T) {
 
 	updated := request(t, handler, http.MethodPatch, "/api/v1/nodes/"+node.ID, map[string]any{
 		"name": node.Name, "apiUrl": node.APIURL, "tlsServerName": node.TLSServerName,
-		"credential": map[string]any{"type": "session", "password": "replacement-node-password"},
+		"credential": map[string]any{"type": "signed", "authKey": "replacement-node-auth-key-01234567"},
 		"portStart":  node.PortStart, "portEnd": node.PortEnd, "enabled": true,
 	}, true)
 	if updated.Code != http.StatusOK {
-		t.Fatalf("replace encrypted node password = %d: %s", updated.Code, updated.Body.String())
+		t.Fatalf("replace encrypted node auth key = %d: %s", updated.Code, updated.Body.String())
 	}
-	if bytes.Contains(updated.Body.Bytes(), []byte("replacement-node-password")) || bytes.Contains(updated.Body.Bytes(), []byte("db://")) {
+	if bytes.Contains(updated.Body.Bytes(), []byte("replacement-node-auth-key-01234567")) || bytes.Contains(updated.Body.Bytes(), []byte("db://")) {
 		t.Fatalf("updated node credential leaked in response: %s", updated.Body.String())
 	}
 
@@ -1079,7 +1170,7 @@ func TestNodeClientsAreReadOnlyAndCanBeCreated(t *testing.T) {
 	handler := testServer(t)
 	createdNode := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
 		"name": "Client 管理节点", "apiUrl": "https://client-node.test:6443", "tlsServerName": "client-node.test",
-		"credential": map[string]any{"type": "session", "username": "admin", "password": "node-password"}, "portStart": 25000, "portEnd": 25999,
+		"credential": map[string]any{"type": "signed", "authKey": "test-node-auth-key-0123456789-abcd"}, "portStart": 25000, "portEnd": 25999,
 	}, true)
 	if createdNode.Code != http.StatusCreated {
 		t.Fatalf("create client node = %d: %s", createdNode.Code, createdNode.Body.String())
@@ -1127,7 +1218,7 @@ func TestNodeClientsAreReadOnlyAndCanBeCreated(t *testing.T) {
 func TestMonitorSnapshotUsesRealNodeCounters(t *testing.T) {
 	handler := testServer(t)
 	nodeResponse := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
-		"name": "监控节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "session", "username": "admin", "password": "node-password"}, "portStart": 24000, "portEnd": 24999,
+		"name": "监控节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "signed", "authKey": "test-node-auth-key-0123456789-abcd"}, "portStart": 24000, "portEnd": 24999,
 	}, true)
 	if nodeResponse.Code != http.StatusCreated {
 		t.Fatalf("create node = %d: %s", nodeResponse.Code, nodeResponse.Body.String())
@@ -1193,6 +1284,9 @@ func TestManagedTunnelRoutesUseCompositeIdentity(t *testing.T) {
 	if response.Code != http.StatusOK || !control.started {
 		t.Fatalf("start tunnel status = %d: %s", response.Code, response.Body.String())
 	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"active":true`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"remainingSeconds":1800`)) {
+		t.Fatalf("start tunnel did not return fresh runtime state: %s", response.Body.String())
+	}
 	list := request(t, handler, http.MethodGet, "/api/v1/nodes/node-1/managed-tunnels", nil, true)
 	if list.Code != http.StatusOK || !bytes.Contains(list.Body.Bytes(), []byte("10001")) {
 		t.Fatalf("list tunnel status = %d: %s", list.Code, list.Body.String())
@@ -1216,7 +1310,7 @@ func TestProjectDeletionLifecycle(t *testing.T) {
 	control := &fakeNodeControl{}
 	handler := New(Dependencies{Store: db, Nodes: control, NodeCredentials: vault, Discovery: fakeDiscoveryControl{}, APIToken: "test-token", Mode: "pro", Version: "test"})
 	nodeResponse := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
-		"name": "项目删除节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "session", "username": "admin", "password": "node-password"}, "portStart": 28000, "portEnd": 28999,
+		"name": "项目删除节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "signed", "authKey": "test-node-auth-key-0123456789-abcd"}, "portStart": 28000, "portEnd": 28999,
 	}, true)
 	var node store.Node
 	if nodeResponse.Code != http.StatusCreated || json.Unmarshal(nodeResponse.Body.Bytes(), &node) != nil {
@@ -1267,7 +1361,7 @@ func TestProjectDeletionBlocksDependenciesAndNodeFailure(t *testing.T) {
 	control := &fakeNodeControl{}
 	handler := New(Dependencies{Store: db, Nodes: control, NodeCredentials: vault, Discovery: fakeDiscoveryControl{}, APIToken: "test-token", Mode: "pro", Version: "test"})
 	nodeResponse := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
-		"name": "删除依赖节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "session", "username": "admin", "password": "node-password"}, "portStart": 29000, "portEnd": 29999,
+		"name": "删除依赖节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "signed", "authKey": "test-node-auth-key-0123456789-abcd"}, "portStart": 29000, "portEnd": 29999,
 	}, true)
 	var node store.Node
 	if nodeResponse.Code != http.StatusCreated || json.Unmarshal(nodeResponse.Body.Bytes(), &node) != nil {
@@ -1356,6 +1450,65 @@ func TestBrowserLoginSessionAndCSRF(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedUserCanChangeOwnPassword(t *testing.T) {
+	handler := testServer(t)
+	created := request(t, handler, http.MethodPost, "/api/v1/users", map[string]any{
+		"username": "self-password-user", "displayName": "自助改密用户", "password": "temporary password value", "role": "operator", "enabled": true, "projectIds": []string{},
+	}, true)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create user = %d: %s", created.Code, created.Body.String())
+	}
+	login := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "self-password-user", "password": "temporary password value"}, false)
+	login = completeTestMFA(t, handler, login)
+	if login.Code != http.StatusOK {
+		t.Fatalf("complete enrollment = %d: %s", login.Code, login.Body.String())
+	}
+	var session struct {
+		CSRFToken string `json:"csrfToken"`
+	}
+	if err := json.Unmarshal(login.Body.Bytes(), &session); err != nil || session.CSRFToken == "" {
+		t.Fatalf("login session = %s, err = %v", login.Body.String(), err)
+	}
+	oldCookie := login.Result().Cookies()[0]
+	change := func(currentPassword, newPassword string) *httptest.ResponseRecorder {
+		payload, _ := json.Marshal(map[string]string{"currentPassword": currentPassword, "newPassword": newPassword})
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", bytes.NewReader(payload))
+		req.AddCookie(oldCookie)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-CSRF-Token", session.CSRFToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	if wrong := change("incorrect current password", "an even newer secure password"); wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong current password = %d: %s", wrong.Code, wrong.Body.String())
+	}
+	changed := change("a new permanent password", "an even newer secure password")
+	if changed.Code != http.StatusOK || len(changed.Result().Cookies()) != 2 {
+		t.Fatalf("change password = %d: %s", changed.Code, changed.Body.String())
+	}
+	oldSessionRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	oldSessionRequest.AddCookie(oldCookie)
+	oldSessionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(oldSessionResponse, oldSessionRequest)
+	if oldSessionResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("old session remained active = %d: %s", oldSessionResponse.Code, oldSessionResponse.Body.String())
+	}
+	newSessionRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	newSessionRequest.AddCookie(changed.Result().Cookies()[0])
+	newSessionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(newSessionResponse, newSessionRequest)
+	if newSessionResponse.Code != http.StatusOK {
+		t.Fatalf("rotated session = %d: %s", newSessionResponse.Code, newSessionResponse.Body.String())
+	}
+	if oldLogin := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "self-password-user", "password": "a new permanent password"}, false); oldLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("old password remained valid = %d: %s", oldLogin.Code, oldLogin.Body.String())
+	}
+	if newLogin := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "self-password-user", "password": "an even newer secure password"}, false); newLogin.Code != http.StatusAccepted {
+		t.Fatalf("new password login = %d: %s", newLogin.Code, newLogin.Body.String())
+	}
+}
+
 func TestEmailMFARecoveryAndAdministrativeReset(t *testing.T) {
 	handler := testServer(t)
 	created := request(t, handler, http.MethodPost, "/api/v1/users", map[string]any{
@@ -1434,7 +1587,7 @@ type APITestChallenge struct {
 func TestAdministrativeNodeStateAndPasswordReset(t *testing.T) {
 	handler := testServer(t)
 	nodeResponse := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
-		"name": "维护状态节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "session", "username": "admin", "password": "node-password"}, "portStart": 30000, "portEnd": 30999,
+		"name": "维护状态节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "signed", "authKey": "test-node-auth-key-0123456789-abcd"}, "portStart": 30000, "portEnd": 30999,
 	}, true)
 	var node store.Node
 	if nodeResponse.Code != http.StatusCreated || json.Unmarshal(nodeResponse.Body.Bytes(), &node) != nil {
@@ -1472,7 +1625,7 @@ func TestAdministrativeNodeStateAndPasswordReset(t *testing.T) {
 func TestTemporaryPolicyScopeAndRouteBoundaries(t *testing.T) {
 	handler := testServer(t)
 	nodeResponse := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
-		"name": "策略节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "session", "username": "admin", "password": "node-password"}, "portStart": 26000, "portEnd": 26999,
+		"name": "策略节点", "apiUrl": "https://node.test:6443", "tlsServerName": "node.test", "credential": map[string]any{"type": "signed", "authKey": "test-node-auth-key-0123456789-abcd"}, "portStart": 26000, "portEnd": 26999,
 	}, true)
 	var node store.Node
 	if nodeResponse.Code != http.StatusCreated || json.Unmarshal(nodeResponse.Body.Bytes(), &node) != nil {
@@ -1487,14 +1640,14 @@ func TestTemporaryPolicyScopeAndRouteBoundaries(t *testing.T) {
 	}
 	project = configureProjectNetworks(t, handler, project, "10.30.0.0/16")
 	deviceResponse := request(t, handler, http.MethodPost, "/api/v1/projects/"+project.ID+"/devices", map[string]any{
-		"host": "10.30.0.1", "name": "授权设备", "deviceType": "network", "source": "manual", "endpoints": []map[string]any{{"name": "后台", "protocol": "http", "targetPort": 8080}},
+		"host": "10.30.0.1", "name": "授权设备", "deviceType": "network", "source": "manual", "endpoints": []map[string]any{{"name": "后台", "protocol": "http", "targetPort": 8080}, {"name": "维护终端", "protocol": "ssh", "targetPort": 22}},
 	}, true)
 	var device store.Device
 	if deviceResponse.Code != http.StatusCreated || json.Unmarshal(deviceResponse.Body.Bytes(), &device) != nil {
 		t.Fatalf("create device = %d: %s", deviceResponse.Code, deviceResponse.Body.String())
 	}
 	otherNodeResponse := request(t, handler, http.MethodPost, "/api/v1/nodes", map[string]any{
-		"name": "其他策略节点", "apiUrl": "https://other-node.test:6443", "tlsServerName": "other-node.test", "credential": map[string]any{"type": "session", "username": "admin", "password": "other-node-password"}, "portStart": 27000, "portEnd": 27999,
+		"name": "其他策略节点", "apiUrl": "https://other-node.test:6443", "tlsServerName": "other-node.test", "credential": map[string]any{"type": "signed", "authKey": "other-node-auth-key-0123456789-abcd"}, "portStart": 27000, "portEnd": 27999,
 	}, true)
 	var otherNode store.Node
 	if otherNodeResponse.Code != http.StatusCreated || json.Unmarshal(otherNodeResponse.Body.Bytes(), &otherNode) != nil {
@@ -1562,6 +1715,8 @@ func TestTemporaryPolicyScopeAndRouteBoundaries(t *testing.T) {
 	}
 	if response := getAsTemporary("/api/v1/projects/" + project.ID + "/devices"); response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(device.ID)) {
 		t.Fatalf("temporary devices = %d: %s", response.Code, response.Body.String())
+	} else if bytes.Contains(response.Body.Bytes(), []byte("10.30.0.1")) || bytes.Contains(response.Body.Bytes(), []byte(`"targetPort":8080`)) || bytes.Contains(response.Body.Bytes(), []byte(`"protocol":"ssh"`)) {
+		t.Fatalf("temporary device response disclosed internal or unauthorized endpoint metadata: %s", response.Body.String())
 	}
 	if response := getAsTemporary("/api/v1/projects/" + otherProject.ID + "/devices"); response.Code != http.StatusForbidden {
 		t.Fatalf("temporary user crossed project boundary: %d: %s", response.Code, response.Body.String())
@@ -1581,6 +1736,15 @@ func TestTemporaryPolicyScopeAndRouteBoundaries(t *testing.T) {
 	handler.ServeHTTP(sessionResponse, sessionRequest)
 	if sessionResponse.Code != http.StatusCreated {
 		t.Fatalf("temporary web session = %d: %s", sessionResponse.Code, sessionResponse.Body.String())
+	}
+	launchForm := url.Values{"endpointId": {device.Endpoints[0].ID}, "csrfToken": {loginBody.CSRFToken}}
+	launchRequest := httptest.NewRequest(http.MethodPost, "/api/v1/access-sessions/launch", strings.NewReader(launchForm.Encode()))
+	launchRequest.AddCookie(authCookie)
+	launchRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	launchResponse := httptest.NewRecorder()
+	handler.ServeHTTP(launchResponse, launchRequest)
+	if launchResponse.Code != http.StatusOK {
+		t.Fatalf("temporary web launch = %d: %s", launchResponse.Code, launchResponse.Body.String())
 	}
 	otherPayload, _ := json.Marshal(map[string]any{"endpointId": otherDevice.Endpoints[0].ID, "mode": "web"})
 	otherSessionRequest := httptest.NewRequest(http.MethodPost, "/api/v1/access-sessions", bytes.NewReader(otherPayload))
