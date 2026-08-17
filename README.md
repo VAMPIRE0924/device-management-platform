@@ -1,70 +1,102 @@
 # Device Management Platform（设备管理平台）
 
-面向客户内网设备的远程管理平台。系统接入重构版 NPS 节点，项目绑定既有 Client，并通过同 ID 的 SOCKS隧道完成设备发现、Web 服务访问和 WebSSH 运维。
+[![Release](https://img.shields.io/github/v/release/VAMPIRE0924/device-management-platform?display_name=tag)](https://github.com/VAMPIRE0924/device-management-platform/releases/latest)
+[![Verify](https://github.com/VAMPIRE0924/device-management-platform/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/VAMPIRE0924/device-management-platform/actions/workflows/verify.yml)
+[![Docker Image](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/vampirerune/device-management-platform)
 
-[Docker Hub](https://hub.docker.com/r/vampirerune/device-management-platform)
+面向客户内网设备的远程管理平台。本项目基于重构版 [NPS](https://github.com/VAMPIRE0924/NPS)，通过其 HTTPS/HMAC-SHA256 管理 API 接入既有 Client 和 SOCKS隧道，提供设备发现、隔离 Web 访问、WebSocket、WebSSH、权限控制与访问审计。
 
-## 主要功能
+- 当前正式版本：[`v2.0.0`](https://github.com/VAMPIRE0924/device-management-platform/releases/tag/v2.0.0)
+- Docker 镜像：[`vampirerune/device-management-platform`](https://hub.docker.com/r/vampirerune/device-management-platform)
+- 更新记录：[`CHANGELOG.md`](https://github.com/VAMPIRE0924/device-management-platform/blob/main/CHANGELOG.md)
 
-- 管理 NPS 接入节点，节点认证信息加密保存。
-- 查看和新增 NPS Client；项目只绑定既有 Client，不代替 NPS 管理 Client 生命周期。
-- 创建远程访问会话时启动项目 SOCKS隧道，Web/WebSocket/WebSSH 的真实流量续期；平台与 NPS 均按最长 30 分钟无流量回收，不在拨号失败后自动复活旧隧道。
-- 按项目配置多个扫描网段与端口，发现 HTTP、HTTPS、SSH 等内网服务。
+## v2.0 主要能力
+
+- 使用 HTTPS、TLS 主机名校验和 HMAC-SHA256 请求签名连接新版 NPS API。
+- 管理 NPS 接入节点与既有 Client；项目绑定 Client，不代替 NPS 管理 Client 生命周期。
+- 统一展示 SOCKS隧道运行状态、流量活跃状态、空闲剩余时长、预计关闭时间与累计流量。
+- SOCKS 空闲倒计时由浏览器本地逐秒更新，仅在进入页面或手动刷新时同步节点，不持续轮询 NPS。
+- 按项目配置扫描网段与端口，发现 HTTP、HTTPS、SSH 等内网服务。
 - 每台设备可配置多个 Web 服务，HTTPS 参数按服务独立保存。
-- 每个 Web 访问会话使用独立的短随机子域名，支持独立反代证书、可选独立端口、原生 Cookie、重定向、动态接口和 WebSocket；面板域名不承载 Web 反代。
-- WebSSH 支持保存的密码或本地密钥，也支持单次临时凭据。
-- 提供用户权限、访问策略、运行监控、操作审计、MFA、备份和恢复。
+- 每个 Web 会话使用独立随机子域名，支持原生 Cookie、重定向、动态接口、WebSocket 和独立证书。
+- WebSSH 支持已保存凭据、本地密钥和单次临时凭据。
+- 提供系统管理员、项目管理员、运维用户和临时用户四级权限，以及访问策略、MFA、运行监控、操作审计、备份与恢复。
+- 登录用户可自助修改密码；敏感信息按最小权限返回，节点和 SSH 凭据加密保存。
 
-## Docker 快速部署
+## 与重构版 NPS 的关系
 
-要求 Docker Engine 24+ 与 Docker Compose v2。
+[VAMPIRE0924/NPS](https://github.com/VAMPIRE0924/NPS) 提供内网穿透节点、Client 和隧道运行能力；设备管理平台在其上提供项目、设备、用户、授权会话与审计等管理层能力。
+
+- 本仓库不内置、不复制也不修改 NPS 服务端，需要单独部署兼容的重构版 NPS 节点。
+- 对接以 NPS 仓库 `main` 分支的 [`API.md`](https://github.com/VAMPIRE0924/NPS/blob/main/API.md) 和 [`API_SIGNING_EXAMPLES.md`](https://github.com/VAMPIRE0924/NPS/blob/main/API_SIGNING_EXAMPLES.md) 为准。
+- 平台只绑定和管理授权范围内的既有 Client、SOCKS隧道及端口转发，不接管 NPS 的完整生命周期。
+- NPS API 密钥只在服务端加密保存；浏览器不会收到节点密钥、签名材料或原始敏感响应。
+- 正式环境应固定并记录经过联调的 NPS 与设备管理平台版本，升级任一侧前先核对 API 合约并完成测试环境验收。
+
+## 快速部署
+
+要求 Docker Engine 24+ 与 Docker Compose v2。生产环境建议固定完整版本号：
 
 ```bash
 git clone https://github.com/VAMPIRE0924/device-management-platform.git
 cd device-management-platform
 
+export DMP_IMAGE=vampirerune/device-management-platform:v2.0.0
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
 
-Compose 不设置宿主机 `ports` 映射。容器默认监听 HTTP 80；在系统设置中配置证书后，同时监听 HTTPS 443。请为容器网络配置可达路由，然后直接访问容器 IP。大多数设置保存后立即生效；监听端口、证书或运行组件发生变化时，页面会显示“重载面板”按钮，由平台自行平滑重载，无需手工重启 Docker。
+容器变为 `healthy` 后访问 `http://<容器IP>/`，首次打开页面时创建系统管理员。平台会自动生成内部 API 令牌、SQLite 数据库和凭据加密主密钥，不需要手工设置初始化令牌。
 
-正式部署应配置面板域名和对应泛域名，例如：
+Compose 默认不映射宿主机端口：容器监听 HTTP 80，配置证书后同时监听 HTTPS 443。部署环境应为容器网络配置可达路由；确实无法直达容器 IP 时，再自行增加端口映射。
+
+## 域名与远程访问
+
+正式环境需要分别配置面板域名与 Web 反代泛域名，例如：
 
 - 面板：`dmp.example.com`
 - Web 反代：`*.console.example.com`
 
-首次打开面板时直接创建系统管理员，无需部署令牌。平台内部 API 令牌由容器自动生成并持久化到 `/data/api.token`。
+两者形成严格的 Host 隔离边界。面板域名不承载目标设备页面，只有平台为有效访问会话分配的随机反代子域名才能进入 Web 网关。外部反向代理必须保留原始 `Host`、`X-Forwarded-Proto` 和 WebSocket Upgrade 请求头。
 
-## 镜像
+创建访问会话时，平台按需启动对应 SOCKS隧道。Web、WebSocket 与 WebSSH 的真实流量会更新活动时间；平台和 NPS 均按最长 30 分钟无流量回收。拨号失败或会话过期后不会擅自恢复旧授权。
+
+## 镜像与版本
+
+| Docker 标签 | 用途 | 建议 |
+|---|---|---|
+| `v2.0.0` | 当前固定正式版本 | 生产环境推荐 |
+| `main` | 最新正式版本的滚动标签 | 接受人工拉取时跟随 |
+| `dev` | `dev` 分支的开发测试镜像 | 不得连接生产数据目录 |
+
+正式镜像包含 `linux/amd64` 与 `linux/arm64`。项目不发布 `latest` 标签，避免部署端在未明确选择渠道时自动跨版本升级。
 
 ```bash
-# 跟随最新正式版本
-docker pull vampirerune/device-management-platform:main
-
-# 固定部署当前正式版本
 docker pull vampirerune/device-management-platform:v2.0.0
+docker buildx imagetools inspect vampirerune/device-management-platform:v2.0.0
 ```
 
-已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，仅在接受自动跟随最新正式版时使用 `main`。
+## 数据、安全与备份
 
-镜像标签：
+- `/data` 持久化 SQLite 数据库、内部 API 令牌、凭据主密钥和网页覆盖配置；只允许单实例写入同一数据目录。
+- NPS API 密钥、节点与 SSH 密码、SMTP 密码、MFA 密钥、TLS 私钥和 SSH 私钥不会提交到 Git。
+- 节点和 SSH 凭据写入数据库前使用数据目录中的独立主密钥加密。
+- 数据库、凭据主密钥、配置和外部 Secret 必须按同一批次备份与恢复。
+- 正式环境必须启用 HTTPS、安全 Cookie，并把可信反向代理限制为明确的地址或网段。
+- 登录会话默认闲置 15 分钟退出、最长 12 小时；具体策略可在系统设置中调整。
+- 升级前先从系统设置下载一致性数据库备份，并备份完整 `/data` 与外部证书、密钥。
 
-- `v2.0.0`：当前正式版本；
-- `main`：最新正式版本的滚动标签；
-- `dev`：开发测试镜像，不用于生产环境。
+升级固定版本时修改 `DMP_IMAGE` 后重新创建容器：
 
-## 数据与安全
+```bash
+export DMP_IMAGE=vampirerune/device-management-platform:v2.0.0
+docker compose pull
+docker compose up -d
+docker compose ps
+```
 
-- `/data` 使用 Docker volume 持久化；SQLite 只允许单实例写入。
-- 内部 API 令牌、节点凭据、SMTP 密码、证书私钥和 SSH 私钥不会提交到 Git。
-- 节点和 SSH 密码写入数据库前使用数据目录中的独立主密钥加密。
-- 数据库、主密钥、配置与外部 Secret 必须按同一批次备份和恢复。
-- 正式环境必须启用 HTTPS、安全 Cookie，并正确限制可信反向代理来源。
-- 登录会话默认闲置 15 分钟退出，最长 12 小时；可在系统设置中调整。
-
-## 从源码构建
+## 从源码构建与验证
 
 ```bash
 docker build \
@@ -73,5 +105,18 @@ docker build \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -t device-management-platform:v2.0.0 .
 ```
+
+开发环境使用 Go 1.26.6、Node.js 22 和 Docker。完整检查入口：
+
+```bash
+cd frontend && npm ci && cd ..
+./scripts/verify.sh
+./scripts/acceptance-local.sh
+./scripts/acceptance-container.sh
+```
+
+验证包含 Go race 测试、静态检查、依赖漏洞检查、前端类型与 ESLint、渲染契约、单二进制构建、本地/容器黑盒、备份恢复和容器漏洞扫描。
+
+## 许可
 
 仓库未声明开源许可证。未经许可，不授予复制、修改或再分发权利。
