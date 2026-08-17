@@ -4,7 +4,7 @@
 [![Verify](https://github.com/VAMPIRE0924/device-management-platform/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/VAMPIRE0924/device-management-platform/actions/workflows/verify.yml)
 [![Docker Image](https://img.shields.io/badge/docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/vampirerune/device-management-platform)
 
-面向客户内网设备的远程管理平台。平台通过重构版 NPS 的 HMAC-SHA256 管理 API 接入既有 Client 和 SOCKS隧道，提供设备发现、隔离 Web 访问、WebSocket、WebSSH、权限控制与访问审计。
+面向客户内网设备的远程管理平台。本项目基于重构版 [NPS](https://github.com/VAMPIRE0924/NPS)，通过其 HTTPS/HMAC-SHA256 管理 API 接入既有 Client 和 SOCKS隧道，提供设备发现、隔离 Web 访问、WebSocket、WebSSH、权限控制与访问审计。
 
 - 当前正式版本：[`v2.0.0`](https://github.com/VAMPIRE0924/device-management-platform/releases/tag/v2.0.0)
 - Docker 镜像：[`vampirerune/device-management-platform`](https://hub.docker.com/r/vampirerune/device-management-platform)
@@ -22,6 +22,16 @@
 - WebSSH 支持已保存凭据、本地密钥和单次临时凭据。
 - 提供系统管理员、项目管理员、运维用户和临时用户四级权限，以及访问策略、MFA、运行监控、操作审计、备份与恢复。
 - 登录用户可自助修改密码；敏感信息按最小权限返回，节点和 SSH 凭据加密保存。
+
+## 与重构版 NPS 的关系
+
+[VAMPIRE0924/NPS](https://github.com/VAMPIRE0924/NPS) 提供内网穿透节点、Client 和隧道运行能力；设备管理平台在其上提供项目、设备、用户、授权会话与审计等管理层能力。
+
+- 本仓库不内置、不复制也不修改 NPS 服务端，需要单独部署兼容的重构版 NPS 节点。
+- 对接以 NPS 仓库 `main` 分支的 [`API.md`](https://github.com/VAMPIRE0924/NPS/blob/main/API.md) 和 [`API_SIGNING_EXAMPLES.md`](https://github.com/VAMPIRE0924/NPS/blob/main/API_SIGNING_EXAMPLES.md) 为准。
+- 平台只绑定和管理授权范围内的既有 Client、SOCKS隧道及端口转发，不接管 NPS 的完整生命周期。
+- NPS API 密钥只在服务端加密保存；浏览器不会收到节点密钥、签名材料或原始敏感响应。
+- 正式环境应固定并记录经过联调的 NPS 与设备管理平台版本，升级任一侧前先核对 API 合约并完成测试环境验收。
 
 ## 快速部署
 
