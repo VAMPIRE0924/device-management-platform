@@ -329,17 +329,18 @@ type MFAChallenge struct {
 }
 
 type CompleteMFAInput struct {
-	ChallengeID string
-	Method      string
-	Counter     int64
-	CodeHash    string
-	TokenHash   string
-	CSRFHash    string
-	ExpiresAt   time.Time
-	Recovery    []string
-	Email       string
-	MethodBound string
-	Audit       AuditInput
+	ChallengeID  string
+	PasswordHash string
+	Method       string
+	Counter      int64
+	CodeHash     string
+	TokenHash    string
+	CSRFHash     string
+	ExpiresAt    time.Time
+	Recovery     []string
+	Email        string
+	MethodBound  string
+	Audit        AuditInput
 }
 
 type AccessPolicy struct {

@@ -25,3 +25,17 @@ func TestLoginLimiterBlocksAndResets(t *testing.T) {
 		t.Fatal("window did not expire")
 	}
 }
+
+func TestLoginLimiterBoundsDistinctKeys(t *testing.T) {
+	limiter := NewLoginLimiter(2, time.Minute, 3)
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	for index, key := range []string{"one", "two", "three", "four"} {
+		limiter.Failure(key, now.Add(time.Duration(index)*time.Second))
+	}
+	if len(limiter.attempts) != 3 {
+		t.Fatalf("attempt keys = %d, want 3", len(limiter.attempts))
+	}
+	if _, exists := limiter.attempts["one"]; exists {
+		t.Fatal("oldest limiter key was not evicted")
+	}
+}

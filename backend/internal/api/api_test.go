@@ -310,6 +310,93 @@ func TestHealthAndAuthentication(t *testing.T) {
 	}
 }
 
+func TestDevelopmentModeDoesNotGrantImplicitAdministrator(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Dependencies{Store: db, Nodes: &fakeNodeControl{}, Mode: "dev", Version: "test"})
+	response := request(t, handler, http.MethodGet, "/api/v1/nodes", nil, false)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("implicit development authentication status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPasswordChangeRequiredWithoutMFA(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Dependencies{Store: db, Nodes: &fakeNodeControl{}, APIToken: "test-token", Mode: "pro", Version: "test", MFAEnabled: false})
+	created := request(t, handler, http.MethodPost, "/api/v1/users", map[string]any{
+		"username": "password-only-user", "displayName": "仅改密用户", "password": "temporary password value", "role": "operator", "enabled": true,
+	}, true)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create user = %d: %s", created.Code, created.Body.String())
+	}
+	login := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "password-only-user", "password": "temporary password value"}, false)
+	var challenge struct {
+		Next           string   `json:"next"`
+		ChallengeToken string   `json:"challengeToken"`
+		Steps          []string `json:"steps"`
+	}
+	if login.Code != http.StatusAccepted || json.Unmarshal(login.Body.Bytes(), &challenge) != nil || challenge.Next != "onboard" || len(challenge.Steps) != 1 || challenge.Steps[0] != "password" {
+		t.Fatalf("password challenge = %d: %s", login.Code, login.Body.String())
+	}
+	completed := request(t, handler, http.MethodPost, "/api/v1/auth/onboarding/password", map[string]any{"challengeToken": challenge.ChallengeToken, "newPassword": "permanent password value"}, false)
+	if completed.Code != http.StatusOK || !bytes.Contains(completed.Body.Bytes(), []byte(`"passwordChangeRequired":false`)) || len(completed.Result().Cookies()) != 2 {
+		t.Fatalf("password completion = %d: %s", completed.Code, completed.Body.String())
+	}
+	if completed.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("password completion cache policy = %q", completed.Header().Get("Cache-Control"))
+	}
+	if response := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "password-only-user", "password": "temporary password value"}, false); response.Code != http.StatusUnauthorized {
+		t.Fatalf("temporary password remained valid: %d: %s", response.Code, response.Body.String())
+	}
+	if response := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "password-only-user", "password": "permanent password value"}, false); response.Code != http.StatusOK {
+		t.Fatalf("permanent password login = %d: %s", response.Code, response.Body.String())
+	}
+	if response := request(t, handler, http.MethodPost, "/api/v1/auth/onboarding/password", map[string]any{"challengeToken": challenge.ChallengeToken, "newPassword": "another permanent password"}, false); response.Code != http.StatusGone {
+		t.Fatalf("consumed challenge reuse = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRequestIDValidationAndCSVFormulaNeutralization(t *testing.T) {
+	handler := testServer(t)
+	valid := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+	valid.Header.Set("X-Request-ID", "trace_123:child-1")
+	validResponse := httptest.NewRecorder()
+	handler.ServeHTTP(validResponse, valid)
+	if got := validResponse.Header().Get("X-Request-ID"); got != "trace_123:child-1" {
+		t.Fatalf("valid request id = %q", got)
+	}
+	invalid := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+	invalid.Header.Set("X-Request-ID", "=FORMULA("+strings.Repeat("x", 256))
+	invalidResponse := httptest.NewRecorder()
+	handler.ServeHTTP(invalidResponse, invalid)
+	if got := invalidResponse.Header().Get("X-Request-ID"); got == invalid.Header.Get("X-Request-ID") || !validRequestID(got) {
+		t.Fatalf("invalid request id was reflected or replacement invalid: %q", got)
+	}
+	for _, input := range []string{"=1+1", " +cmd", "-2", "@SUM(A1)", "\tformula", "\rformula"} {
+		if got := safeCSVCell(input); !strings.HasPrefix(got, "'") {
+			t.Errorf("unsafe CSV cell %q was not neutralized: %q", input, got)
+		}
+	}
+	if got := safeCSVCell("normal value"); got != "normal value" {
+		t.Fatalf("normal CSV cell changed: %q", got)
+	}
+}
+
 func TestAuthSessionIdleTimeoutRevokesSession(t *testing.T) {
 	handler, db, token, sessionID := idleSessionTestServer(t, 15*time.Minute)
 	if err := db.TouchAuthSession(t.Context(), sessionID, time.Now().UTC().Add(-16*time.Minute)); err != nil {

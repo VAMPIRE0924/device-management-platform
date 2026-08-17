@@ -65,6 +65,7 @@ func TestProductionGeneratesAndPersistsAPIToken(t *testing.T) {
 }
 
 func TestRejectsInvalidTrustedProxyCIDR(t *testing.T) {
+	t.Setenv("DMP_DATA_DIR", t.TempDir())
 	t.Setenv("DMP_TRUSTED_PROXY_CIDRS", "10.0.0.0/24,not-a-cidr")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected invalid trusted proxy CIDR error")
@@ -81,6 +82,9 @@ func TestDefaultListenerPorts(t *testing.T) {
 	}
 	if cfg.ListenAddress != "0.0.0.0:80" || cfg.HTTPSListenAddress != "0.0.0.0:443" {
 		t.Fatalf("default listeners = %q and %q", cfg.ListenAddress, cfg.HTTPSListenAddress)
+	}
+	if cfg.Mode != "pro" || len(cfg.APIToken) != 64 {
+		t.Fatalf("default security mode = %q, token length = %d", cfg.Mode, len(cfg.APIToken))
 	}
 }
 
@@ -218,7 +222,9 @@ smtp_from = 设备管理平台 <notifier@example.test>
 }
 
 func TestMFARequiresSMTPBecauseOnboardingBindsEmail(t *testing.T) {
-	t.Setenv("DMP_CONFIG_FILE", filepath.Join(t.TempDir(), "missing.conf"))
+	dir := t.TempDir()
+	t.Setenv("DMP_CONFIG_FILE", filepath.Join(dir, "missing.conf"))
+	t.Setenv("DMP_DATA_DIR", dir)
 	t.Setenv("DMP_MFA_ENABLED", "true")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected MFA configuration without SMTP to be rejected")
