@@ -646,7 +646,15 @@ function FloatingMenu({
       const spaceAbove = rect.top - gap - viewportPadding;
       const openUp = spaceBelow < 236 && spaceAbove > spaceBelow;
       const available = Math.max(40, openUp ? spaceAbove : spaceBelow);
-      const width = Math.min(rect.width, window.innerWidth - viewportPadding * 2);
+      const configuredMinWidth = Number.parseFloat(
+        window
+          .getComputedStyle(anchor)
+          .getPropertyValue("--floating-menu-min-width"),
+      );
+      const width = Math.min(
+        Math.max(rect.width, configuredMinWidth || 0),
+        window.innerWidth - viewportPadding * 2,
+      );
       const left = Math.min(
         Math.max(viewportPadding, rect.left),
         Math.max(viewportPadding, window.innerWidth - width - viewportPadding),
