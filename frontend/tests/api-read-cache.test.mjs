@@ -33,6 +33,8 @@ test("deduplicates, reload-caches, refreshes and invalidates GET queries", async
       ? { items: [{ id: "node-1" }] }
       : path === "/api/v1/projects"
         ? { items: [{ id: "project-1" }] }
+        : path === "/api/v1/users"
+          ? { items: [{ id: "user-1", username: "sensitive-user" }] }
         : path.includes("/managed-tunnels")
           ? { items: [{ id: callNumber, clientId: 1 }] }
           : path.includes("/credentials")
@@ -53,6 +55,13 @@ test("deduplicates, reload-caches, refreshes and invalidates GET queries", async
     const reloaded = await import(`${apiURL.href}?cache-runtime-reload`);
     await reloaded.api.nodes();
     assert.equal(calls.get("GET /api/v1/nodes"), 1, "a short reload must reuse session cache");
+
+    await first.api.users();
+    await first.api.users();
+    assert.equal(calls.get("GET /api/v1/users"), 1, "same-page sensitive reads may use memory cache");
+    assert.equal([...entries.keys()].some((key) => key.endsWith("/api/v1/users")), false, "sensitive reads must not enter session storage");
+    await reloaded.api.users();
+    assert.equal(calls.get("GET /api/v1/users"), 2, "a reload must synchronize sensitive reads again");
 
     const nodeCacheKey = [...entries.keys()].find((key) => key.endsWith("/api/v1/nodes"));
     const expiredNodeCache = JSON.parse(entries.get(nodeCacheKey));

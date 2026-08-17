@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/access"
 	"github.com/VAMPIRE0924/device-management-platform/backend/internal/auth"
@@ -88,6 +89,7 @@ type storage interface {
 	CreateMFAChallenge(context.Context, string, string, string, string, string, time.Time) (store.MFAChallenge, error)
 	SetMFAChallengeMethod(context.Context, string, string, string, string, time.Time) error
 	SetOnboardingPassword(context.Context, string, string) error
+	CompletePasswordChange(context.Context, store.CompleteMFAInput) (store.AuthSession, error)
 	SetOnboardingEmailDelivery(context.Context, string, string, string, time.Time) error
 	VerifyOnboardingEmail(context.Context, string, string) error
 	ClearMFAEmailDelivery(context.Context, string, string) error
@@ -186,6 +188,7 @@ type server struct {
 	version            string
 	trustedProxyCIDRs  []netip.Prefix
 	loginLimiter       *auth.LoginLimiter
+	loginIPLimiter     *auth.LoginLimiter
 	mfa                *auth.MFA
 	mfaEnabled         bool
 	mfaMethods         []string
@@ -221,7 +224,7 @@ type apiError struct {
 }
 
 func New(deps Dependencies) http.Handler {
-	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, panelDomain: normalizeConfiguredDomain(deps.PanelDomain), accessDomain: normalizeConfiguredDomain(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, authSessionTTL: deps.AuthSessionTTL, authSessionIdleTTL: deps.AuthSessionIdleTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials, restart: deps.Restart}
+	s := &server{store: deps.Store, nodes: deps.Nodes, discovery: deps.Discovery, sshGateway: deps.SSHGateway, ui: deps.UI, apiToken: deps.APIToken, panelDomain: normalizeConfiguredDomain(deps.PanelDomain), accessDomain: normalizeConfiguredDomain(deps.AccessDomain), accessScheme: deps.AccessScheme, httpPort: deps.HTTPPort, httpsPort: deps.HTTPSPort, accessHTTPPort: deps.AccessHTTPPort, accessHTTPSPort: deps.AccessHTTPSPort, mode: deps.Mode, version: deps.Version, loginLimiter: auth.NewLoginLimiter(5, 10*time.Minute), loginIPLimiter: auth.NewLoginLimiter(30, 10*time.Minute), mfa: deps.MFA, mfaEnabled: deps.MFAEnabled, mfaMethods: deps.MFAMethods, emailSender: deps.EmailSender, emailCodeTTL: deps.EmailCodeTTL, authSessionTTL: deps.AuthSessionTTL, authSessionIdleTTL: deps.AuthSessionIdleTTL, tlsConfigured: deps.TLSConfigured, settings: deps.Settings, nodeCredentials: deps.NodeCredentials, restart: deps.Restart}
 	if s.emailCodeTTL == 0 {
 		s.emailCodeTTL = 10 * time.Minute
 	}
@@ -2338,10 +2341,18 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	limiterKey := requestSourceIP(r) + "\x00" + strings.ToLower(input.Username)
-	if blocked, retry := s.loginLimiter.Blocked(limiterKey, now); blocked {
+	sourceIP := requestSourceIP(r)
+	limiterKey := sourceIP + "\x00" + strings.ToLower(input.Username)
+	if blocked, retry := s.loginIPLimiter.Blocked(sourceIP, now); blocked {
+		// Failed attempts before the threshold are already audited. Do not append
+		// another database row for every rejected flood request.
 		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Round(time.Second).Seconds())))
-		s.auditLogin(r, input.Username, "rate_limited")
+		writeError(w, r, http.StatusTooManyRequests, "login_rate_limited", "登录失败次数过多，请稍后重试", nil)
+		return
+	}
+	if blocked, retry := s.loginLimiter.Blocked(limiterKey, now); blocked {
+		s.loginIPLimiter.Failure(sourceIP, now)
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Round(time.Second).Seconds())))
 		writeError(w, r, http.StatusTooManyRequests, "login_rate_limited", "登录失败次数过多，请稍后重试", nil)
 		return
 	}
@@ -2349,6 +2360,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrNotFound) {
 		auth.VerifyDummy(input.Password)
 		s.loginLimiter.Failure(limiterKey, now)
+		s.loginIPLimiter.Failure(sourceIP, now)
 		s.auditLogin(r, input.Username, "failed")
 		writeError(w, r, http.StatusUnauthorized, "login_failed", "用户名或密码错误", nil)
 		return
@@ -2359,18 +2371,19 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if !credential.Enabled || !auth.VerifyPassword(credential.PasswordHash, input.Password) {
 		s.loginLimiter.Failure(limiterKey, now)
+		s.loginIPLimiter.Failure(sourceIP, now)
 		s.auditLogin(r, input.Username, "failed")
 		writeError(w, r, http.StatusUnauthorized, "login_failed", "用户名或密码错误", nil)
 		return
 	}
-	if !s.mfaEnabled {
+	if !s.mfaEnabled && !credential.PasswordChangeRequired {
 		s.loginLimiter.Success(limiterKey)
 		if err := s.createPasswordSession(w, r, credential); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法创建登录会话", nil)
 		}
 		return
 	}
-	if s.mfa == nil {
+	if s.mfaEnabled && s.mfa == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "mfa_unavailable", "双重认证服务尚未配置", nil)
 		return
 	}
@@ -2381,7 +2394,12 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	purpose := "verify"
 	response := map[string]any{"next": "verify", "challengeToken": challengeToken}
-	if credential.PasswordChangeRequired || credential.Email == "" || !credential.MFAEnabled {
+	if !s.mfaEnabled {
+		purpose = "password"
+		response["next"] = "onboard"
+		response["methods"] = []string{}
+		response["steps"] = []string{"password"}
+	} else if credential.PasswordChangeRequired || credential.Email == "" || !credential.MFAEnabled {
 		purpose = "onboard"
 		response["next"] = "onboard"
 		response["methods"] = s.mfaMethods
@@ -2396,7 +2414,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "challenge_create_failed", "无法创建双重认证挑战", nil)
 		return
 	}
-	if credential.MFAEnabled && credential.MFAPreferredMethod == "totp" {
+	if s.mfaEnabled && credential.MFAEnabled && credential.MFAPreferredMethod == "totp" {
 		if err := s.store.SetMFAChallengeMethod(r.Context(), challenge.ID, "totp", "", "", expiresAt); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "challenge_create_failed", "无法创建双重认证挑战", nil)
 			return
@@ -2404,7 +2422,11 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	response["expiresAt"] = expiresAt
 	s.loginLimiter.Success(limiterKey)
-	s.auditLogin(r, input.Username, "mfa_required")
+	challengeResult := "mfa_required"
+	if purpose == "password" {
+		challengeResult = "password_change_required"
+	}
+	s.auditLogin(r, input.Username, challengeResult)
 	writeJSON(w, http.StatusAccepted, response)
 }
 
@@ -2438,7 +2460,7 @@ func (s *server) setOnboardingPassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	challenge, ok := s.loadOnboardingChallenge(w, r, input.ChallengeToken)
+	challenge, ok := s.loadPasswordChallenge(w, r, input.ChallengeToken)
 	if !ok {
 		return
 	}
@@ -2454,6 +2476,38 @@ func (s *server) setOnboardingPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	if auth.VerifyPassword(credential.PasswordHash, input.NewPassword) {
 		writeError(w, r, http.StatusUnprocessableEntity, "password_unchanged", "新密码不能与当前密码相同", map[string]string{"newPassword": "必须使用不同密码"})
+		return
+	}
+	if challenge.Purpose == "password" {
+		token, err := newOpaqueSecret(32)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成密码修改", nil)
+			return
+		}
+		csrfToken, err := newOpaqueSecret(32)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成密码修改", nil)
+			return
+		}
+		expiresAt := time.Now().UTC().Add(s.authSessionTTL)
+		sessionRecord, err := s.store.CompletePasswordChange(r.Context(), store.CompleteMFAInput{
+			ChallengeID:  challenge.ID,
+			PasswordHash: passwordHash,
+			TokenHash:    digestString(token),
+			CSRFHash:     digestString(csrfToken),
+			ExpiresAt:    expiresAt,
+			Audit:        store.AuditInput{Actor: challenge.User.Username, Action: "auth.password_change", ResourceType: "auth_session", Result: "success", RequestID: requestID(r), SourceIP: requestSourceIP(r)},
+		})
+		if errors.Is(err, store.ErrMFAChallenge) {
+			writeError(w, r, http.StatusGone, "mfa_challenge_expired", "密码修改已失效，请重新登录", nil)
+			return
+		}
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "session_create_failed", "无法完成密码修改", nil)
+			return
+		}
+		s.setAuthCookies(w, r, token, csrfToken, expiresAt)
+		writeJSON(w, http.StatusOK, map[string]any{"user": sessionRecord.User, "csrfToken": csrfToken, "expiresAt": expiresAt})
 		return
 	}
 	if err := s.store.SetOnboardingPassword(r.Context(), challenge.ID, passwordHash); err != nil {
@@ -2620,6 +2674,15 @@ func (s *server) loadOnboardingChallenge(w http.ResponseWriter, r *http.Request,
 	challenge, err := s.store.MFAChallengeByToken(r.Context(), digestString(strings.TrimSpace(token)))
 	if err != nil || challenge.Purpose != "onboard" {
 		writeError(w, r, http.StatusGone, "mfa_challenge_expired", "首次登录引导已失效，请重新登录", nil)
+		return store.MFAChallenge{}, false
+	}
+	return challenge, true
+}
+
+func (s *server) loadPasswordChallenge(w http.ResponseWriter, r *http.Request, token string) (store.MFAChallenge, bool) {
+	challenge, err := s.store.MFAChallengeByToken(r.Context(), digestString(strings.TrimSpace(token)))
+	if err != nil || (challenge.Purpose != "onboard" && challenge.Purpose != "password") {
+		writeError(w, r, http.StatusGone, "mfa_challenge_expired", "密码修改已失效，请重新登录", nil)
 		return store.MFAChallenge{}, false
 	}
 	return challenge, true
@@ -3106,7 +3169,11 @@ func (s *server) exportAuditLogs(w http.ResponseWriter, r *http.Request) {
 	writer := csv.NewWriter(w)
 	_ = writer.Write([]string{"time", "actor", "action", "resource_type", "resource_id", "result", "request_id", "source_ip", "metadata"})
 	for _, item := range items {
-		_ = writer.Write([]string{item.CreatedAt.Format(time.RFC3339), item.Actor, item.Action, item.ResourceType, item.ResourceID, item.Result, item.RequestID, item.SourceIP, item.MetadataJSON})
+		row := []string{item.CreatedAt.Format(time.RFC3339), item.Actor, item.Action, item.ResourceType, item.ResourceID, item.Result, item.RequestID, item.SourceIP, item.MetadataJSON}
+		for index := range row {
+			row[index] = safeCSVCell(row[index])
+		}
+		_ = writer.Write(row)
 	}
 	writer.Flush()
 }
@@ -3185,11 +3252,7 @@ func digestString(value string) string {
 
 func (s *server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.apiToken == "" && s.mode == "dev" {
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, principal{Username: "bootstrap-admin", DisplayName: "Bootstrap Admin", Role: "system_admin", Bootstrap: true})))
-			return
-		}
-		if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
+		if authorization := r.Header.Get("Authorization"); s.apiToken != "" && strings.HasPrefix(authorization, "Bearer ") {
 			provided := strings.TrimPrefix(authorization, "Bearer ")
 			if len(provided) == len(s.apiToken) && subtle.ConstantTimeCompare([]byte(provided), []byte(s.apiToken)) == 1 {
 				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, principal{Username: "bootstrap-admin", DisplayName: "Bootstrap Admin", Role: "system_admin", Bootstrap: true})))
@@ -3319,12 +3382,25 @@ func principalFromRequest(r *http.Request) principal {
 func (s *server) requestContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-		if requestID == "" {
+		if !validRequestID(requestID) {
 			requestID, _ = id.New()
 		}
 		w.Header().Set("X-Request-ID", requestID)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey, requestID)))
 	})
+}
+
+func validRequestID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("._:-", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (s *server) accessDomainRouting(next http.Handler) http.Handler {
@@ -3405,6 +3481,12 @@ func (s *server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+		if sensitiveAPIResponse(r.URL.Path) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Add("Vary", "Cookie")
+			w.Header().Add("Vary", "Authorization")
+		}
 		if !strings.HasPrefix(r.URL.Path, "/access/ssh/") {
 			w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:")
 		}
@@ -3413,6 +3495,40 @@ func (s *server) securityHeaders(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func sensitiveAPIResponse(path string) bool {
+	if strings.Contains(path, "/credentials") {
+		return true
+	}
+	for _, prefix := range []string{
+		"/api/v1/auth/",
+		"/api/v1/users",
+		"/api/v1/access-policies",
+		"/api/v1/access-sessions",
+		"/api/v1/audit-logs",
+		"/api/v1/data/",
+		"/api/v1/settings/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func safeCSVCell(value string) string {
+	if value == "" {
+		return value
+	}
+	trimmed := strings.TrimLeftFunc(value, func(character rune) bool {
+		return character <= ' ' || unicode.IsSpace(character)
+	})
+	dangerousControl := value[0] == '\t' || value[0] == '\r'
+	if dangerousControl || (trimmed != "" && strings.ContainsRune("=+-@", rune(trimmed[0]))) {
+		return "'" + value
+	}
+	return value
 }
 
 func auditFromRequest(r *http.Request, action, resourceType string) store.AuditInput {

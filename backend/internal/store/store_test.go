@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMigrateAndCreateControlPlaneObjects(t *testing.T) {
@@ -52,6 +53,10 @@ func TestMigrateAndCreateControlPlaneObjects(t *testing.T) {
 	}
 	if taskTypeColumns != 1 {
 		t.Fatalf("port_forwards.node_task_type migration count = %d", taskTypeColumns)
+	}
+	var challengeSchema string
+	if err := db.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema WHERE type='table' AND name='mfa_challenges'`).Scan(&challengeSchema); err != nil || !strings.Contains(challengeSchema, "'password'") {
+		t.Fatalf("mfa challenge password purpose schema = %q, err = %v", challengeSchema, err)
 	}
 	for _, column := range []string{"gateway_mode", "gateway_name", "gateway_status", "runtime_type", "runtime_address"} {
 		var count int
@@ -220,6 +225,77 @@ func TestMigrationElevenPreservesAdminForOnboardingAndRevokesOldSession(t *testi
 	var status string
 	if err := db.db.QueryRowContext(ctx, `SELECT status FROM auth_sessions WHERE id='legacy-session'`).Scan(&status); err != nil || status != "revoked" {
 		t.Fatalf("legacy session status = %q, err = %v", status, err)
+	}
+}
+
+func TestMigrationTwentySevenPreservesMFAChallenges(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "migration-v26.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	for index, migration := range migrations[:26] {
+		version := index + 1
+		if version == 13 {
+			var count int
+			if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name='access_type'`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count > 0 {
+				if _, err := db.db.ExecContext(ctx, `ALTER TABLE nodes DROP COLUMN access_type`); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if version == 14 {
+			var count int
+			if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='tunnel_on_demand'`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count > 0 {
+				if _, err := db.db.ExecContext(ctx, `ALTER TABLE projects DROP COLUMN tunnel_on_demand`); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if version == 15 {
+			for _, column := range []string{"gateway_mode", "gateway_name", "gateway_status", "runtime_type", "runtime_address"} {
+				var count int
+				if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name=?`, column).Scan(&count); err != nil {
+					t.Fatal(err)
+				}
+				if count > 0 {
+					if _, err := db.db.ExecContext(ctx, `ALTER TABLE projects DROP COLUMN `+column); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		}
+		if strings.TrimSpace(migration) != "" {
+			if _, err := db.db.ExecContext(ctx, migration); err != nil {
+				t.Fatalf("apply migration %d: %v", index+1, err)
+			}
+		}
+		if _, err := db.db.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)`, version, "2026-08-01T00:00:00Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.db.ExecContext(ctx, `INSERT INTO users(id,username,display_name,password_hash,role,enabled,created_at,updated_at,email,password_change_required) VALUES('migration-user','migration-user','迁移用户','password-hash','operator',1,'2026-08-01T00:00:00Z','2026-08-01T00:00:00Z','',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.ExecContext(ctx, `INSERT INTO mfa_challenges(id,user_id,token_hash,purpose,source_ip,status,expires_at,created_at) VALUES('migration-challenge','migration-user','migration-token','onboard','127.0.0.1','active','2099-01-01T00:00:00Z','2026-08-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var purpose, status string
+	if err := db.db.QueryRowContext(ctx, `SELECT purpose,status FROM mfa_challenges WHERE id='migration-challenge'`).Scan(&purpose, &status); err != nil || purpose != "onboard" || status != "active" {
+		t.Fatalf("preserved challenge purpose=%q status=%q err=%v", purpose, status, err)
+	}
+	if _, err := db.CreateMFAChallenge(ctx, "migration-user", "password-token", "password", "", "127.0.0.1", time.Now().UTC().Add(time.Minute)); err != nil {
+		t.Fatalf("password challenge rejected after migration: %v", err)
 	}
 }
 

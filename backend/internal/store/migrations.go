@@ -1,6 +1,6 @@
 package store
 
-const schemaVersion = 26
+const schemaVersion = 27
 
 var migrations = []string{`
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -344,4 +344,34 @@ WHERE mode = 'web' AND route_label = '' AND status = 'active';
 `, `
 ALTER TABLE port_forwards ADD COLUMN node_task_type TEXT NOT NULL DEFAULT '';
 UPDATE port_forwards SET node_task_type = 'portForward' WHERE node_task_id IS NOT NULL;
+`, `
+ALTER TABLE mfa_challenges RENAME TO mfa_challenges_v26;
+CREATE TABLE mfa_challenges (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  purpose TEXT NOT NULL CHECK (purpose IN ('onboard','verify','password')),
+  method TEXT NOT NULL DEFAULT '' CHECK (method IN ('','totp','email')),
+  secret_ciphertext TEXT NOT NULL DEFAULT '',
+  email TEXT NOT NULL DEFAULT '',
+  email_code_hash TEXT NOT NULL DEFAULT '',
+  email_sent_at TEXT,
+  email_verified INTEGER NOT NULL DEFAULT 0 CHECK (email_verified IN (0,1)),
+  new_password_hash TEXT NOT NULL DEFAULT '',
+  source_ip TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','consumed','revoked')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+INSERT INTO mfa_challenges(
+  id,user_id,token_hash,purpose,method,secret_ciphertext,email,email_code_hash,
+  email_sent_at,email_verified,new_password_hash,source_ip,status,attempts,expires_at,created_at
+)
+SELECT
+  id,user_id,token_hash,purpose,method,secret_ciphertext,email,email_code_hash,
+  email_sent_at,email_verified,new_password_hash,source_ip,status,attempts,expires_at,created_at
+FROM mfa_challenges_v26;
+DROP TABLE mfa_challenges_v26;
+CREATE INDEX idx_mfa_challenges_token ON mfa_challenges(token_hash,status,expires_at);
 `}

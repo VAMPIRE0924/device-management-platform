@@ -18,6 +18,7 @@ const defaultReadCacheTTL = 10_000;
 const freshReadThrottleMs = 2_000;
 const inFlightReads = new Map<string, Promise<unknown>>();
 const inFlightFreshReads = new Map<string, Promise<unknown>>();
+const memoryReadCache = new Map<string, CachedRead>();
 const lastFreshReadAt = new Map<string, number>();
 const readPathGenerations = new Map<string, number>();
 let readCacheGeneration = 0;
@@ -45,6 +46,7 @@ function clearReadCache() {
   inFlightFreshReads.clear();
   lastFreshReadAt.clear();
   readPathGenerations.clear();
+  memoryReadCache.clear();
   if (typeof window === "undefined") return;
   try {
     for (let index = window.sessionStorage.length - 1; index >= 0; index--) {
@@ -58,13 +60,20 @@ function clearReadCache() {
 
 function invalidateReadPath(path: string) {
   inFlightReads.delete(path);
+  memoryReadCache.delete(path);
   readPathGenerations.set(path, (readPathGenerations.get(path) || 0) + 1);
   if (typeof window === "undefined") return;
   try { window.sessionStorage.removeItem(readCachePrefix + path); } catch { /* ignore cache cleanup failure */ }
 }
 
 function cachedRead<T>(path: string, ttlMs: number): T | undefined {
-  if (typeof window === "undefined") return undefined;
+  const memory = memoryReadCache.get(path);
+  if (memory) {
+    const age = Date.now() - memory.storedAt;
+    if (Number.isFinite(memory.storedAt) && age >= 0 && age < ttlMs) return memory.data as T;
+    memoryReadCache.delete(path);
+  }
+  if (!readCanPersist(path) || typeof window === "undefined") return undefined;
   const key = readCachePrefix + path;
   try {
     const raw = window.sessionStorage.getItem(key);
@@ -83,14 +92,28 @@ function cachedRead<T>(path: string, ttlMs: number): T | undefined {
 }
 
 function storeCachedRead(path: string, data: unknown) {
-  if (typeof window === "undefined") return;
+  const cached = { storedAt: Date.now(), data };
+  memoryReadCache.set(path, cached);
+  if (!readCanPersist(path) || typeof window === "undefined") return;
   try {
-    const serialized = JSON.stringify({ storedAt: Date.now(), data });
+    const serialized = JSON.stringify(cached);
     if (serialized.length <= 512_000)
       window.sessionStorage.setItem(readCachePrefix + path, serialized);
   } catch {
     // A cache write must never make a successful API request fail.
   }
+}
+
+function readCanPersist(path: string): boolean {
+  if (path.includes("/credentials")) return false;
+  return path === "/api/v1/setup/status" ||
+    path === "/api/v1/meta" ||
+    path === "/api/v1/nodes" ||
+    path.startsWith("/api/v1/nodes/") ||
+    path === "/api/v1/projects" ||
+    path.startsWith("/api/v1/projects/") ||
+    path.startsWith("/api/v1/discovery-jobs/") ||
+    path === "/api/v1/monitor/snapshot";
 }
 
 export function submitWebAccessLaunch(endpointId: string): boolean {
@@ -471,7 +494,9 @@ export const api = {
     return result;
   },
   async setOnboardingPassword(challengeToken: string, newPassword: string) {
-    return request<{ next: "email" }>("/api/v1/auth/onboarding/password", { method: "POST", body: JSON.stringify({ challengeToken, newPassword }) });
+    const result = await request<{ next: "email" } | APIAuthSession>("/api/v1/auth/onboarding/password", { method: "POST", body: JSON.stringify({ challengeToken, newPassword }) });
+    if ("user" in result) rememberSession(result);
+    return result;
   },
   async sendOnboardingEmail(challengeToken: string, email: string) {
     return request<{ maskedEmail: string; expiresAt: string; resendAfterSeconds: number }>("/api/v1/auth/onboarding/email/send", { method: "POST", body: JSON.stringify({ challengeToken, email }) });

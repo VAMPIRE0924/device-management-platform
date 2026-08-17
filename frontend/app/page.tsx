@@ -1103,10 +1103,14 @@ function LoginScreen({
           }
           setSubmitting(true);
           try {
-            await api.setOnboardingPassword(
+            const result = await api.setOnboardingPassword(
               challenge!.challengeToken,
               password,
             );
+            if ("user" in result) {
+              await onAuthenticated(result.user);
+              return;
+            }
             setStep("email");
             setSubmitting(false);
           } catch (cause) {
@@ -3523,9 +3527,8 @@ function SocksView({
                     <th>节点 / Client</th>
                     <th>访问地址</th>
                     <th>项目绑定</th>
-                    <th>状态</th>
                     <th>累计流量</th>
-                    <th>活跃状态</th>
+                    <th>运行 / 活跃状态</th>
                     <th className="socks-actions-heading">操作</th>
                   </tr>
                 </thead>
@@ -3586,58 +3589,45 @@ function SocksView({
                           )}
                         </td>
                         <td>
-                          <Tag tone={isRunning ? "green" : "gray"}>
-                            {isRunning ? "运行中" : "已关闭"}
-                          </Tag>
-                        </td>
-                        <td>
                           <strong className="socks-flow">{row.flow}</strong>
                         </td>
                         <td>
-                          <Tag
-                            tone={
-                              isActive
-                                ? "green"
-                                : row.tunnel.countdown
-                                  ? "amber"
-                                  : "gray"
-                            }
+                          <div
+                            className={`socks-state-card ${!isRunning ? "stopped" : isActive ? "active" : countdownExpired ? "stale" : row.tunnel.countdown ? "countdown" : "waiting"}`}
                           >
-                            {isActive
-                              ? "流量活跃"
-                              : countdownExpired
-                                ? "等待刷新确认"
-                              : row.tunnel.countdown
-                                ? "空闲倒计时"
-                                : isRunning
-                                  ? "等待流量"
-                                  : "已停止"}
-                          </Tag>
-                          {row.tunnel.countdown && !countdownExpired && (
-                            <>
-                              <small>
-                                剩余 {formatDuration(remainingSeconds)}
-                              </small>
-                              <small>
-                                预计关闭 {formatUnixTime(row.tunnel.autoCloseAt)}
-                              </small>
-                            </>
-                          )}
-                          {countdownExpired && (
-                            <small>本地倒计时已结束，请刷新确认节点状态</small>
-                          )}
-                          {isActive && row.tunnel.lastActiveAt > 0 && (
-                            <small>
-                              最近活动 {formatUnixTime(row.tunnel.lastActiveAt)}
-                            </small>
-                          )}
-                          {!isActive &&
-                            !row.tunnel.countdown &&
-                            isRunning && (
-                              <small>
-                                采样于 {formatObservedTime(row.tunnel.observedAt)}
-                              </small>
+                            <div className="socks-state-heading">
+                              <i aria-hidden="true" />
+                              <div>
+                                <strong>
+                                  {!isRunning ? "隧道已关闭" : isActive ? "运行中 · 流量活跃" : countdownExpired ? "倒计时结束 · 待确认" : row.tunnel.countdown ? "运行中 · 空闲倒计时" : "运行中 · 等待流量"}
+                                </strong>
+                                <span>
+                                  {isActive ? "节点检测到 SOCKS 流量" : !isRunning ? "可手动重新启动" : "状态来自最近一次节点同步"}
+                                </span>
+                              </div>
+                            </div>
+                            {row.tunnel.countdown && !countdownExpired && (
+                              <div className="socks-countdown-detail">
+                                <div>
+                                  <span>剩余时长</span>
+                                  <strong>{formatDuration(remainingSeconds)}</strong>
+                                </div>
+                                <div>
+                                  <span>预计关闭</span>
+                                  <strong>{formatUnixTime(row.tunnel.autoCloseAt)}</strong>
+                                </div>
+                              </div>
                             )}
+                            {countdownExpired && (
+                              <small>本地计时已归零，手动刷新后确认节点最终状态</small>
+                            )}
+                            {isActive && row.tunnel.lastActiveAt > 0 && (
+                              <small>最近活动 {formatUnixTime(row.tunnel.lastActiveAt)}</small>
+                            )}
+                            {!isActive && !row.tunnel.countdown && isRunning && (
+                              <small>采样于 {formatObservedTime(row.tunnel.observedAt)}</small>
+                            )}
+                          </div>
                         </td>
                         <td>
                           <div className="socks-row-actions">
@@ -4334,6 +4324,7 @@ function MonitorView({
   onRevoke: (id: string) => Promise<void>;
   onToast: (value: string) => void;
 }) {
+  const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const userName = (id: string | null) =>
@@ -4345,11 +4336,17 @@ function MonitorView({
   const collectedAt = snapshot
     ? new Date(snapshot.collectedAt).toLocaleString("zh-CN")
     : "尚未采集";
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleSessions = sessions.filter((session) =>
+    `${session.domainPrefix || ""} ${userName(session.userId)} ${projectName(session.projectId)} ${session.deviceName} ${session.endpointName} ${session.mode} ${session.sourceIp}`
+      .toLowerCase()
+      .includes(normalizedQuery),
+  );
   const safePage = Math.min(
     page,
-    Math.max(1, Math.ceil(sessions.length / pageSize)),
+    Math.max(1, Math.ceil(visibleSessions.length / pageSize)),
   );
-  const pagedSessions = sessions.slice(
+  const pagedSessions = visibleSessions.slice(
     (safePage - 1) * pageSize,
     safePage * pageSize,
   );
@@ -4522,14 +4519,27 @@ function MonitorView({
         </div>
       </div>
       <div className="content-card">
-        <div className="card-header">
+        <div className="card-header search-card-header">
           <div>
             <h2>活动访问会话</h2>
             <p>仅显示当前真实可用的访问；空闲超时或终止后授权立即失效</p>
           </div>
-          <Tag tone="green">{sessions.length} 个活动会话</Tag>
+          <div className="management-tools">
+            <div className="table-search">
+              <span>⌕</span>
+              <input
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setPage(1);
+                }}
+                placeholder="搜索用户、项目、目标、来源 IP 或域名前缀"
+              />
+            </div>
+            <Tag tone="green">{visibleSessions.length} 个活动会话</Tag>
+          </div>
         </div>
-        {sessions.length ? (
+        {visibleSessions.length ? (
           <>
             <div className="table-wrap">
               <table className="device-table">
@@ -4595,7 +4605,7 @@ function MonitorView({
               </table>
             </div>
             <PaginationFooter
-              total={sessions.length}
+              total={visibleSessions.length}
               page={safePage}
               pageSize={pageSize}
               onPageChange={setPage}
@@ -4605,8 +4615,9 @@ function MonitorView({
           </>
         ) : (
           <EmptyState
-            title="暂无活动访问会话"
-            detail="新的 Web 或 WebSSH 会话建立后会显示在这里"
+            title={sessions.length ? "没有匹配的活动会话" : "暂无活动访问会话"}
+            detail={sessions.length ? "请调整用户、项目、目标、来源 IP 或域名前缀关键词" : "新的 Web 或 WebSSH 会话建立后会显示在这里"}
+            onClear={sessions.length ? () => setQuery("") : undefined}
           />
         )}
       </div>
