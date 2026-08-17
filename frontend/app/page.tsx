@@ -1,5 +1,6 @@
 import {
   Children,
+  type CSSProperties,
   type ChangeEvent,
   type Dispatch,
   FormEvent,
@@ -13,6 +14,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   api,
   APIError,
@@ -615,6 +617,82 @@ function selectOptions(children: ReactNode): SelectOption[] {
   return options;
 }
 
+function FloatingMenu({
+  anchorRef,
+  menuRef,
+  className,
+  id,
+  children,
+}: {
+  anchorRef: React.RefObject<HTMLElement | null>;
+  menuRef: React.RefObject<HTMLDivElement | null>;
+  className: string;
+  id?: string;
+  children: ReactNode;
+}) {
+  const [style, setStyle] = useState<CSSProperties>({
+    position: "fixed",
+    visibility: "hidden",
+  });
+
+  useEffect(() => {
+    const updatePosition = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const viewportPadding = 8;
+      const gap = 5;
+      const spaceBelow = window.innerHeight - rect.bottom - gap - viewportPadding;
+      const spaceAbove = rect.top - gap - viewportPadding;
+      const openUp = spaceBelow < 236 && spaceAbove > spaceBelow;
+      const available = Math.max(40, openUp ? spaceAbove : spaceBelow);
+      const width = Math.min(rect.width, window.innerWidth - viewportPadding * 2);
+      const left = Math.min(
+        Math.max(viewportPadding, rect.left),
+        Math.max(viewportPadding, window.innerWidth - width - viewportPadding),
+      );
+      setStyle({
+        position: "fixed",
+        zIndex: 300,
+        left,
+        right: "auto",
+        top: openUp ? "auto" : rect.bottom + gap,
+        bottom: openUp ? window.innerHeight - rect.top + gap : "auto",
+        width,
+        maxHeight: Math.min(236, available),
+        visibility: "visible",
+      });
+    };
+    const handleScroll = (event: Event) => {
+      if (event.target !== menuRef.current) updatePosition();
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [anchorRef, menuRef]);
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      className={className}
+      id={id}
+      role="listbox"
+      style={style}
+      onPointerDown={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+      onWheel={(event) => event.stopPropagation()}
+      onTouchMove={(event) => event.stopPropagation()}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
 function UnifiedSelect({
   children,
   className = "",
@@ -629,6 +707,8 @@ function UnifiedSelect({
   "aria-label": ariaLabel,
 }: SelectHTMLAttributes<HTMLSelectElement>) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const controlRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const options = useMemo(() => selectOptions(children), [children]);
   const [internalValue, setInternalValue] = useState(() =>
@@ -647,7 +727,11 @@ function UnifiedSelect({
   useEffect(() => {
     if (!open) return;
     const close = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (
+        !rootRef.current?.contains(event.target as Node) &&
+        !menuRef.current?.contains(event.target as Node)
+      )
+        setOpen(false);
     };
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
@@ -672,6 +756,7 @@ function UnifiedSelect({
         <input type="hidden" name={name} form={form} value={selectedValue} />
       )}
       <button
+        ref={controlRef}
         id={id}
         type="button"
         className="unified-select-control"
@@ -692,10 +777,10 @@ function UnifiedSelect({
         <i aria-hidden="true" />
       </button>
       {open && (
-        <div
+        <FloatingMenu
+          anchorRef={controlRef}
+          menuRef={menuRef}
           className="unified-select-menu"
-          role="listbox"
-          onWheel={(event) => event.stopPropagation()}
         >
           {options.map((option) => (
             <button
@@ -710,7 +795,7 @@ function UnifiedSelect({
               {option.label}
             </button>
           ))}
-        </div>
+        </FloatingMenu>
       )}
     </div>
   );
@@ -7985,6 +8070,8 @@ function ClientCombobox({
 }) {
   const listID = useId();
   const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const query = value.trim().toLowerCase();
   const visibleClients = clients.filter((client) => {
@@ -7998,7 +8085,11 @@ function ClientCombobox({
   useEffect(() => {
     if (!open) return;
     const close = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (
+        !rootRef.current?.contains(event.target as Node) &&
+        !menuRef.current?.contains(event.target as Node)
+      )
+        setOpen(false);
     };
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
@@ -8007,6 +8098,7 @@ function ClientCombobox({
   return (
     <div className="client-combobox" ref={rootRef}>
       <input
+        ref={inputRef}
         name="clientId"
         type="text"
         inputMode="numeric"
@@ -8032,11 +8124,11 @@ function ClientCombobox({
         }}
       />
       {open && (
-        <div
+        <FloatingMenu
+          anchorRef={inputRef}
+          menuRef={menuRef}
           className="client-combobox-menu"
           id={listID}
-          role="listbox"
-          onWheel={(event) => event.stopPropagation()}
         >
           {visibleClients.length > 0 ? (
             visibleClients.map((client) => (
@@ -8061,7 +8153,7 @@ function ClientCombobox({
           ) : (
             <p>没有匹配的 Client，可直接输入 ID</p>
           )}
-        </div>
+        </FloatingMenu>
       )}
     </div>
   );
