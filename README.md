@@ -44,14 +44,14 @@ Compose 不设置宿主机 `ports` 映射。容器默认监听 HTTP 80；在系�
 docker pull vampirerune/device-management-platform:main
 
 # 固定部署当前正式版本
-docker pull vampirerune/device-management-platform:v1.0.11
+docker pull vampirerune/device-management-platform:v2.0.0
 ```
 
 已发布 `linux/amd64` 与 `linux/arm64` 镜像。生产环境建议固定完整版本号，仅在接受自动跟随最新正式版时使用 `main`。
 
 镜像标签：
 
-- `v1.0.11`：当前正式版本；
+- `v2.0.0`：当前正式版本；
 - `main`：最新正式版本的滚动标签；
 - `dev`：开发测试镜像，不用于生产环境。
 
@@ -68,10 +68,10 @@ docker pull vampirerune/device-management-platform:v1.0.11
 
 ```bash
 docker build \
-  --build-arg VERSION=v1.0.11 \
+  --build-arg VERSION=v2.0.0 \
   --build-arg VCS_REF="$(git rev-parse HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -t device-management-platform:v1.0.11 .
+  -t device-management-platform:v2.0.0 .
 ```
 
 仓库未声明开源许可证。未经许可，不授予复制、修改或再分发权利。
