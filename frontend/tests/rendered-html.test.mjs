@@ -88,7 +88,7 @@ test("keeps node configuration minimal and Client management add-only", async ()
 
 test("shows all node tunnels with independent state and activity", async () => {
   const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
-  contains(page, ["节点实际返回的 SOCKS隧道", "未绑定", "运行中", "已关闭", "流量活跃", "空闲倒计时", "剩余时长", "自动关闭时间", "最近活动", "采样于", "formatDuration", "localTunnelRemainingSeconds", "本地计时已归零，手动刷新后确认节点最终状态", "运行中 · 流量活跃", "socks-state-card", "remainingSeconds", "autoCloseAt", "observedAt", "端口由 NPS SOCKS隧道详情返回", "域名前缀", "session.domainPrefix", "每次创建 Web 访问会话时生成独立的 8 位随机域名前缀", 'className="socks-table"', "api.setManagedTunnel", "const status = await api.setManagedTunnel", "markProjectTunnelOpen(project)"]);
+  contains(page, ["节点实际返回的 SOCKS隧道", "未绑定", "运行状态", "活跃状态", "运行中", "已关闭", "流量活跃", "空闲倒计时", "剩余时长", "自动关闭时间", "最近活动", "采样于", "formatDuration", "localTunnelRemainingSeconds", "本地计时已归零，刷新后确认节点状态", "socks-run-state", "socks-activity-state", "remainingSeconds", "autoCloseAt", "observedAt", "端口由 NPS SOCKS隧道详情返回", "域名前缀", "session.domainPrefix", "每次创建 Web 访问会话时生成独立的 8 位随机域名前缀", 'className="socks-table"', "api.setManagedTunnel", "const status = await api.setManagedTunnel", "markProjectTunnelOpen(project)"]);
   assert.doesNotMatch(page, /托管通道|托管隧道|托管 SOCKS|SOCKS 通道/);
   contains(api, ["return request<APIManagedTunnel>", "/managed-tunnels/"]);
   assert.doesNotMatch(page, /<th>会话<\/th>|session\.id\.slice\(0, 8\)<\/code>/);

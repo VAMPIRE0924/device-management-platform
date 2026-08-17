@@ -2632,93 +2632,119 @@ main {
 .socks-flow {
   font-variant-numeric: tabular-nums;
 }
-.socks-state-card {
-  min-width: 270px;
-  max-width: 340px;
-  padding: 10px 12px;
-  border: 1px solid #dfe8e9;
-  border-radius: 10px;
-  background: #f8fafb;
-  white-space: normal;
+.socks-run-state {
+  width: fit-content;
+  min-width: 72px;
+  padding: 6px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
 }
-.socks-state-heading {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-}
-.socks-state-heading > i {
-  width: 9px;
-  height: 9px;
-  margin-top: 4px;
+.socks-run-state > i {
+  width: 7px;
+  height: 7px;
   flex: 0 0 auto;
-  border: 2px solid #fff;
   border-radius: 50%;
-  background: #9aa7aa;
-  box-shadow: 0 0 0 2px #dce4e5;
 }
-.socks-state-heading > div {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.socks-run-state > strong {
+  font-size: 9.5px;
+  line-height: 1;
+  white-space: nowrap;
 }
-.socks-state-heading strong {
-  color: #40575c;
-  font-size: 10.5px;
+.socks-run-state.running {
+  border-color: #cae9e1;
+  background: #f0faf7;
 }
-.socks-state-heading span {
-  color: #7c8c90;
-  font-size: 8.5px;
-}
-.socks-state-card.active {
-  border-color: #bfe5da;
-  background: linear-gradient(135deg, #effaf6 0%, #f8fcfb 100%);
-}
-.socks-state-card.active .socks-state-heading > i {
+.socks-run-state.running > i {
   background: #0a9d82;
-  box-shadow:
-    0 0 0 2px #c8eee5,
-    0 0 0 6px rgba(10, 157, 130, 0.08);
-  animation: socks-active-pulse 2s ease-out infinite;
+  box-shadow: 0 0 0 3px #dff3ee;
 }
-.socks-state-card.active .socks-state-heading strong {
+.socks-run-state.running > strong {
   color: #087963;
 }
-.socks-state-card.countdown {
-  border-color: #ecd8ad;
-  background: linear-gradient(135deg, #fff8e9 0%, #fffdf8 100%);
-}
-.socks-state-card.countdown .socks-state-heading > i {
-  background: #d59125;
-  box-shadow: 0 0 0 2px #f4e3bd;
-}
-.socks-state-card.countdown .socks-state-heading strong {
-  color: #9b6215;
-}
-.socks-state-card.stale {
-  border-color: #ead3cc;
-  background: #fff8f6;
-}
-.socks-state-card.stale .socks-state-heading > i {
-  background: #bc6857;
-  box-shadow: 0 0 0 2px #f1dcd7;
-}
-.socks-state-card.stopped {
+.socks-run-state.stopped {
+  border-color: #e1e7e8;
   background: #f5f7f7;
-  opacity: 0.82;
 }
-.socks-countdown-detail {
-  margin-top: 9px;
-  padding-top: 8px;
-  display: grid;
-  grid-template-columns: minmax(85px, 0.8fr) minmax(130px, 1.2fr);
-  gap: 10px;
-  border-top: 1px solid rgba(174, 126, 49, 0.16);
+.socks-run-state.stopped > i {
+  background: #aab6b9;
+  box-shadow: 0 0 0 3px #edf1f2;
 }
-.socks-countdown-detail > div {
+.socks-run-state.stopped > strong {
+  color: #687a7e;
+}
+.socks-activity-state {
+  min-width: 210px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  align-items: flex-start;
+  gap: 5px;
+  white-space: normal;
+}
+.socks-activity-state > strong {
+  position: relative;
+  min-height: 25px;
+  padding: 6px 10px 6px 24px;
+  border: 1px solid #e1e7e8;
+  border-radius: 7px;
+  background: #f7f9f9;
+  color: #687a7e;
+  font-size: 10px;
+  line-height: 1.1;
+}
+.socks-activity-state > strong::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #aab6b9;
+  transform: translateY(-50%);
+}
+.socks-activity-state.active > strong {
+  border-color: #c8e9e1;
+  background: #f0faf7;
+  color: #087963;
+}
+.socks-activity-state.active > strong::before {
+  background: #0a9d82;
+  box-shadow: 0 0 0 3px #dff3ee;
+}
+.socks-activity-state.countdown > strong {
+  border-color: #f0dfbb;
+  background: #fff9ed;
+  color: #9b6215;
+}
+.socks-activity-state.countdown > strong::before {
+  background: #d59125;
+}
+.socks-activity-state.stale > strong {
+  border-color: #ecd8d2;
+  background: #fff8f6;
+  color: #a15143;
+}
+.socks-activity-state.stale > strong::before {
+  background: #bc6857;
+}
+.socks-activity-state.stopped > strong {
+  border-color: #e5e9ea;
+  background: #f5f7f7;
+  color: #9aa7aa;
+  font-weight: 600;
+}
+.socks-countdown-detail {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.socks-countdown-detail > div {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
 }
 .socks-countdown-detail span {
   color: #9a8057;
@@ -2729,28 +2755,10 @@ main {
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
-.socks-state-card > small {
-  margin-top: 7px !important;
-  padding-left: 18px;
+.socks-activity-state > small {
+  margin-top: 0 !important;
+  padding-left: 1px;
   line-height: 1.45;
-}
-@keyframes socks-active-pulse {
-  0%,
-  45% {
-    box-shadow:
-      0 0 0 2px #c8eee5,
-      0 0 0 0 rgba(10, 157, 130, 0.16);
-  }
-  100% {
-    box-shadow:
-      0 0 0 2px #c8eee5,
-      0 0 0 8px rgba(10, 157, 130, 0);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .socks-state-card.active .socks-state-heading > i {
-    animation: none;
-  }
 }
 .socks-actions-heading {
   text-align: right !important;
