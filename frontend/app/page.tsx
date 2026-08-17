@@ -1,5 +1,6 @@
 import {
   Children,
+  type CSSProperties,
   type ChangeEvent,
   type Dispatch,
   FormEvent,
@@ -13,6 +14,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   api,
   APIError,
@@ -69,6 +71,7 @@ type Modal =
   | "edit-user"
   | "socks-detail"
   | "node-clients"
+  | "change-password"
   | null;
 type ConfigModalKind =
   | "create-node"
@@ -139,6 +142,14 @@ const VALID_VIEWS = new Set<View>([
   "logs",
   "settings",
 ]);
+
+function roleViews(role: APIUser["role"]): Set<View> {
+  if (role === "system_admin") return VALID_VIEWS;
+  if (role === "temporary") return new Set<View>(["portal"]);
+  if (role === "project_admin")
+    return new Set<View>(["overview", "portal", "projects", "workspace", "discovery", "connections"]);
+  return new Set<View>(["overview", "portal", "projects", "workspace"]);
+}
 
 type Device = {
   id: number | string;
@@ -245,12 +256,6 @@ const nodeServiceHost = (node?: NodeView) =>
         }
       })()
     : "—";
-const projectSocksAddress = (
-  project: ProjectView,
-  nodeList: NodeView[] = [],
-  port = 10000 + project.clientId,
-) =>
-  `${nodeServiceHost(nodeList.find((node) => node.name === project.node))}:${port}`;
 const formatBytes = (value: number) => {
   if (!Number.isFinite(value) || value <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -260,6 +265,57 @@ const formatBytes = (value: number) => {
   );
   const amount = value / 1024 ** index;
   return `${amount >= 100 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+};
+
+const formatDuration = (seconds: number) => {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0 秒";
+  const total = Math.floor(seconds);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainingSeconds = total % 60;
+  const parts = [
+    days ? `${days} 天` : "",
+    hours ? `${hours} 小时` : "",
+    minutes ? `${minutes} 分钟` : "",
+    remainingSeconds || (!days && !hours && !minutes)
+      ? `${remainingSeconds} 秒`
+      : "",
+  ].filter(Boolean);
+  return parts.slice(0, 2).join(" ");
+};
+
+const formatUnixTime = (seconds: number) =>
+  Number.isFinite(seconds) && seconds > 0
+    ? new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false })
+    : "—";
+
+const formatObservedTime = (value: string) => {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? "—"
+    : parsed.toLocaleString("zh-CN", { hour12: false });
+};
+
+const useLocalClock = (enabled: boolean) => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
+  return now;
+};
+
+const localTunnelRemainingSeconds = (
+  tunnel: Pick<APIManagedTunnel, "countdown" | "remainingSeconds" | "autoCloseAt">,
+  now: number,
+) => {
+  if (!tunnel.countdown) return 0;
+  if (tunnel.autoCloseAt > 0)
+    return Math.max(0, Math.ceil(tunnel.autoCloseAt - now / 1000));
+  return Math.max(0, tunnel.remainingSeconds);
 };
 
 const ipv4ToNumber = (value: string) => {
@@ -412,7 +468,10 @@ const mapDevice = (device: APIDevice, project: ProjectView): Device => {
   const webServices = webEndpoints.map((endpoint) => ({
     endpointId: endpoint.id,
     name: endpoint.name,
-    url: `${endpoint.protocol}://${device.host}:${endpoint.targetPort}`,
+    url:
+      device.host && endpoint.targetPort
+        ? `${endpoint.protocol}://${device.host}:${endpoint.targetPort}`
+        : `endpoint:${endpoint.id}`,
     tlsServerName: endpoint.tlsServerName,
     verificationStatus: endpoint.verificationStatus,
   }));
@@ -468,9 +527,8 @@ const FIELD_HELP: Record<string, string> = {
     "平台后端访问接入节点管理接口的地址，不是最终用户打开设备后台的地址。",
   "TLS 校验主机名":
     "用于校验 HTTPS 证书中的 SAN 主机名。即使通过 IP 访问，也应填写证书实际覆盖的域名。",
-  认证账号: "节点管理账号。编辑时留空会保留已保存的账号。",
-  认证密码:
-    "密码只会通过 HTTPS 提交一次，后端使用 AES-GCM 加密后写入数据库；页面和 API 永不回显。编辑时留空会保留现有密码。",
+  "NPS API 密钥":
+    "用于 X-NPS-Signature HMAC-SHA256 请求签名，至少 32 个 UTF-8 字节。密钥只会通过 HTTPS 提交一次，后端使用 AES-GCM 加密保存，页面和 API 永不回显；编辑时留空会保留现有密钥。",
   节点状态:
     "维护中会停止平台对该节点发起新的项目级操作；恢复服务后重新设为启用并执行连接检查。",
   端口池:
@@ -503,8 +561,7 @@ const MULTI_CHOICE_FIELDS = new Set([
 const OPTIONAL_RESOURCE_FIELDS = new Set([
   "TLS 校验主机名",
   "新密码（选填）",
-  "认证账号",
-  "认证密码",
+  "NPS API 密钥",
 ]);
 
 function HelpTip({ text }: { text: string }) {
@@ -560,6 +617,90 @@ function selectOptions(children: ReactNode): SelectOption[] {
   return options;
 }
 
+function FloatingMenu({
+  anchorRef,
+  menuRef,
+  className,
+  id,
+  children,
+}: {
+  anchorRef: React.RefObject<HTMLElement | null>;
+  menuRef: React.RefObject<HTMLDivElement | null>;
+  className: string;
+  id?: string;
+  children: ReactNode;
+}) {
+  const [style, setStyle] = useState<CSSProperties>({
+    position: "fixed",
+    visibility: "hidden",
+  });
+
+  useEffect(() => {
+    const updatePosition = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const viewportPadding = 8;
+      const gap = 5;
+      const spaceBelow = window.innerHeight - rect.bottom - gap - viewportPadding;
+      const spaceAbove = rect.top - gap - viewportPadding;
+      const openUp = spaceBelow < 236 && spaceAbove > spaceBelow;
+      const available = Math.max(40, openUp ? spaceAbove : spaceBelow);
+      const configuredMinWidth = Number.parseFloat(
+        window
+          .getComputedStyle(anchor)
+          .getPropertyValue("--floating-menu-min-width"),
+      );
+      const width = Math.min(
+        Math.max(rect.width, configuredMinWidth || 0),
+        window.innerWidth - viewportPadding * 2,
+      );
+      const left = Math.min(
+        Math.max(viewportPadding, rect.left),
+        Math.max(viewportPadding, window.innerWidth - width - viewportPadding),
+      );
+      setStyle({
+        position: "fixed",
+        zIndex: 300,
+        left,
+        right: "auto",
+        top: openUp ? "auto" : rect.bottom + gap,
+        bottom: openUp ? window.innerHeight - rect.top + gap : "auto",
+        width,
+        maxHeight: Math.min(236, available),
+        visibility: "visible",
+      });
+    };
+    const handleScroll = (event: Event) => {
+      if (event.target !== menuRef.current) updatePosition();
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [anchorRef, menuRef]);
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      className={className}
+      id={id}
+      role="listbox"
+      style={style}
+      onPointerDown={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+      onWheel={(event) => event.stopPropagation()}
+      onTouchMove={(event) => event.stopPropagation()}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
 function UnifiedSelect({
   children,
   className = "",
@@ -574,6 +715,8 @@ function UnifiedSelect({
   "aria-label": ariaLabel,
 }: SelectHTMLAttributes<HTMLSelectElement>) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const controlRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const options = useMemo(() => selectOptions(children), [children]);
   const [internalValue, setInternalValue] = useState(() =>
@@ -592,7 +735,11 @@ function UnifiedSelect({
   useEffect(() => {
     if (!open) return;
     const close = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (
+        !rootRef.current?.contains(event.target as Node) &&
+        !menuRef.current?.contains(event.target as Node)
+      )
+        setOpen(false);
     };
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
@@ -617,6 +764,7 @@ function UnifiedSelect({
         <input type="hidden" name={name} form={form} value={selectedValue} />
       )}
       <button
+        ref={controlRef}
         id={id}
         type="button"
         className="unified-select-control"
@@ -637,7 +785,11 @@ function UnifiedSelect({
         <i aria-hidden="true" />
       </button>
       {open && (
-        <div className="unified-select-menu" role="listbox">
+        <FloatingMenu
+          anchorRef={controlRef}
+          menuRef={menuRef}
+          className="unified-select-menu"
+        >
           {options.map((option) => (
             <button
               type="button"
@@ -651,7 +803,7 @@ function UnifiedSelect({
               {option.label}
             </button>
           ))}
-        </div>
+        </FloatingMenu>
       )}
     </div>
   );
@@ -1060,10 +1212,14 @@ function LoginScreen({
           }
           setSubmitting(true);
           try {
-            await api.setOnboardingPassword(
+            const result = await api.setOnboardingPassword(
               challenge!.challengeToken,
               password,
             );
+            if ("user" in result) {
+              await onAuthenticated(result.user);
+              return;
+            }
             setStep("email");
             setSubmitting(false);
           } catch (cause) {
@@ -1556,7 +1712,7 @@ export default function Home() {
         api.nodes(),
         api.projects(),
       ]);
-      const tunnelGroups = await Promise.all(
+      const tunnelGroups = user.role === "system_admin" ? await Promise.all(
         backendNodes.map(async (node) => {
           try {
             const [items, clients] = await Promise.all([
@@ -1573,7 +1729,7 @@ export default function Home() {
             };
           }
         }),
-      );
+      ) : backendNodes.map((node) => ({ nodeId: node.id, items: [], clients: [], available: false }));
       const mappedProjects = backendProjects.map((project) =>
         mapProject(project, backendNodes),
       );
@@ -1586,6 +1742,8 @@ export default function Home() {
         );
         if (group?.available)
           project.clientStatus = client?.connected ? "在线" : "离线";
+        else if (user.role !== "system_admin")
+          project.clientStatus = "状态受限";
       }
       const mappedNodes = backendNodes.map((node) =>
         mapNode(node, backendProjects),
@@ -1617,15 +1775,13 @@ export default function Home() {
         forwardGroups,
         backendSecurity,
       ] = await Promise.all([
-        api.users().catch(() => []),
-        api.policies().catch(() => []),
-        api.sessions().catch(() => []),
-        api.auditLogs().catch(() => []),
-        Promise.all(
-          backendProjects.map((project) =>
-            api.portForwards(project.id).catch(() => []),
-          ),
-        ),
+        user.role === "system_admin" ? api.users().catch(() => []) : Promise.resolve([]),
+        user.role === "system_admin" ? api.policies().catch(() => []) : Promise.resolve([]),
+        user.role === "system_admin" ? api.sessions().catch(() => []) : Promise.resolve([]),
+        user.role === "system_admin" ? api.auditLogs().catch(() => []) : Promise.resolve([]),
+        user.role === "system_admin" || user.role === "project_admin"
+          ? Promise.all(backendProjects.map((project) => api.portForwards(project.id).catch(() => [])))
+          : Promise.resolve([]),
         user.role === "system_admin"
           ? api.securitySettings().catch(() => null)
           : Promise.resolve(null),
@@ -1653,17 +1809,16 @@ export default function Home() {
       setSecuritySettings(backendSecurity);
       setSocksStatus(
         Object.fromEntries(
-          mappedProjects.map((project) => {
+          mappedProjects.flatMap((project) => {
             const group = tunnelGroups.find(
               (item) => item.nodeId === project.nodeId,
             );
             const tunnel = group?.items.find(
               (item) => item.clientId === project.clientId,
             );
-            return [
-              project.code,
-              group?.available ? Boolean(tunnel?.running) : false,
-            ];
+            return group?.available
+              ? [[project.code, Boolean(tunnel?.running)] as const]
+              : [];
           }),
         ),
       );
@@ -1724,8 +1879,22 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (!currentUser || roleViews(currentUser.role).has(view)) return;
+    const fallback = currentUser.role === "temporary" ? "portal" : "overview";
+    window.queueMicrotask(() => {
+      setView(fallback);
+      setModal(null);
+    });
+  }, [currentUser, view]);
+
+  useEffect(() => {
     if (!scanActive || !scanJobId) return;
     let stopped = false;
+    let timer: number | undefined;
+    const schedulePoll = () => {
+      if (stopped || document.visibilityState !== "visible") return;
+      timer = window.setTimeout(() => void poll(), 5000);
+    };
     const poll = async () => {
       try {
         const result = await api.discoveryJob(scanJobId);
@@ -1743,8 +1912,10 @@ export default function Home() {
               `扫描完成，发现 ${grouped.length} 台设备、${result.results.length} 个待确认服务`,
             );
           } else if (result.job.status === "failed")
-            setToast("扫描任务失败，请检查项目通道与扫描网段");
+            setToast("扫描任务失败，请检查项目 SOCKS隧道与扫描网段");
+          return;
         }
+        schedulePoll();
       } catch (error) {
         if (!stopped) {
           setScanActive(false);
@@ -1752,11 +1923,17 @@ export default function Home() {
         }
       }
     };
+    const handleVisibilityChange = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+      if (document.visibilityState === "visible") void poll();
+    };
     void poll();
-    const timer = window.setInterval(() => void poll(), 1000);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [activeProject.code, scanActive, scanJobId]);
 
@@ -1798,7 +1975,7 @@ export default function Home() {
   const refreshMonitor = async () => {
     setMonitorLoading(true);
     try {
-      const snapshot = await api.monitorSnapshot();
+      const snapshot = await api.monitorSnapshot(true);
       setMonitorSnapshot(snapshot);
       setToast("运行快照已刷新");
     } catch (error) {
@@ -1838,13 +2015,6 @@ export default function Home() {
   );
 
   const markProjectTunnelOpen = (project: ProjectView) => {
-    setManagedTunnels((items) =>
-      items.map((item) =>
-        item.nodeId === project.nodeId && item.clientId === project.clientId
-          ? { ...item, configured: true, running: true }
-          : item,
-      ),
-    );
     setSocksStatus((items) => ({ ...items, [project.code]: true }));
   };
 
@@ -2042,16 +2212,14 @@ export default function Home() {
       const portParts = String(values["端口池"] || "")
         .split(/[-–—]/)
         .map(Number);
-      const credentialUsername = String(values["认证账号"] || "");
-      const credentialPassword = String(values["认证密码"] || "");
+      const authKey = String(values["NPS API 密钥"] || "");
       await api.createNode({
         name: values["节点名称"],
         apiUrl: values["API 地址"],
         tlsServerName: values["TLS 校验主机名"],
         credential: {
-          type: "session",
-          username: credentialUsername,
-          password: credentialPassword,
+          type: "signed",
+          authKey,
         },
         portStart: portParts[0],
         portEnd: portParts[1],
@@ -2132,18 +2300,16 @@ export default function Home() {
       const portParts = String(values["端口池"] || "")
         .split(/[-–—]/)
         .map(Number);
-      const credentialUsername = String(values["认证账号"] || "");
-      const credentialPassword = String(values["认证密码"] || "");
+      const authKey = String(values["NPS API 密钥"] || "");
       await api.updateNode(node.id, {
         name: values["节点名称"],
         apiUrl: values["API 地址"],
         tlsServerName: values["TLS 校验主机名"],
         credential:
-          credentialUsername || credentialPassword
+          authKey
             ? {
-                type: "session",
-                username: credentialUsername,
-                password: credentialPassword,
+                type: "signed",
+                authKey,
               }
             : undefined,
         portStart: portParts[0],
@@ -2243,8 +2409,7 @@ export default function Home() {
         节点名称: node.name,
         "API 地址": node.raw.apiUrl,
         "TLS 校验主机名": node.raw.tlsServerName,
-        认证账号: "",
-        认证密码: "",
+        "NPS API 密钥": "",
         端口池: `${node.raw.portStart}-${node.raw.portEnd}`,
         节点状态: node.raw.enabled ? "启用" : "维护中",
       };
@@ -2328,7 +2493,7 @@ export default function Home() {
     { id: "overview" as View, label: "概览", icon: "⌂" },
     { id: "portal" as View, label: "访问门户", icon: "◫" },
     { id: "projects" as View, label: "客户项目", icon: "▦" },
-    { id: "socks" as View, label: "托管通道", icon: "═" },
+    { id: "socks" as View, label: "SOCKS隧道", icon: "═" },
     { id: "nodes" as View, label: "接入节点", icon: "◇" },
     { id: "accounts" as View, label: "用户与权限", icon: "♙" },
     { id: "policies" as View, label: "访问策略", icon: "▤" },
@@ -2417,15 +2582,25 @@ export default function Home() {
             ))}
           </nav>
           <div className="sidebar-account">
-            <div className="account-avatar">
-              {currentUser?.displayName?.slice(0, 1) || "I"}
-            </div>
-            <div>
-              <strong>{currentUser?.displayName || "平台用户"}</strong>
-              <span>{currentUser?.username}</span>
-            </div>
             <button
               type="button"
+              className="account-profile"
+              title="账户安全与修改密码"
+              aria-label="打开账户安全设置"
+              disabled={!currentUser || currentUser.bootstrap}
+              onClick={() => setModal("change-password")}
+            >
+              <span className="account-avatar">
+                {currentUser?.displayName?.slice(0, 1) || "I"}
+              </span>
+              <span className="account-profile-copy">
+                <strong>{currentUser?.displayName || "平台用户"}</strong>
+                <span>{currentUser?.username} · 账户安全</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="account-logout"
               title="退出登录"
               aria-label="退出登录"
               onClick={() =>
@@ -2467,6 +2642,7 @@ export default function Home() {
                 nodes={nodeItems}
                 tunnels={managedTunnels}
                 sessions={sessionItems}
+                showControlPlane={currentUser?.role === "system_admin"}
                 onNavigate={setView}
               />
             )}
@@ -2485,7 +2661,7 @@ export default function Home() {
                 project={activeProject}
                 query={query}
                 setQuery={setQuery}
-                socksRunning={Boolean(socksStatus[activeProject.code])}
+                socksRunning={socksStatus[activeProject.code]}
                 canManage={canManageProject}
                 onWeb={openWeb}
                 onSsh={openSsh}
@@ -2549,9 +2725,9 @@ export default function Home() {
                   if (!node.id) return;
                   try {
                     const [health, tunnels, clients] = await Promise.all([
-                      api.nodeHealth(node.id),
-                      api.managedTunnels(node.id),
-                      api.nodeClients(node.id),
+                      api.nodeHealth(node.id, true),
+                      api.managedTunnels(node.id, true),
+                      api.nodeClients(node.id, true),
                     ]);
                     setNodeItems((items) =>
                       items.map((item) =>
@@ -2625,7 +2801,7 @@ export default function Home() {
                       )
                       .map(async (node) => ({
                         node,
-                        items: await api.managedTunnels(node.id),
+                        items: await api.managedTunnels(node.id, true),
                       })),
                   );
                   const nextStatus: Record<string, boolean> = {};
@@ -2665,7 +2841,7 @@ export default function Home() {
                   );
                 }}
                 onToggle={async (tunnel, running) => {
-                  await api.setManagedTunnel(
+                  const status = await api.setManagedTunnel(
                     tunnel.nodeId,
                     tunnel.clientId,
                     running,
@@ -2674,7 +2850,14 @@ export default function Home() {
                     items.map((item) =>
                       item.nodeId === tunnel.nodeId &&
                       item.clientId === tunnel.clientId
-                        ? { ...item, configured: running, running }
+                        ? {
+                            ...item,
+                            ...status,
+                            clientName: status.clientName || item.clientName,
+                            port: status.port || item.port,
+                            nodeId: item.nodeId,
+                            nodeName: item.nodeName,
+                          }
                         : item,
                     ),
                   );
@@ -2686,8 +2869,10 @@ export default function Home() {
                   if (project)
                     setSocksStatus((items) => ({
                       ...items,
-                      [project.code]: running,
+                      [project.code]: status.running,
                     }));
+                  const runningDelta =
+                    Number(status.running) - Number(tunnel.running);
                   setNodeItems((items) =>
                     items.map((node) =>
                       node.id === tunnel.nodeId
@@ -2695,7 +2880,7 @@ export default function Home() {
                             ...node,
                             runningTunnels: Math.max(
                               0,
-                              node.runningTunnels + (running ? 1 : -1),
+                              node.runningTunnels + runningDelta,
                             ),
                           }
                         : node,
@@ -2703,8 +2888,10 @@ export default function Home() {
                   );
                 }}
                 onToast={setToast}
-                onDetails={(name) => {
-                  setActiveResourceName(name);
+                onDetails={(tunnel) => {
+                  setActiveResourceName(
+                    `${tunnel.nodeId}:${tunnel.clientId}`,
+                  );
                   setModal("socks-detail");
                 }}
               />
@@ -3179,9 +3366,10 @@ export default function Home() {
         )}
         {modal === "socks-detail" && (
           <SocksDetailModal
-            name={activeResourceName}
+            tunnelKey={activeResourceName}
             projects={projectItems}
             nodes={nodeItems}
+            tunnels={managedTunnels}
             onClose={() => setModal(null)}
           />
         )}
@@ -3205,6 +3393,17 @@ export default function Home() {
               />
             ) : null;
           })()}
+        {modal === "change-password" && currentUser && !currentUser.bootstrap && (
+          <ChangePasswordModal
+            username={currentUser.username}
+            onClose={() => setModal(null)}
+            onChanged={(user) => {
+              setCurrentUser(user);
+              setModal(null);
+              setToast("密码已修改，其他登录会话已安全退出");
+            }}
+          />
+        )}
         {toast && (
           <div className="toast">
             <span>✓</span>
@@ -3222,6 +3421,7 @@ function Overview({
   nodes,
   tunnels,
   sessions,
+  showControlPlane,
   onNavigate,
 }: {
   devices: Device[];
@@ -3229,29 +3429,32 @@ function Overview({
   nodes: NodeView[];
   tunnels: NodeManagedTunnel[];
   sessions: APIAccessSession[];
+  showControlPlane: boolean;
   onNavigate: (view: View) => void;
 }) {
   const online = devices.filter((device) => device.status === "online").length;
   const availableNodes = nodes.filter((node) => node.status === "运行正常").length;
   const onlineClients = projects.filter((project) => project.clientStatus === "在线").length;
+  const clientStatusRestricted = projects.some((project) => project.clientStatus === "状态受限");
   const runningTunnels = tunnels.filter((tunnel) => tunnel.running).length;
   const webServices = devices.reduce((total, device) => total + device.webServices.length, 0);
   const sshServices = devices.filter((device) => device.ssh).length;
   const scanNetworks = projects.reduce((total, project) => total + project.networks.length, 0);
   const deviceRate = devices.length ? Math.round((online / devices.length) * 100) : 0;
+  const clientDetail = clientStatusRestricted ? "状态按当前权限显示" : `${onlineClients} 个 Client 在线`;
   const capabilityItems = [
-    { icon: "▦", title: "客户项目", value: projects.length, detail: `${onlineClients} 个 Client 在线`, action: "管理项目", view: "projects" as View },
-    { icon: "═", title: "托管通道", value: tunnels.length, detail: `${runningTunnels} 条正在运行`, action: "查看通道", view: "socks" as View },
-    { icon: "◇", title: "接入节点", value: nodes.length, detail: `${availableNodes} 个节点可用`, action: "管理节点", view: "nodes" as View },
-    { icon: "◫", title: "远程入口", value: webServices + sshServices, detail: `${webServices} 个 Web · ${sshServices} 个 SSH`, action: "访问门户", view: "portal" as View },
-  ];
+    { icon: "▦", title: "客户项目", value: projects.length, detail: clientDetail, action: "管理项目", view: "projects" as View, controlPlane: false },
+    { icon: "═", title: "SOCKS隧道", value: tunnels.length, detail: `${runningTunnels} 条正在运行`, action: "查看隧道", view: "socks" as View, controlPlane: true },
+    { icon: "◇", title: "接入节点", value: nodes.length, detail: `${availableNodes} 个节点可用`, action: "管理节点", view: "nodes" as View, controlPlane: true },
+    { icon: "◫", title: "远程入口", value: webServices + sshServices, detail: `${webServices} 个 Web · ${sshServices} 个 SSH`, action: "访问门户", view: "portal" as View, controlPlane: false },
+  ].filter((item) => showControlPlane || !item.controlPlane);
   return (
     <>
       <div className="overview-dashboard-head">
         <div>
           <span className="eyebrow">I5CLOUD CONTROL CENTER</span>
           <h1>平台运行概览</h1>
-          <p>客户项目、接入节点、托管通道与远程访问的实时汇总</p>
+          <p>客户项目、接入节点、SOCKS隧道与远程访问的状态汇总</p>
         </div>
         <div className="overview-date">
           <i className="live-dot" />
@@ -3260,10 +3463,19 @@ function Overview({
         </div>
       </div>
       <div className="overview-metrics">
-        <Metric label="客户项目" value={String(projects.length)} detail={`${onlineClients} 个 Client 在线`} tone="blue" />
+        <Metric label="客户项目" value={String(projects.length)} detail={clientDetail} tone="blue" />
         <Metric label="可用节点" value={`${availableNodes}/${nodes.length}`} detail="节点接口实时状态" tone="green" />
-        <Metric label="运行通道" value={`${runningTunnels}/${tunnels.length}`} detail="NPS SOCKS 实时状态" tone="violet" />
-        <Metric label="活动会话" value={String(sessions.length)} detail="Web 与 WebSSH 会话" tone="amber" />
+        {showControlPlane ? (
+          <>
+            <Metric label="运行隧道" value={`${runningTunnels}/${tunnels.length}`} detail="NPS SOCKS 状态" tone="violet" />
+            <Metric label="活动会话" value={String(sessions.length)} detail="Web 与 WebSSH 会话" tone="amber" />
+          </>
+        ) : (
+          <>
+            <Metric label="登记设备" value={String(devices.length)} detail="当前授权项目范围" tone="violet" />
+            <Metric label="远程入口" value={String(webServices + sshServices)} detail="Web 与 WebSSH" tone="amber" />
+          </>
+        )}
       </div>
       <div className="overview-capability-grid">
         {capabilityItems.map((item) => (
@@ -3278,10 +3490,10 @@ function Overview({
         <section className="content-card overview-status-card">
           <div className="card-header"><div><h2>运行状态</h2><p>所有数据均来自当前平台和接入节点</p></div><Tag tone="green">实时</Tag></div>
           <div className="overview-status-list">
-            <div><span>项目 Client</span><strong>{onlineClients} / {projects.length}</strong><Tag tone={onlineClients === projects.length && projects.length ? "green" : "amber"}>{onlineClients === projects.length && projects.length ? "全部在线" : "存在离线"}</Tag></div>
+            <div><span>项目 Client</span><strong>{clientStatusRestricted ? "权限范围内" : `${onlineClients} / ${projects.length}`}</strong><Tag tone={clientStatusRestricted ? "gray" : onlineClients === projects.length && projects.length ? "green" : "amber"}>{clientStatusRestricted ? "按需检查" : onlineClients === projects.length && projects.length ? "全部在线" : "存在离线"}</Tag></div>
             <div><span>接入节点</span><strong>{availableNodes} / {nodes.length}</strong><Tag tone={availableNodes === nodes.length && nodes.length ? "green" : "amber"}>{availableNodes === nodes.length && nodes.length ? "全部可用" : "需要检查"}</Tag></div>
-            <div><span>托管 SOCKS</span><strong>{runningTunnels} / {tunnels.length}</strong><Tag tone={runningTunnels ? "green" : "gray"}>{runningTunnels ? "存在运行通道" : "全部关闭"}</Tag></div>
-            <div><span>远程访问会话</span><strong>{sessions.length}</strong><Tag tone={sessions.length ? "blue" : "gray"}>{sessions.length ? "正在访问" : "暂无会话"}</Tag></div>
+            {showControlPlane && <div><span>SOCKS隧道</span><strong>{runningTunnels} / {tunnels.length}</strong><Tag tone={runningTunnels ? "green" : "gray"}>{runningTunnels ? "存在运行隧道" : "全部关闭"}</Tag></div>}
+            {showControlPlane && <div><span>远程访问会话</span><strong>{sessions.length}</strong><Tag tone={sessions.length ? "blue" : "gray"}>{sessions.length ? "正在访问" : "暂无会话"}</Tag></div>}
           </div>
         </section>
         <section className="content-card overview-resource-card">
@@ -3292,7 +3504,7 @@ function Overview({
             <div><span>WebSSH</span><strong>{sshServices}</strong><small>支持保存凭据或临时登录</small></div>
             <div><span>扫描网段</span><strong>{scanNetworks}</strong><small>分布在 {projects.filter((project) => project.networks.length).length} 个项目</small></div>
           </div>
-          <div className="overview-route-strip"><span>访问链路</span><b>浏览器</b><i>→</i><b>平台网关</b><i>→</i><b>托管 SOCKS</b><i>→</i><b>内网服务</b></div>
+          <div className="overview-route-strip"><span>访问链路</span><b>浏览器</b><i>→</i><b>平台网关</b><i>→</i><b>SOCKS隧道</b><i>→</i><b>内网服务</b></div>
         </section>
       </div>
     </>
@@ -3314,7 +3526,7 @@ function SocksView({
   onRefresh: () => Promise<void>;
   onToggle: (tunnel: NodeManagedTunnel, running: boolean) => Promise<void>;
   onToast: (value: string) => void;
-  onDetails: (name: string) => void;
+  onDetails: (tunnel: NodeManagedTunnel) => void;
 }) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<
@@ -3322,19 +3534,9 @@ function SocksView({
   >("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
-  useEffect(() => {
-    const refresh = window.setInterval(
-      () => void onRefresh().catch(() => undefined),
-      10000,
-    );
-    return () => window.clearInterval(refresh);
-  }, [onRefresh]);
-  const formatFlow = (value: number) =>
-    value < 1024
-      ? `${value} B`
-      : value < 1048576
-        ? `${(value / 1024).toFixed(1)} KB`
-        : `${(value / 1048576).toFixed(1)} MB`;
+  const localClock = useLocalClock(
+    tunnels.some((tunnel) => tunnel.countdown),
+  );
   const rows = tunnels.map((tunnel) => {
     const project = projects.find(
       (item) =>
@@ -3346,8 +3548,8 @@ function SocksView({
       tunnel,
       project,
       title: project?.name || tunnel.clientName || `Client ${tunnel.clientId}`,
-      host: `${nodeServiceHost(node)}:${tunnel.port || 10000 + tunnel.clientId}`,
-      flow: formatFlow(tunnel.inletFlow + tunnel.exportFlow),
+      host: tunnel.port ? `${nodeServiceHost(node)}:${tunnel.port}` : "节点未返回端口",
+      flow: formatBytes(tunnel.inletFlow + tunnel.exportFlow),
     };
   });
   const visibleRows = rows.filter(
@@ -3357,8 +3559,8 @@ function SocksView({
         .includes(query.toLowerCase()) &&
       (statusFilter === "all" ||
         (statusFilter === "running"
-          ? row.tunnel.configured
-          : !row.tunnel.configured)),
+          ? row.tunnel.running
+          : !row.tunnel.running)),
   );
   const safePage = Math.min(
     page,
@@ -3368,34 +3570,36 @@ function SocksView({
     (safePage - 1) * pageSize,
     safePage * pageSize,
   );
-  const runningCount = rows.filter((row) => row.tunnel.configured).length;
+  const runningCount = rows.filter((row) => row.tunnel.running).length;
+  const activeCount = rows.filter((row) => row.tunnel.active).length;
+  const countdownCount = rows.filter((row) => row.tunnel.countdown).length;
   const startAvailable = async () => {
-    const available = tunnels.filter((tunnel) => !tunnel.configured);
+    const available = tunnels.filter((tunnel) => !tunnel.running);
     const results = await Promise.allSettled(
       available.map((tunnel) => onToggle(tunnel, true)),
     );
     const started = results.filter(
       (result) => result.status === "fulfilled",
     ).length;
-    onToast(`已启动 ${started} 个通道，${results.length - started} 个失败`);
+    onToast(`已启动 ${started} 个 SOCKS隧道，${results.length - started} 个失败`);
   };
   return (
     <>
       <div className="page-heading">
         <div>
           <div className="breadcrumb">网络服务</div>
-          <h1>托管通道</h1>
-          <p>展示并控制节点实际存在的全部 SOCKS 通道</p>
+          <h1>SOCKS隧道</h1>
+          <p>展示并控制节点实际存在的全部 SOCKS隧道</p>
         </div>
         <div className="heading-actions">
           <button
             className="btn secondary"
             onClick={() =>
               void onRefresh()
-                .then(() => onToast("已从节点刷新全部 SOCKS 通道和流量状态"))
+                .then(() => onToast("已从节点刷新全部 SOCKS隧道和流量状态"))
                 .catch((error) =>
                   onToast(
-                    error instanceof Error ? error.message : "通道状态刷新失败",
+                    error instanceof Error ? error.message : "SOCKS隧道状态刷新失败",
                   ),
                 )
             }
@@ -3407,32 +3611,37 @@ function SocksView({
             disabled={!rows.some((row) => !row.tunnel.running)}
             onClick={startAvailable}
           >
-            启动全部已关闭通道
+            启动全部已关闭隧道
           </button>
         </div>
       </div>
       <div className="socks-summary">
         <div>
-          <span>托管实例</span>
+          <span>隧道总数</span>
           <strong>{rows.length}</strong>
-          <small>节点实际返回的 SOCKS 通道</small>
+          <small>节点实际返回的 SOCKS隧道</small>
         </div>
         <div>
           <span>运行中</span>
           <strong className="teal-text">{runningCount}</strong>
-          <small>通道已由节点开启</small>
+          <small>隧道已由节点开启</small>
         </div>
         <div>
-          <span>已关闭</span>
-          <strong>{rows.length - runningCount}</strong>
-          <small>通道当前处于关闭状态</small>
+          <span>流量活跃</span>
+          <strong className="teal-text">{activeCount}</strong>
+          <small>当前有 SOCKS 流量的隧道</small>
+        </div>
+        <div>
+          <span>空闲倒计时</span>
+          <strong>{countdownCount}</strong>
+          <small>等待 NPS 自动关闭的隧道</small>
         </div>
       </div>
       <div className="content-card">
         <div className="card-header search-card-header">
           <div>
-            <h2>节点 SOCKS 通道</h2>
-            <p>状态与活跃状态直接来自节点实时数据</p>
+            <h2>节点 SOCKS隧道</h2>
+            <p>状态与活跃情况来自最近一次节点同步</p>
           </div>
           <div className="management-tools">
             <div className="table-search">
@@ -3466,32 +3675,38 @@ function SocksView({
               <table className="socks-table">
                 <thead>
                   <tr>
-                    <th>通道</th>
+                    <th>隧道</th>
                     <th>节点 / Client</th>
                     <th>访问地址</th>
                     <th>项目绑定</th>
-                    <th>状态</th>
                     <th>累计流量</th>
+                    <th>运行状态</th>
                     <th>活跃状态</th>
                     <th className="socks-actions-heading">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {pagedRows.map((row) => {
-                    const isRunning = row.tunnel.configured;
-                    const isActive = row.tunnel.running;
+                    const isRunning = row.tunnel.running;
+                    const isActive = row.tunnel.active;
+                    const remainingSeconds = localTunnelRemainingSeconds(
+                      row.tunnel,
+                      localClock,
+                    );
+                    const countdownExpired =
+                      row.tunnel.countdown && remainingSeconds === 0;
                     const toggleRunning = () =>
                       void onToggle(row.tunnel, !isRunning)
                         .then(() =>
                           onToast(
-                            `${row.title}通道已${isRunning ? "停止" : "启动"}`,
+                            `${row.title} SOCKS隧道已${isRunning ? "停止" : "启动"}`,
                           ),
                         )
                         .catch((error) =>
                           onToast(
                             error instanceof Error
                               ? error.message
-                              : "通道操作失败",
+                              : "SOCKS隧道操作失败",
                           ),
                         );
                     return (
@@ -3513,26 +3728,65 @@ function SocksView({
                           {row.project ? (
                             <button
                               className="socks-project-link"
-                              onClick={() => onDetails(row.project!.name)}
+                              onClick={() => onDetails(row.tunnel)}
                             >
                               {row.project.code}
                             </button>
                           ) : (
-                            <span className="socks-unbound">未绑定</span>
+                            <button
+                              className="socks-project-link socks-unbound"
+                              onClick={() => onDetails(row.tunnel)}
+                            >
+                              未绑定 · 查看
+                            </button>
                           )}
-                        </td>
-                        <td>
-                          <Tag tone={isRunning ? "green" : "gray"}>
-                            {isRunning ? "运行中" : "已关闭"}
-                          </Tag>
                         </td>
                         <td>
                           <strong className="socks-flow">{row.flow}</strong>
                         </td>
                         <td>
-                          <Tag tone={isActive ? "green" : "gray"}>
-                            {isActive ? "活跃中" : "非活跃"}
-                          </Tag>
+                          <div className={`socks-run-state ${isRunning ? "running" : "stopped"}`}>
+                            <i aria-hidden="true" />
+                            <strong>{isRunning ? "运行中" : "已关闭"}</strong>
+                          </div>
+                        </td>
+                        <td>
+                          <div
+                            className={`socks-activity-state ${!isRunning ? "stopped" : isActive ? "active" : countdownExpired ? "stale" : row.tunnel.countdown ? "countdown" : "waiting"}`}
+                          >
+                            <strong>
+                              {!isRunning
+                                ? "未运行"
+                                : isActive
+                                  ? "流量活跃"
+                                  : countdownExpired
+                                    ? "待刷新确认"
+                                    : row.tunnel.countdown
+                                      ? "空闲倒计时"
+                                      : "等待流量"}
+                            </strong>
+                            {row.tunnel.countdown && !countdownExpired && (
+                              <div className="socks-countdown-detail">
+                                <div>
+                                  <span>剩余</span>
+                                  <strong>{formatDuration(remainingSeconds)}</strong>
+                                </div>
+                                <div>
+                                  <span>关闭于</span>
+                                  <strong>{formatUnixTime(row.tunnel.autoCloseAt)}</strong>
+                                </div>
+                              </div>
+                            )}
+                            {countdownExpired && (
+                              <small>本地计时已归零，刷新后确认节点状态</small>
+                            )}
+                            {isActive && row.tunnel.lastActiveAt > 0 && (
+                              <small>最近活动 {formatUnixTime(row.tunnel.lastActiveAt)}</small>
+                            )}
+                            {!isActive && !row.tunnel.countdown && isRunning && (
+                              <small>采样于 {formatObservedTime(row.tunnel.observedAt)}</small>
+                            )}
+                          </div>
                         </td>
                         <td>
                           <div className="socks-row-actions">
@@ -3570,11 +3824,11 @@ function SocksView({
           </>
         ) : (
           <EmptyState
-            title={rows.length ? "没有匹配的通道" : "节点未返回 SOCKS 通道"}
+            title={rows.length ? "没有匹配的隧道" : "节点未返回 SOCKS隧道"}
             detail={
               rows.length
                 ? "请调整搜索词或状态筛选条件"
-                : "请检查节点上是否已经创建 SOCKS 类型通道"
+                : "请检查节点上是否已经创建 SOCKS 类型隧道"
             }
             onClear={
               rows.length
@@ -3697,7 +3951,7 @@ function ConnectionsView({
         <div className="card-header">
           <div>
             <h2>项目端口转发服务</h2>
-            <p>设备 Web 后台不在此列表，Web 访问固定经项目托管 SOCKS</p>
+            <p>设备 Web 后台不在此列表，Web 访问固定经项目 SOCKS隧道</p>
           </div>
           <div className="table-search">
             <span>⌕</span>
@@ -4229,6 +4483,7 @@ function MonitorView({
   onRevoke: (id: string) => Promise<void>;
   onToast: (value: string) => void;
 }) {
+  const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const userName = (id: string | null) =>
@@ -4240,11 +4495,17 @@ function MonitorView({
   const collectedAt = snapshot
     ? new Date(snapshot.collectedAt).toLocaleString("zh-CN")
     : "尚未采集";
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleSessions = sessions.filter((session) =>
+    `${session.domainPrefix || ""} ${userName(session.userId)} ${projectName(session.projectId)} ${session.deviceName} ${session.endpointName} ${session.mode} ${session.sourceIp}`
+      .toLowerCase()
+      .includes(normalizedQuery),
+  );
   const safePage = Math.min(
     page,
-    Math.max(1, Math.ceil(sessions.length / pageSize)),
+    Math.max(1, Math.ceil(visibleSessions.length / pageSize)),
   );
-  const pagedSessions = sessions.slice(
+  const pagedSessions = visibleSessions.slice(
     (safePage - 1) * pageSize,
     safePage * pageSize,
   );
@@ -4254,11 +4515,11 @@ function MonitorView({
         <div>
           <div className="breadcrumb">运行中心</div>
           <h1>系统监控</h1>
-          <p>平台、接入节点、托管通道与远程会话当前状态</p>
+          <p>平台、接入节点、SOCKS隧道与远程会话当前状态</p>
         </div>
         <div className="heading-actions">
           <Tag tone={snapshot ? "green" : "gray"}>
-            {loading ? "正在采集" : "实时快照"}
+            {loading ? "正在采集" : "状态快照"}
           </Tag>
           <button
             className="btn secondary"
@@ -4287,7 +4548,7 @@ function MonitorView({
           value={
             snapshot ? `${snapshot.nodeReachable}/${snapshot.nodeTotal}` : "—"
           }
-          detail="通过节点通道接口验证"
+          detail="通过节点 SOCKS隧道接口验证"
           tone="blue"
         />
         <Metric
@@ -4303,7 +4564,7 @@ function MonitorView({
               ? formatBytes(snapshot.inletFlow + snapshot.exportFlow)
               : "—"
           }
-          detail="节点托管通道累计计数"
+          detail="节点 SOCKS隧道累计计数"
           tone="amber"
         />
       </div>
@@ -4311,14 +4572,14 @@ function MonitorView({
         <div className="monitor-chart">
           <div className="monitor-head">
             <div>
-              <h2>远程访问实时指标</h2>
-              <p>来自节点托管通道计数器与平台数据库 · {collectedAt}</p>
+              <h2>远程访问状态指标</h2>
+              <p>来自节点 SOCKS隧道计数器与平台数据库 · {collectedAt}</p>
             </div>
           </div>
           {snapshot ? (
             <div className="monitor-current-grid">
               <div>
-                <span>托管通道</span>
+                <span>SOCKS隧道</span>
                 <strong>
                   {snapshot.tunnelRunning} / {snapshot.tunnelTotal}
                 </strong>
@@ -4351,7 +4612,7 @@ function MonitorView({
           <div className="monitor-head">
             <div>
               <h2>节点健康度</h2>
-              <p>每次刷新都实际读取节点托管通道接口</p>
+              <p>点击刷新时读取节点 SOCKS隧道接口</p>
             </div>
           </div>
           {nodeSnapshots.length ? (
@@ -4391,7 +4652,7 @@ function MonitorView({
                       <b>{node.reachable ? `${node.latencyMs} ms` : "—"}</b>
                     </span>
                     <span>
-                      通道{" "}
+                      隧道{" "}
                       <b>
                         {node.runningTunnels}/{node.tunnelCount}
                       </b>
@@ -4417,14 +4678,27 @@ function MonitorView({
         </div>
       </div>
       <div className="content-card">
-        <div className="card-header">
+        <div className="card-header search-card-header">
           <div>
             <h2>活动访问会话</h2>
             <p>仅显示当前真实可用的访问；空闲超时或终止后授权立即失效</p>
           </div>
-          <Tag tone="green">{sessions.length} 个活动会话</Tag>
+          <div className="management-tools">
+            <div className="table-search">
+              <span>⌕</span>
+              <input
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setPage(1);
+                }}
+                placeholder="搜索用户、项目、目标、来源 IP 或域名前缀"
+              />
+            </div>
+            <Tag tone="green">{visibleSessions.length} 个活动会话</Tag>
+          </div>
         </div>
-        {sessions.length ? (
+        {visibleSessions.length ? (
           <>
             <div className="table-wrap">
               <table className="device-table">
@@ -4490,7 +4764,7 @@ function MonitorView({
               </table>
             </div>
             <PaginationFooter
-              total={sessions.length}
+              total={visibleSessions.length}
               page={safePage}
               pageSize={pageSize}
               onPageChange={setPage}
@@ -4500,8 +4774,9 @@ function MonitorView({
           </>
         ) : (
           <EmptyState
-            title="暂无活动访问会话"
-            detail="新的 Web 或 WebSSH 会话建立后会显示在这里"
+            title={sessions.length ? "没有匹配的活动会话" : "暂无活动访问会话"}
+            detail={sessions.length ? "请调整用户、项目、目标、来源 IP 或域名前缀关键词" : "新的 Web 或 WebSSH 会话建立后会显示在这里"}
+            onClear={sessions.length ? () => setQuery("") : undefined}
           />
         )}
       </div>
@@ -4519,7 +4794,7 @@ function ProjectAccessSummary({
   onNetworksChange,
 }: {
   project: ProjectView;
-  socksRunning: boolean;
+  socksRunning?: boolean;
   canManage: boolean;
   onImport: () => void;
   onAdd: () => void;
@@ -4564,7 +4839,7 @@ function ProjectAccessSummary({
       <div className="project-access-head">
         <div>
           <h2>网络与访问</h2>
-          <p>关联 Client、托管通道和设备发现范围</p>
+          <p>关联 Client、SOCKS隧道和设备发现范围</p>
         </div>
         {canManage && (
           <div>
@@ -4587,17 +4862,21 @@ function ProjectAccessSummary({
         </div>
         <div className="access-fact access-channel">
           <span className="label-with-help">
-            托管 SOCKS{" "}
-            <HelpTip text="只供平台远程访问服务使用。普通用户和浏览器不会直接获得地址或认证信息；启停请在托管通道页面操作。" />
+            SOCKS隧道{" "}
+            <HelpTip text="只供平台远程访问服务使用。普通用户和浏览器不会直接获得地址或认证信息；启停请在 SOCKS隧道页面操作。" />
           </span>
           <div>
             <strong>Client ID {project.clientId}</strong>
-            <Tag tone={socksRunning ? "green" : "gray"}>
-              {socksRunning ? "运行中" : "已关闭"}
+            <Tag tone={socksRunning === true ? "green" : "gray"}>
+              {socksRunning === undefined ? "按需检查" : socksRunning ? "运行中" : "已关闭"}
             </Tag>
           </div>
           <small>
-            {socksRunning ? "节点当前正在监听" : "远程访问时平台自动开启"}
+            {socksRunning === undefined
+              ? "建立远程访问时由平台检查并按需开启"
+              : socksRunning
+                ? "节点当前正在监听"
+                : "远程访问时平台自动开启"}
           </small>
         </div>
         <div className="access-scope">
@@ -4809,10 +5088,10 @@ function AccessPortal({
                 <tr key={device.id}>
                   <td><div className="overview-device-name"><span className="mini-monitor">▣</span><div><strong>{device.name}</strong><small>{device.vendor || "未识别设备"}</small></div></div></td>
                   <td><span className="project-cell"><i />{device.projectName}</span></td>
-                  <td><code>{device.host}</code></td>
+                  <td><code>{user?.role === "temporary" ? "受保护" : device.host}</code></td>
                   <td><StatusDot status={device.status} /></td>
                   <td><strong>{device.webServices.length}</strong><small className="table-subtext"> 个入口</small></td>
-                  <td>{device.ssh ? <Tag tone="blue">SSH · {device.sshPort}</Tag> : <span className="empty-cell">—</span>}</td>
+                  <td>{device.ssh ? <Tag tone="blue">{user?.role === "temporary" ? "WebSSH" : `SSH · ${device.sshPort}`}</Tag> : <span className="empty-cell">—</span>}</td>
                   <td><div className="portal-row-actions">{device.webServices.map((service) => <button key={service.url} className="action-web" onClick={() => onWeb(device, service.url)}>{service.name} ↗</button>)}{device.ssh && <button onClick={() => onSsh(device)}>WebSSH →</button>}{!device.webServices.length && !device.ssh && <span className="empty-cell">暂无入口</span>}</div></td>
                 </tr>
               ))}</tbody>
@@ -4928,7 +5207,7 @@ function Workspace({
               0,
             ),
           )}
-          detail="全部经托管 SOCKS"
+          detail="全部经 SOCKS隧道"
           tone="violet"
         />
         <Metric
@@ -4943,7 +5222,7 @@ function Workspace({
         <div className="card-header">
           <div>
             <h2>设备列表</h2>
-            <p>Web 后台与 WebSSH 均通过项目托管 SOCKS 访问</p>
+            <p>Web 后台与 WebSSH 均通过项目 SOCKS隧道访问</p>
           </div>
           <div className="table-tools">
             <div className="table-search">
@@ -4982,7 +5261,7 @@ function Workspace({
                     <th>
                       <span className="label-with-help">
                         状态{" "}
-                        <HelpTip text="手工添加的设备初始为待检测。点击该设备的检测服务后，平台只通过项目托管通道探测已经登记的端口。" />
+                        <HelpTip text="手工添加的设备初始为待检测。点击该设备的检测服务后，平台只通过项目 SOCKS隧道探测已经登记的端口。" />
                       </span>
                     </th>
                     <th>
@@ -4995,7 +5274,7 @@ function Workspace({
                     <th className="remote-actions-column">
                       <span className="label-with-help">
                         远程访问{" "}
-                        <HelpTip text="打开独立标签页，经平台远程访问服务和项目托管通道访问设备，不会新建 Web 端口转发。" />
+                        <HelpTip text="打开独立标签页，经平台远程访问服务和项目 SOCKS隧道访问设备，不会新建 Web 端口转发。" />
                       </span>
                     </th>
                     {canManage && (
@@ -5240,7 +5519,7 @@ function NodesView({
         <Metric
           label="活跃 SOCKS"
           value={String(activeTunnels)}
-          detail={`${nodes.reduce((total, node) => total + node.tunnels, 0)} 个托管通道`}
+          detail={`${nodes.reduce((total, node) => total + node.tunnels, 0)} 个 SOCKS隧道`}
           tone="violet"
         />
         <Metric
@@ -5287,7 +5566,7 @@ function NodesView({
                   <th>状态</th>
                   <th>项目</th>
                   <th>Client</th>
-                  <th>托管通道</th>
+                  <th>SOCKS隧道</th>
                   <th>API 延迟</th>
                   <th>端口池</th>
                   <th>操作</th>
@@ -6402,7 +6681,7 @@ function DiscoveryView({
             <b>/</b>设备发现
           </div>
           <h1>内网设备发现</h1>
-          <p>通过项目托管 SOCKS 对项目设置中的内网 IP 段执行协议探测</p>
+          <p>通过项目 SOCKS隧道对项目设置中的内网 IP 段执行协议探测</p>
         </div>
         <button
           className={`btn ${active ? "secondary" : "primary"}`}
@@ -6861,7 +7140,7 @@ function DiscoveryView({
                   </button>
                   <span>
                     将导入 <b>{selectedServices.length}</b> 个服务；Web
-                    服务经托管 SOCKS 访问，SSH/RTSP/TCP
+                    服务经 SOCKS隧道访问，SSH/RTSP/TCP
                     仅登记目标，按需另建端口转发。
                   </span>
                 </footer>
@@ -7054,6 +7333,84 @@ function ModalFrame({
         {children}
       </div>
     </div>
+  );
+}
+
+function ChangePasswordModal({
+  username,
+  onClose,
+  onChanged,
+}: {
+  username: string;
+  onClose: () => void;
+  onChanged: (user: APIUser) => void;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <ModalFrame onClose={onClose}>
+      <form
+        className="form-modal"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const form = new FormData(event.currentTarget);
+          const currentPassword = String(form.get("currentPassword") || "");
+          const newPassword = String(form.get("newPassword") || "");
+          const confirmPassword = String(form.get("confirmPassword") || "");
+          if (newPassword !== confirmPassword) {
+            setError("两次输入的新密码不一致");
+            return;
+          }
+          if (currentPassword === newPassword) {
+            setError("新密码不能与当前密码相同");
+            return;
+          }
+          setSubmitting(true);
+          setError("");
+          try {
+            const result = await api.changePassword(currentPassword, newPassword);
+            onChanged(result.user);
+          } catch (reason) {
+            setError(reason instanceof Error ? reason.message : "密码修改失败");
+            setSubmitting(false);
+          }
+        }}
+      >
+        <div className="form-head">
+          <div>
+            <h2>账户安全</h2>
+            <p>{username} · 修改登录密码</p>
+          </div>
+          <button type="button" aria-label="关闭" onClick={onClose}>×</button>
+        </div>
+        <div className="route-note account-security-note">
+          <span>✓</span>
+          <div>
+            <strong>修改成功后将保护所有登录入口</strong>
+            <small>当前浏览器会安全续期，其他浏览器与设备上的登录会话将立即退出。</small>
+          </div>
+        </div>
+        <div className="form-grid password-change-grid">
+          <label className="full">
+            当前密码
+            <input name="currentPassword" type="password" required autoComplete="current-password" placeholder="输入当前登录密码" />
+          </label>
+          <label className="full">
+            新密码
+            <input name="newPassword" type="password" required minLength={12} maxLength={1024} autoComplete="new-password" placeholder="至少 12 个字符" />
+          </label>
+          <label className="full">
+            确认新密码
+            <input name="confirmPassword" type="password" required minLength={12} maxLength={1024} autoComplete="new-password" placeholder="再次输入新密码" />
+          </label>
+        </div>
+        {error && <div className="form-error" role="alert">{error}</div>}
+        <div className="form-actions">
+          <button type="button" className="btn secondary" onClick={onClose} disabled={submitting}>取消</button>
+          <button type="submit" className="btn primary" disabled={submitting}>{submitting ? "正在修改…" : "确认修改"}</button>
+        </div>
+      </form>
+    </ModalFrame>
   );
 }
 
@@ -7728,6 +8085,8 @@ function ClientCombobox({
 }) {
   const listID = useId();
   const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const query = value.trim().toLowerCase();
   const visibleClients = clients.filter((client) => {
@@ -7741,7 +8100,11 @@ function ClientCombobox({
   useEffect(() => {
     if (!open) return;
     const close = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (
+        !rootRef.current?.contains(event.target as Node) &&
+        !menuRef.current?.contains(event.target as Node)
+      )
+        setOpen(false);
     };
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
@@ -7750,6 +8113,7 @@ function ClientCombobox({
   return (
     <div className="client-combobox" ref={rootRef}>
       <input
+        ref={inputRef}
         name="clientId"
         type="text"
         inputMode="numeric"
@@ -7775,7 +8139,12 @@ function ClientCombobox({
         }}
       />
       {open && (
-        <div className="client-combobox-menu" id={listID} role="listbox">
+        <FloatingMenu
+          anchorRef={inputRef}
+          menuRef={menuRef}
+          className="client-combobox-menu"
+          id={listID}
+        >
           {visibleClients.length > 0 ? (
             visibleClients.map((client) => (
               <button
@@ -7799,7 +8168,7 @@ function ClientCombobox({
           ) : (
             <p>没有匹配的 Client，可直接输入 ID</p>
           )}
-        </div>
+        </FloatingMenu>
       )}
     </div>
   );
@@ -7895,8 +8264,7 @@ function ResourceModal({
         ["节点名称", "例如：华北接入节点"],
         ["API 地址", "https://access-bj.example.com:6443"],
         ["TLS 校验主机名", "证书 SAN 覆盖的域名"],
-        ["认证账号", "节点管理账号"],
-        ["认证密码", "节点管理密码"],
+        ["NPS API 密钥", "至少 32 字节的独立 auth_key"],
         ["端口池", "26000-27999"],
       ],
     },
@@ -7929,8 +8297,7 @@ function ResourceModal({
         ["节点名称", "节点名称"],
         ["API 地址", "节点 API 地址"],
         ["TLS 校验主机名", "证书 SAN 覆盖的域名"],
-        ["认证账号", "留空保留现有账号"],
-        ["认证密码", "已配置；留空保持不变"],
+        ["NPS API 密钥", "已配置；留空保持不变"],
         ["端口池", "例如 22000-23999"],
         ["节点状态", "启用或维护中"],
       ],
@@ -7999,9 +8366,9 @@ function ResourceModal({
           };
           if (
             kind === "create-node" &&
-            (!fieldValue("认证账号") || !fieldValue("认证密码"))
+            !fieldValue("NPS API 密钥")
           ) {
-            setFormError("请填写节点认证账号和密码");
+            setFormError("请填写至少 32 字节的 NPS API 密钥");
             return;
           }
           const first = String(form.get("field-0") || current.label);
@@ -8046,10 +8413,12 @@ function ResourceModal({
             const selectedChoices = multiChoices[label] || [];
             const initialValue = initialValues[label];
             const required = !OPTIONAL_RESOURCE_FIELDS.has(label);
-            const passwordField = label.includes("密码");
+            const passwordField = label.includes("密码") || label.includes("密钥");
             const passwordMinLength =
               label === "初始密码" || label === "新密码（选填）"
                 ? 12
+                : label === "NPS API 密钥"
+                  ? 32
                 : undefined;
             return (
               <div
@@ -8693,27 +9062,45 @@ function SensitiveValue({
 }
 
 function SocksDetailModal({
-  name,
+  tunnelKey,
   projects,
   nodes,
+  tunnels,
   onClose,
 }: {
-  name: string;
+  tunnelKey: string;
   projects: ProjectView[];
   nodes: NodeView[];
+  tunnels: NodeManagedTunnel[];
   onClose: () => void;
 }) {
-  const project = projects.find((item) => item.name === name) || projects[0];
-  const node = nodes.find((item) => item.name === project?.node) || nodes[0];
-  if (!project || !node) return null;
+  const tunnel = tunnels.find(
+    (item) => `${item.nodeId}:${item.clientId}` === tunnelKey,
+  );
+  const localClock = useLocalClock(Boolean(tunnel?.countdown));
+  if (!tunnel) return null;
+  const project = projects.find(
+    (item) =>
+      item.nodeId === tunnel.nodeId && item.clientId === tunnel.clientId,
+  );
+  const node = nodes.find((item) => item.id === tunnel.nodeId);
+  const title = project?.name || tunnel.clientName || `Client ${tunnel.clientId}`;
+  const runtimeLabel = tunnel.active
+    ? "流量活跃"
+    : tunnel.countdown
+      ? "空闲倒计时"
+      : tunnel.running
+        ? "等待流量"
+        : "已停止";
+  const remainingSeconds = localTunnelRemainingSeconds(tunnel, localClock);
   return (
     <ModalFrame onClose={onClose}>
       <div className="form-modal">
         <div className="form-head">
           <div>
-            <h2>托管通道详情</h2>
+            <h2>SOCKS隧道详情</h2>
             <p>
-              {project.name} · Client ID {project.clientId}
+              {title} · Client ID {tunnel.clientId}
             </p>
           </div>
           <button type="button" aria-label="关闭" onClick={onClose}>
@@ -8730,27 +9117,69 @@ function SocksDetailModal({
         <div className="detail-grid">
           <div>
             <span>接入节点</span>
-            <strong>{node.name}</strong>
-            <small>{node.tlsName}</small>
+            <strong>{node?.name || tunnel.nodeName}</strong>
+            <small>{node?.tlsName || "—"}</small>
           </div>
           <div>
             <span>内部访问地址</span>
-            <strong>{projectSocksAddress(project, nodes)}</strong>
-            <small>由节点返回的 SOCKS 端口确定</small>
+            <strong>
+              {tunnel.port
+                ? `${nodeServiceHost(node)}:${tunnel.port}`
+                : "节点未返回端口"}
+            </strong>
+            <small>端口由 NPS SOCKS隧道详情返回</small>
           </div>
           <div>
             <span>关联 Client</span>
-            <strong>Client ID {project.clientId}</strong>
-            <small>{project.clientStatus}</small>
+            <strong>Client ID {tunnel.clientId}</strong>
+            <small>{project?.clientStatus || tunnel.clientName || "未绑定项目"}</small>
           </div>
           <div>
             <span>设备发现网段</span>
             <strong>
-              {project.networks.length
+              {project?.networks.length
                 ? project.networks.join(" · ")
                 : "尚未配置"}
             </strong>
             <small>只用于控制自动扫描范围</small>
+          </div>
+          <div>
+            <span>运行 / 活跃状态</span>
+            <strong>
+              {tunnel.running ? "运行中" : "已关闭"} · {runtimeLabel}
+            </strong>
+            <small>采样于 {formatObservedTime(tunnel.observedAt)}</small>
+          </div>
+          <div>
+            <span>剩余时长</span>
+            <strong>
+              {tunnel.countdown
+                ? remainingSeconds > 0
+                  ? formatDuration(remainingSeconds)
+                  : "倒计时已结束，等待刷新确认"
+                : "未进入倒计时"}
+            </strong>
+            <small>
+              自动关闭时间 {formatUnixTime(tunnel.autoCloseAt)}
+            </small>
+          </div>
+          <div>
+            <span>最近活动</span>
+            <strong>{formatUnixTime(tunnel.lastActiveAt)}</strong>
+            <small>
+              已空闲 {formatDuration(tunnel.idleSeconds)} · 阈值{" "}
+              {formatDuration(tunnel.autoCloseTimeoutSeconds)}
+            </small>
+          </div>
+          <div>
+            <span>累计流量</span>
+            <strong>
+              {formatBytes(tunnel.inletFlow + tunnel.exportFlow)}
+            </strong>
+            <small>
+              入 {formatBytes(tunnel.inletFlow)} · 出{" "}
+              {formatBytes(tunnel.exportFlow)}
+            </small>
           </div>
         </div>
         <div className="form-actions">

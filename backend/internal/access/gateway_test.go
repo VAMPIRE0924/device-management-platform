@@ -166,7 +166,7 @@ func TestHTMLGetsVisibleProxyDisclosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(rewritten), `data-i5cloud-proxy-notice="true"`) || !strings.Contains(string(rewritten), "当前页面由目标内网设备提供") {
+	if !strings.Contains(string(rewritten), `data-i5cloud-proxy-notice="true"`) || !strings.Contains(string(rewritten), "远程连接安全访问通道") || !strings.Contains(string(rewritten), "已连接目标内网设备") || !strings.Contains(string(rewritten), "页面内容由目标设备提供") {
 		t.Fatalf("credential disclosure missing: %s", rewritten)
 	}
 	if response.ContentLength != int64(len(rewritten)) || response.Header.Get("Content-Length") != strconv.Itoa(len(rewritten)) {

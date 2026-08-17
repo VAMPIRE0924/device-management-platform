@@ -25,7 +25,7 @@ test("keeps the complete formal navigation and no preview artifacts", async () =
     readFile(pageURL, "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
-  contains(page, ["概览", "访问门户", "客户项目", "托管通道", "接入节点", "用户与权限", "访问策略", "运行监控", "访问审计", "系统设置"]);
+  contains(page, ["概览", "访问门户", "客户项目", "SOCKS隧道", "接入节点", "用户与权限", "访问策略", "运行监控", "访问审计", "系统设置"]);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
   assert.doesNotMatch(page, /SkeletonPreview|codex-preview|remote-management-demo/);
   assert.match(packageJson, /"name": "device-management-platform-frontend"/);
@@ -40,6 +40,12 @@ test("uses the authenticated versioned backend contract", async () => {
   assert.doesNotMatch(config, /mock|fakeData|fixture/i);
 });
 
+test("deduplicates and briefly reuses safe read queries across page reloads", async () => {
+  const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
+  contains(api, ["dmp.read-cache.v1:", "defaultReadCacheTTL = 10_000", "freshReadThrottleMs = 2_000", "inFlightReads", "inFlightFreshReads", "memoryReadCache", "readCanPersist(path)", "lastFreshReadAt", "readCacheGeneration", "readPathGenerations", "invalidateReadPath(path)", "window.sessionStorage", "Cache-Control", "no-store", "no-cache", "if (method !== \"GET\") clearReadCache()", "cacheGeneration === readCacheGeneration", "pathGeneration === (readPathGenerations.get(path) || 0)", "clearReadCache();\n  form.submit()", 'request<APIUser>("/api/v1/auth/me", {}, { cache: false, fresh: true })', "{ cache: false, fresh: true }"]);
+  contains(page, ["api.monitorSnapshot(true)", "api.nodeHealth(node.id, true)", "api.managedTunnels(node.id, true)", "api.nodeClients(node.id, true)"]);
+});
+
 test("keeps formal login, MFA and editable deployment settings", async () => {
   const [page, api, styles] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8"), readFile(stylesURL, "utf8")]);
   contains(page, ["修改初始密码", "绑定并验证邮箱", "开启双重认证", "认证器令牌", "邮箱验证码", "保存系统设置", "SMTP 主机", "SMTP 密码", "HTTP 端口", "HTTPS 端口", "面板证书文件路径", "面板私钥文件路径", "面板地址", "反代地址", "反代端口", "独立设置反代端口", "反代证书文件路径", "反代私钥文件路径"]);
@@ -48,6 +54,12 @@ test("keeps formal login, MFA and editable deployment settings", async () => {
   assert.doesNotMatch(styles, /\.domain-prefix-input > span \{[^}]*border-right:/);
   contains(api, ["/auth/onboarding/password", "/auth/onboarding/email/send", "/auth/onboarding/email/verify", "/auth/mfa/start", "/auth/mfa/complete", "/mfa/reset", "/settings/security"]);
   assert.doesNotMatch(page, /不可在线降低的边界|连接安全|本机 Relay（无 TLS）|可信反向代理 CIDR|生产环境|开发环境|测试环境/);
+});
+
+test("provides authenticated self-service password changes for every user role", async () => {
+  const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
+  contains(page, ["账户安全", "打开账户安全设置", "当前密码", "确认新密码", "其他浏览器与设备上的登录会话将立即退出", "roleViews", 'role === "temporary"']);
+  contains(api, ['request<APIAuthSession>("/api/v1/auth/password"', 'method: "PUT"', "currentPassword", "newPassword", "rememberSession(result)"]);
 });
 
 test("initializes the first administrator without deployment tokens", async () => {
@@ -68,17 +80,26 @@ test("opens opaque Web and SSH sessions without exposing routes", async () => {
 
 test("keeps node configuration minimal and Client management add-only", async () => {
   const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
-  contains(page, ["API 地址", "TLS 校验主机名", "认证账号", "认证密码", "AES-GCM 加密后写入数据库", "现有 Client 只读", "Basic 认证用户名", "Basic 认证密码", "唯一验证密钥", "留空自动生成"]);
+  contains(page, ["API 地址", "TLS 校验主机名", "NPS API 密钥", "HMAC-SHA256", "AES-GCM 加密保存", "现有 Client 只读", "Basic 认证用户名", "Basic 认证密码", "唯一验证密钥", "留空自动生成"]);
   for (const removed of ["接入方式", "通道访问主机", "客户端接入主机", "客户端接入端口", "来源限制", "高级密钥引用", "删除 Client", "编辑 Client"]) assert.doesNotMatch(page, new RegExp(removed));
   contains(api, ["createNodeClient", "nodeClientCredentials"]);
   assert.doesNotMatch(api, /deleteNodeClient|updateNodeClient/);
 });
 
 test("shows all node tunnels with independent state and activity", async () => {
-  const page = await readFile(pageURL, "utf8");
-  contains(page, ["节点实际返回的 SOCKS 通道", "未绑定", "运行中", "已关闭", "活跃中", "非活跃", "域名前缀", "session.domainPrefix", "每次创建 Web 访问会话时生成独立的 8 位随机域名前缀", 'className="socks-table"', "api.setManagedTunnel", "markProjectTunnelOpen(project)"]);
+  const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
+  contains(page, ["节点实际返回的 SOCKS隧道", "未绑定", "运行状态", "活跃状态", "运行中", "已关闭", "流量活跃", "空闲倒计时", "剩余时长", "自动关闭时间", "最近活动", "采样于", "formatDuration", "localTunnelRemainingSeconds", "本地计时已归零，刷新后确认节点状态", "socks-run-state", "socks-activity-state", "remainingSeconds", "autoCloseAt", "observedAt", "端口由 NPS SOCKS隧道详情返回", "域名前缀", "session.domainPrefix", "每次创建 Web 访问会话时生成独立的 8 位随机域名前缀", 'className="socks-table"', "api.setManagedTunnel", "const status = await api.setManagedTunnel", "markProjectTunnelOpen(project)"]);
+  assert.doesNotMatch(page, /托管通道|托管隧道|托管 SOCKS|SOCKS 通道/);
+  contains(api, ["return request<APIManagedTunnel>", "/managed-tunnels/"]);
   assert.doesNotMatch(page, /<th>会话<\/th>|session\.id\.slice\(0, 8\)<\/code>/);
-  assert.doesNotMatch(page, /inactiveCountdown|非活跃倒计时|activityClock|空闲倒计时|className="socks-card"/);
+  assert.doesNotMatch(page, /inactiveCountdown|非活跃倒计时|activityClock|className="socks-card"|按 Client ID 推算 SOCKS 端口/);
+  assert.doesNotMatch(page, /setInterval\([\s\S]{0,160}onRefresh/);
+});
+
+test("keeps UI clocks local and limits necessary background polling", async () => {
+  const page = await readFile(pageURL, "utf8");
+  contains(page, ["useLocalClock", "setNow(Date.now())", "document.visibilityState", "visibilitychange", "setTimeout(() => void poll(), 5000)"]);
+  assert.doesNotMatch(page, /setInterval\([\s\S]{0,200}(?:api\.|onRefresh|poll\()/);
 });
 
 test("creates projects by binding an existing Client and scopes CIDRs to discovery", async () => {
@@ -111,7 +132,13 @@ test("edits devices atomically with per-service HTTPS and practical SSH settings
 test("uses shared pagination, accessible dialogs and destructive confirmation", async () => {
   const [page, styles] = await Promise.all([readFile(pageURL, "utf8"), readFile(stylesURL, "utf8")]);
   contains(page, ["function Pagination", "每页显示", "function ConfirmButton", 'role="dialog"', "aria-modal", 'event.key === "Escape"', 'confirmLabel="确认停止？"', 'label="删除设备"', 'label="删除项目"']);
+  contains(page, ["搜索用户、项目、目标、来源 IP 或域名前缀", "visibleSessions"]);
   contains(styles, [".pagination-footer", ".showcase-hero", ".app-shell", ".sidebar", "main {", "overflow-y: auto"]);
+  contains(page, ["function FloatingMenu", "createPortal", 'event.target !== menuRef.current', 'window.addEventListener("scroll", handleScroll, true)', 'onWheel={(event) => event.stopPropagation()}', 'onTouchMove={(event) => event.stopPropagation()}', 'getPropertyValue("--floating-menu-min-width")']);
+  contains(styles, ["overscroll-behavior: contain", "scrollbar-gutter: stable", "-webkit-overflow-scrolling: touch", "touch-action: pan-y", "--floating-menu-min-width: 150px"]);
+  contains(styles, [".pagination-footer .pagination-buttons > button", ".pagination-footer .pagination-buttons > button.current", ".pagination-footer .pagination-buttons > button:disabled"]);
+  assert.doesNotMatch(styles, /\.table-footer\s+div\s*\{/);
+  assert.doesNotMatch(styles, /\.table-footer\s+button(?:\.[\w-]+)?\s*\{/);
 });
 
 test("keeps contextual help single-layered and typography readable", async () => {

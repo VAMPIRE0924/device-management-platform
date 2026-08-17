@@ -14,7 +14,7 @@ import (
 
 func (s *Store) ListPortForwards(ctx context.Context, projectID string) ([]PortForward, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,p.client_id,d.host,e.target_port,f.server_port,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
+SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,p.client_id,d.host,e.target_port,f.server_port,f.node_task_type,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
 FROM port_forwards f
 JOIN endpoints e ON e.id = f.endpoint_id
 JOIN devices d ON d.id = e.device_id
@@ -98,9 +98,12 @@ func (s *Store) ReservePortForward(ctx context.Context, input ReservePortForward
 	return PortForward{ID: forwardID, ProjectID: route.ProjectID, EndpointID: route.EndpointID, EndpointName: route.EndpointName, DeviceName: route.DeviceName, NodeID: route.NodeID, ClientID: route.ClientID, Target: net.JoinHostPort(route.Host, strconv.Itoa(route.TargetPort)), ServerPort: serverPort, Status: "provisioning", ExpiresAt: input.ExpiresAt, CreatedAt: now, UpdatedAt: now}, nil
 }
 
-func (s *Store) ActivatePortForward(ctx context.Context, forwardID string, nodeTaskID int) error {
+func (s *Store) ActivatePortForward(ctx context.Context, forwardID, nodeTaskType string, nodeTaskID int) error {
+	if nodeTaskType != "portForward" || nodeTaskID < 1 {
+		return fmt.Errorf("invalid NPS port-forward task reference")
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := s.db.ExecContext(ctx, `UPDATE port_forwards SET node_task_id = ?, status = 'running', updated_at = ? WHERE id = ? AND status = 'provisioning'`, nodeTaskID, now, forwardID)
+	result, err := s.db.ExecContext(ctx, `UPDATE port_forwards SET node_task_type = ?, node_task_id = ?, status = 'running', updated_at = ? WHERE id = ? AND status = 'provisioning'`, nodeTaskType, nodeTaskID, now, forwardID)
 	if err != nil {
 		return err
 	}
@@ -116,7 +119,7 @@ func (s *Store) ActivatePortForward(ctx context.Context, forwardID string, nodeT
 
 func (s *Store) PortForwardByID(ctx context.Context, forwardID string) (PortForward, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,p.client_id,d.host,e.target_port,f.server_port,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
+SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,p.client_id,d.host,e.target_port,f.server_port,f.node_task_type,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
 FROM port_forwards f
 JOIN endpoints e ON e.id = f.endpoint_id
 JOIN devices d ON d.id = e.device_id
@@ -131,7 +134,7 @@ WHERE f.id = ?`, forwardID)
 
 func (s *Store) ListExpiredPortForwards(ctx context.Context, now time.Time) ([]PortForward, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,p.client_id,d.host,e.target_port,f.server_port,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
+SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,p.client_id,d.host,e.target_port,f.server_port,f.node_task_type,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
 FROM port_forwards f
 JOIN endpoints e ON e.id = f.endpoint_id
 JOIN devices d ON d.id = e.device_id
@@ -238,7 +241,7 @@ func scanPortForward(scanner rowScanner) (PortForward, error) {
 	var host string
 	var targetPort int
 	var createdAt, updatedAt string
-	if err := scanner.Scan(&item.ID, &item.ProjectID, &item.EndpointID, &item.EndpointName, &item.DeviceName, &item.NodeID, &clientID, &host, &targetPort, &item.ServerPort, &nodeTaskID, &item.Status, &expiresAt, &createdAt, &updatedAt); err != nil {
+	if err := scanner.Scan(&item.ID, &item.ProjectID, &item.EndpointID, &item.EndpointName, &item.DeviceName, &item.NodeID, &clientID, &host, &targetPort, &item.ServerPort, &item.NodeTaskType, &nodeTaskID, &item.Status, &expiresAt, &createdAt, &updatedAt); err != nil {
 		return PortForward{}, err
 	}
 	if clientID.Valid {
