@@ -498,6 +498,11 @@ export const api = {
     if ("user" in result) rememberSession(result);
     return result;
   },
+  async changePassword(currentPassword: string, newPassword: string) {
+    const result = await request<APIAuthSession>("/api/v1/auth/password", { method: "PUT", body: JSON.stringify({ currentPassword, newPassword }) });
+    rememberSession(result);
+    return result;
+  },
   async sendOnboardingEmail(challengeToken: string, email: string) {
     return request<{ maskedEmail: string; expiresAt: string; resendAfterSeconds: number }>("/api/v1/auth/onboarding/email/send", { method: "POST", body: JSON.stringify({ challengeToken, email }) });
   },

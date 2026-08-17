@@ -336,6 +336,56 @@ func (s *Store) RevokeAuthSession(ctx context.Context, tokenHash string) error {
 	return nil
 }
 
+func (s *Store) ChangePassword(ctx context.Context, input ChangePasswordInput) (AuthSession, error) {
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AuthSession{}, err
+	}
+	defer tx.Rollback()
+	var enabled int
+	if err := tx.QueryRowContext(ctx, `SELECT enabled FROM users WHERE id=?`, input.UserID).Scan(&enabled); errors.Is(err, sql.ErrNoRows) {
+		return AuthSession{}, ErrNotFound
+	} else if err != nil {
+		return AuthSession{}, err
+	}
+	if enabled != 1 || input.PasswordHash == "" {
+		return AuthSession{}, ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_change_required=0,updated_at=? WHERE id=?`, input.PasswordHash, now.Format(time.RFC3339Nano), input.UserID); err != nil {
+		return AuthSession{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_sessions SET status='revoked' WHERE user_id=? AND status='active'`, input.UserID); err != nil {
+		return AuthSession{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE mfa_challenges SET status='revoked' WHERE user_id=? AND status='active'`, input.UserID); err != nil {
+		return AuthSession{}, err
+	}
+	sessionID, err := id.New()
+	if err != nil {
+		return AuthSession{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO auth_sessions(id,user_id,token_hash,csrf_hash,status,expires_at,created_at,last_seen_at) VALUES(?,?,?,?,'active',?,?,?)`, sessionID, input.UserID, input.TokenHash, input.CSRFHash, input.ExpiresAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		return AuthSession{}, err
+	}
+	auditID, err := id.New()
+	if err != nil {
+		return AuthSession{}, err
+	}
+	input.Audit.ResourceID = input.UserID
+	if err := insertAudit(ctx, tx, auditID, input.Audit, now); err != nil {
+		return AuthSession{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AuthSession{}, err
+	}
+	user, err := s.userByID(ctx, input.UserID)
+	if err != nil {
+		return AuthSession{}, err
+	}
+	return AuthSession{ID: sessionID, User: user, ExpiresAt: input.ExpiresAt.UTC(), LastSeenAt: now, CSRFHash: input.CSRFHash}, nil
+}
+
 func (s *Store) CleanupAuthSessions(ctx context.Context, now time.Time) (int64, error) {
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM mfa_challenges WHERE expires_at <= ? OR status <> 'active'`, now.UTC().Format(time.RFC3339Nano))
 	result, err := s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE expires_at <= ? OR (status = 'revoked' AND last_seen_at <= ?)`,

@@ -69,6 +69,7 @@ type Modal =
   | "edit-user"
   | "socks-detail"
   | "node-clients"
+  | "change-password"
   | null;
 type ConfigModalKind =
   | "create-node"
@@ -139,6 +140,14 @@ const VALID_VIEWS = new Set<View>([
   "logs",
   "settings",
 ]);
+
+function roleViews(role: APIUser["role"]): Set<View> {
+  if (role === "system_admin") return VALID_VIEWS;
+  if (role === "temporary") return new Set<View>(["portal"]);
+  if (role === "project_admin")
+    return new Set<View>(["overview", "portal", "projects", "workspace", "discovery", "connections"]);
+  return new Set<View>(["overview", "portal", "projects", "workspace"]);
+}
 
 type Device = {
   id: number | string;
@@ -457,7 +466,10 @@ const mapDevice = (device: APIDevice, project: ProjectView): Device => {
   const webServices = webEndpoints.map((endpoint) => ({
     endpointId: endpoint.id,
     name: endpoint.name,
-    url: `${endpoint.protocol}://${device.host}:${endpoint.targetPort}`,
+    url:
+      device.host && endpoint.targetPort
+        ? `${endpoint.protocol}://${device.host}:${endpoint.targetPort}`
+        : `endpoint:${endpoint.id}`,
     tlsServerName: endpoint.tlsServerName,
     verificationStatus: endpoint.verificationStatus,
   }));
@@ -680,7 +692,11 @@ function UnifiedSelect({
         <i aria-hidden="true" />
       </button>
       {open && (
-        <div className="unified-select-menu" role="listbox">
+        <div
+          className="unified-select-menu"
+          role="listbox"
+          onWheel={(event) => event.stopPropagation()}
+        >
           {options.map((option) => (
             <button
               type="button"
@@ -1603,7 +1619,7 @@ export default function Home() {
         api.nodes(),
         api.projects(),
       ]);
-      const tunnelGroups = await Promise.all(
+      const tunnelGroups = user.role === "system_admin" ? await Promise.all(
         backendNodes.map(async (node) => {
           try {
             const [items, clients] = await Promise.all([
@@ -1620,7 +1636,7 @@ export default function Home() {
             };
           }
         }),
-      );
+      ) : backendNodes.map((node) => ({ nodeId: node.id, items: [], clients: [], available: false }));
       const mappedProjects = backendProjects.map((project) =>
         mapProject(project, backendNodes),
       );
@@ -1633,6 +1649,8 @@ export default function Home() {
         );
         if (group?.available)
           project.clientStatus = client?.connected ? "在线" : "离线";
+        else if (user.role !== "system_admin")
+          project.clientStatus = "状态受限";
       }
       const mappedNodes = backendNodes.map((node) =>
         mapNode(node, backendProjects),
@@ -1664,15 +1682,13 @@ export default function Home() {
         forwardGroups,
         backendSecurity,
       ] = await Promise.all([
-        api.users().catch(() => []),
-        api.policies().catch(() => []),
-        api.sessions().catch(() => []),
-        api.auditLogs().catch(() => []),
-        Promise.all(
-          backendProjects.map((project) =>
-            api.portForwards(project.id).catch(() => []),
-          ),
-        ),
+        user.role === "system_admin" ? api.users().catch(() => []) : Promise.resolve([]),
+        user.role === "system_admin" ? api.policies().catch(() => []) : Promise.resolve([]),
+        user.role === "system_admin" ? api.sessions().catch(() => []) : Promise.resolve([]),
+        user.role === "system_admin" ? api.auditLogs().catch(() => []) : Promise.resolve([]),
+        user.role === "system_admin" || user.role === "project_admin"
+          ? Promise.all(backendProjects.map((project) => api.portForwards(project.id).catch(() => [])))
+          : Promise.resolve([]),
         user.role === "system_admin"
           ? api.securitySettings().catch(() => null)
           : Promise.resolve(null),
@@ -1700,17 +1716,16 @@ export default function Home() {
       setSecuritySettings(backendSecurity);
       setSocksStatus(
         Object.fromEntries(
-          mappedProjects.map((project) => {
+          mappedProjects.flatMap((project) => {
             const group = tunnelGroups.find(
               (item) => item.nodeId === project.nodeId,
             );
             const tunnel = group?.items.find(
               (item) => item.clientId === project.clientId,
             );
-            return [
-              project.code,
-              group?.available ? Boolean(tunnel?.running) : false,
-            ];
+            return group?.available
+              ? [[project.code, Boolean(tunnel?.running)] as const]
+              : [];
           }),
         ),
       );
@@ -1769,6 +1784,15 @@ export default function Home() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!currentUser || roleViews(currentUser.role).has(view)) return;
+    const fallback = currentUser.role === "temporary" ? "portal" : "overview";
+    window.queueMicrotask(() => {
+      setView(fallback);
+      setModal(null);
+    });
+  }, [currentUser, view]);
 
   useEffect(() => {
     if (!scanActive || !scanJobId) return;
@@ -2465,15 +2489,25 @@ export default function Home() {
             ))}
           </nav>
           <div className="sidebar-account">
-            <div className="account-avatar">
-              {currentUser?.displayName?.slice(0, 1) || "I"}
-            </div>
-            <div>
-              <strong>{currentUser?.displayName || "平台用户"}</strong>
-              <span>{currentUser?.username}</span>
-            </div>
             <button
               type="button"
+              className="account-profile"
+              title="账户安全与修改密码"
+              aria-label="打开账户安全设置"
+              disabled={!currentUser || currentUser.bootstrap}
+              onClick={() => setModal("change-password")}
+            >
+              <span className="account-avatar">
+                {currentUser?.displayName?.slice(0, 1) || "I"}
+              </span>
+              <span className="account-profile-copy">
+                <strong>{currentUser?.displayName || "平台用户"}</strong>
+                <span>{currentUser?.username} · 账户安全</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="account-logout"
               title="退出登录"
               aria-label="退出登录"
               onClick={() =>
@@ -2515,6 +2549,7 @@ export default function Home() {
                 nodes={nodeItems}
                 tunnels={managedTunnels}
                 sessions={sessionItems}
+                showControlPlane={currentUser?.role === "system_admin"}
                 onNavigate={setView}
               />
             )}
@@ -2533,7 +2568,7 @@ export default function Home() {
                 project={activeProject}
                 query={query}
                 setQuery={setQuery}
-                socksRunning={Boolean(socksStatus[activeProject.code])}
+                socksRunning={socksStatus[activeProject.code]}
                 canManage={canManageProject}
                 onWeb={openWeb}
                 onSsh={openSsh}
@@ -3265,6 +3300,17 @@ export default function Home() {
               />
             ) : null;
           })()}
+        {modal === "change-password" && currentUser && !currentUser.bootstrap && (
+          <ChangePasswordModal
+            username={currentUser.username}
+            onClose={() => setModal(null)}
+            onChanged={(user) => {
+              setCurrentUser(user);
+              setModal(null);
+              setToast("密码已修改，其他登录会话已安全退出");
+            }}
+          />
+        )}
         {toast && (
           <div className="toast">
             <span>✓</span>
@@ -3282,6 +3328,7 @@ function Overview({
   nodes,
   tunnels,
   sessions,
+  showControlPlane,
   onNavigate,
 }: {
   devices: Device[];
@@ -3289,22 +3336,25 @@ function Overview({
   nodes: NodeView[];
   tunnels: NodeManagedTunnel[];
   sessions: APIAccessSession[];
+  showControlPlane: boolean;
   onNavigate: (view: View) => void;
 }) {
   const online = devices.filter((device) => device.status === "online").length;
   const availableNodes = nodes.filter((node) => node.status === "运行正常").length;
   const onlineClients = projects.filter((project) => project.clientStatus === "在线").length;
+  const clientStatusRestricted = projects.some((project) => project.clientStatus === "状态受限");
   const runningTunnels = tunnels.filter((tunnel) => tunnel.running).length;
   const webServices = devices.reduce((total, device) => total + device.webServices.length, 0);
   const sshServices = devices.filter((device) => device.ssh).length;
   const scanNetworks = projects.reduce((total, project) => total + project.networks.length, 0);
   const deviceRate = devices.length ? Math.round((online / devices.length) * 100) : 0;
+  const clientDetail = clientStatusRestricted ? "状态按当前权限显示" : `${onlineClients} 个 Client 在线`;
   const capabilityItems = [
-    { icon: "▦", title: "客户项目", value: projects.length, detail: `${onlineClients} 个 Client 在线`, action: "管理项目", view: "projects" as View },
-    { icon: "═", title: "SOCKS隧道", value: tunnels.length, detail: `${runningTunnels} 条正在运行`, action: "查看隧道", view: "socks" as View },
-    { icon: "◇", title: "接入节点", value: nodes.length, detail: `${availableNodes} 个节点可用`, action: "管理节点", view: "nodes" as View },
-    { icon: "◫", title: "远程入口", value: webServices + sshServices, detail: `${webServices} 个 Web · ${sshServices} 个 SSH`, action: "访问门户", view: "portal" as View },
-  ];
+    { icon: "▦", title: "客户项目", value: projects.length, detail: clientDetail, action: "管理项目", view: "projects" as View, controlPlane: false },
+    { icon: "═", title: "SOCKS隧道", value: tunnels.length, detail: `${runningTunnels} 条正在运行`, action: "查看隧道", view: "socks" as View, controlPlane: true },
+    { icon: "◇", title: "接入节点", value: nodes.length, detail: `${availableNodes} 个节点可用`, action: "管理节点", view: "nodes" as View, controlPlane: true },
+    { icon: "◫", title: "远程入口", value: webServices + sshServices, detail: `${webServices} 个 Web · ${sshServices} 个 SSH`, action: "访问门户", view: "portal" as View, controlPlane: false },
+  ].filter((item) => showControlPlane || !item.controlPlane);
   return (
     <>
       <div className="overview-dashboard-head">
@@ -3320,10 +3370,19 @@ function Overview({
         </div>
       </div>
       <div className="overview-metrics">
-        <Metric label="客户项目" value={String(projects.length)} detail={`${onlineClients} 个 Client 在线`} tone="blue" />
+        <Metric label="客户项目" value={String(projects.length)} detail={clientDetail} tone="blue" />
         <Metric label="可用节点" value={`${availableNodes}/${nodes.length}`} detail="节点接口实时状态" tone="green" />
-        <Metric label="运行隧道" value={`${runningTunnels}/${tunnels.length}`} detail="NPS SOCKS 状态" tone="violet" />
-        <Metric label="活动会话" value={String(sessions.length)} detail="Web 与 WebSSH 会话" tone="amber" />
+        {showControlPlane ? (
+          <>
+            <Metric label="运行隧道" value={`${runningTunnels}/${tunnels.length}`} detail="NPS SOCKS 状态" tone="violet" />
+            <Metric label="活动会话" value={String(sessions.length)} detail="Web 与 WebSSH 会话" tone="amber" />
+          </>
+        ) : (
+          <>
+            <Metric label="登记设备" value={String(devices.length)} detail="当前授权项目范围" tone="violet" />
+            <Metric label="远程入口" value={String(webServices + sshServices)} detail="Web 与 WebSSH" tone="amber" />
+          </>
+        )}
       </div>
       <div className="overview-capability-grid">
         {capabilityItems.map((item) => (
@@ -3338,10 +3397,10 @@ function Overview({
         <section className="content-card overview-status-card">
           <div className="card-header"><div><h2>运行状态</h2><p>所有数据均来自当前平台和接入节点</p></div><Tag tone="green">实时</Tag></div>
           <div className="overview-status-list">
-            <div><span>项目 Client</span><strong>{onlineClients} / {projects.length}</strong><Tag tone={onlineClients === projects.length && projects.length ? "green" : "amber"}>{onlineClients === projects.length && projects.length ? "全部在线" : "存在离线"}</Tag></div>
+            <div><span>项目 Client</span><strong>{clientStatusRestricted ? "权限范围内" : `${onlineClients} / ${projects.length}`}</strong><Tag tone={clientStatusRestricted ? "gray" : onlineClients === projects.length && projects.length ? "green" : "amber"}>{clientStatusRestricted ? "按需检查" : onlineClients === projects.length && projects.length ? "全部在线" : "存在离线"}</Tag></div>
             <div><span>接入节点</span><strong>{availableNodes} / {nodes.length}</strong><Tag tone={availableNodes === nodes.length && nodes.length ? "green" : "amber"}>{availableNodes === nodes.length && nodes.length ? "全部可用" : "需要检查"}</Tag></div>
-            <div><span>SOCKS隧道</span><strong>{runningTunnels} / {tunnels.length}</strong><Tag tone={runningTunnels ? "green" : "gray"}>{runningTunnels ? "存在运行隧道" : "全部关闭"}</Tag></div>
-            <div><span>远程访问会话</span><strong>{sessions.length}</strong><Tag tone={sessions.length ? "blue" : "gray"}>{sessions.length ? "正在访问" : "暂无会话"}</Tag></div>
+            {showControlPlane && <div><span>SOCKS隧道</span><strong>{runningTunnels} / {tunnels.length}</strong><Tag tone={runningTunnels ? "green" : "gray"}>{runningTunnels ? "存在运行隧道" : "全部关闭"}</Tag></div>}
+            {showControlPlane && <div><span>远程访问会话</span><strong>{sessions.length}</strong><Tag tone={sessions.length ? "blue" : "gray"}>{sessions.length ? "正在访问" : "暂无会话"}</Tag></div>}
           </div>
         </section>
         <section className="content-card overview-resource-card">
@@ -3352,7 +3411,7 @@ function Overview({
             <div><span>WebSSH</span><strong>{sshServices}</strong><small>支持保存凭据或临时登录</small></div>
             <div><span>扫描网段</span><strong>{scanNetworks}</strong><small>分布在 {projects.filter((project) => project.networks.length).length} 个项目</small></div>
           </div>
-          <div className="overview-route-strip"><span>访问链路</span><b>浏览器</b><i>→</i><b>平台网关</b><i>→</i><b>托管 SOCKS</b><i>→</i><b>内网服务</b></div>
+          <div className="overview-route-strip"><span>访问链路</span><b>浏览器</b><i>→</i><b>平台网关</b><i>→</i><b>SOCKS隧道</b><i>→</i><b>内网服务</b></div>
         </section>
       </div>
     </>
@@ -3792,7 +3851,7 @@ function ConnectionsView({
         <div className="card-header">
           <div>
             <h2>项目端口转发服务</h2>
-            <p>设备 Web 后台不在此列表，Web 访问固定经项目托管 SOCKS</p>
+            <p>设备 Web 后台不在此列表，Web 访问固定经项目 SOCKS隧道</p>
           </div>
           <div className="table-search">
             <span>⌕</span>
@@ -4635,7 +4694,7 @@ function ProjectAccessSummary({
   onNetworksChange,
 }: {
   project: ProjectView;
-  socksRunning: boolean;
+  socksRunning?: boolean;
   canManage: boolean;
   onImport: () => void;
   onAdd: () => void;
@@ -4708,12 +4767,16 @@ function ProjectAccessSummary({
           </span>
           <div>
             <strong>Client ID {project.clientId}</strong>
-            <Tag tone={socksRunning ? "green" : "gray"}>
-              {socksRunning ? "运行中" : "已关闭"}
+            <Tag tone={socksRunning === true ? "green" : "gray"}>
+              {socksRunning === undefined ? "按需检查" : socksRunning ? "运行中" : "已关闭"}
             </Tag>
           </div>
           <small>
-            {socksRunning ? "节点当前正在监听" : "远程访问时平台自动开启"}
+            {socksRunning === undefined
+              ? "建立远程访问时由平台检查并按需开启"
+              : socksRunning
+                ? "节点当前正在监听"
+                : "远程访问时平台自动开启"}
           </small>
         </div>
         <div className="access-scope">
@@ -4925,10 +4988,10 @@ function AccessPortal({
                 <tr key={device.id}>
                   <td><div className="overview-device-name"><span className="mini-monitor">▣</span><div><strong>{device.name}</strong><small>{device.vendor || "未识别设备"}</small></div></div></td>
                   <td><span className="project-cell"><i />{device.projectName}</span></td>
-                  <td><code>{device.host}</code></td>
+                  <td><code>{user?.role === "temporary" ? "受保护" : device.host}</code></td>
                   <td><StatusDot status={device.status} /></td>
                   <td><strong>{device.webServices.length}</strong><small className="table-subtext"> 个入口</small></td>
-                  <td>{device.ssh ? <Tag tone="blue">SSH · {device.sshPort}</Tag> : <span className="empty-cell">—</span>}</td>
+                  <td>{device.ssh ? <Tag tone="blue">{user?.role === "temporary" ? "WebSSH" : `SSH · ${device.sshPort}`}</Tag> : <span className="empty-cell">—</span>}</td>
                   <td><div className="portal-row-actions">{device.webServices.map((service) => <button key={service.url} className="action-web" onClick={() => onWeb(device, service.url)}>{service.name} ↗</button>)}{device.ssh && <button onClick={() => onSsh(device)}>WebSSH →</button>}{!device.webServices.length && !device.ssh && <span className="empty-cell">暂无入口</span>}</div></td>
                 </tr>
               ))}</tbody>
@@ -5044,7 +5107,7 @@ function Workspace({
               0,
             ),
           )}
-          detail="全部经托管 SOCKS"
+          detail="全部经 SOCKS隧道"
           tone="violet"
         />
         <Metric
@@ -5059,7 +5122,7 @@ function Workspace({
         <div className="card-header">
           <div>
             <h2>设备列表</h2>
-            <p>Web 后台与 WebSSH 均通过项目托管 SOCKS 访问</p>
+            <p>Web 后台与 WebSSH 均通过项目 SOCKS隧道访问</p>
           </div>
           <div className="table-tools">
             <div className="table-search">
@@ -6518,7 +6581,7 @@ function DiscoveryView({
             <b>/</b>设备发现
           </div>
           <h1>内网设备发现</h1>
-          <p>通过项目托管 SOCKS 对项目设置中的内网 IP 段执行协议探测</p>
+          <p>通过项目 SOCKS隧道对项目设置中的内网 IP 段执行协议探测</p>
         </div>
         <button
           className={`btn ${active ? "secondary" : "primary"}`}
@@ -6977,7 +7040,7 @@ function DiscoveryView({
                   </button>
                   <span>
                     将导入 <b>{selectedServices.length}</b> 个服务；Web
-                    服务经托管 SOCKS 访问，SSH/RTSP/TCP
+                    服务经 SOCKS隧道访问，SSH/RTSP/TCP
                     仅登记目标，按需另建端口转发。
                   </span>
                 </footer>
@@ -7170,6 +7233,84 @@ function ModalFrame({
         {children}
       </div>
     </div>
+  );
+}
+
+function ChangePasswordModal({
+  username,
+  onClose,
+  onChanged,
+}: {
+  username: string;
+  onClose: () => void;
+  onChanged: (user: APIUser) => void;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <ModalFrame onClose={onClose}>
+      <form
+        className="form-modal"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const form = new FormData(event.currentTarget);
+          const currentPassword = String(form.get("currentPassword") || "");
+          const newPassword = String(form.get("newPassword") || "");
+          const confirmPassword = String(form.get("confirmPassword") || "");
+          if (newPassword !== confirmPassword) {
+            setError("两次输入的新密码不一致");
+            return;
+          }
+          if (currentPassword === newPassword) {
+            setError("新密码不能与当前密码相同");
+            return;
+          }
+          setSubmitting(true);
+          setError("");
+          try {
+            const result = await api.changePassword(currentPassword, newPassword);
+            onChanged(result.user);
+          } catch (reason) {
+            setError(reason instanceof Error ? reason.message : "密码修改失败");
+            setSubmitting(false);
+          }
+        }}
+      >
+        <div className="form-head">
+          <div>
+            <h2>账户安全</h2>
+            <p>{username} · 修改登录密码</p>
+          </div>
+          <button type="button" aria-label="关闭" onClick={onClose}>×</button>
+        </div>
+        <div className="route-note account-security-note">
+          <span>✓</span>
+          <div>
+            <strong>修改成功后将保护所有登录入口</strong>
+            <small>当前浏览器会安全续期，其他浏览器与设备上的登录会话将立即退出。</small>
+          </div>
+        </div>
+        <div className="form-grid password-change-grid">
+          <label className="full">
+            当前密码
+            <input name="currentPassword" type="password" required autoComplete="current-password" placeholder="输入当前登录密码" />
+          </label>
+          <label className="full">
+            新密码
+            <input name="newPassword" type="password" required minLength={12} maxLength={1024} autoComplete="new-password" placeholder="至少 12 个字符" />
+          </label>
+          <label className="full">
+            确认新密码
+            <input name="confirmPassword" type="password" required minLength={12} maxLength={1024} autoComplete="new-password" placeholder="再次输入新密码" />
+          </label>
+        </div>
+        {error && <div className="form-error" role="alert">{error}</div>}
+        <div className="form-actions">
+          <button type="button" className="btn secondary" onClick={onClose} disabled={submitting}>取消</button>
+          <button type="submit" className="btn primary" disabled={submitting}>{submitting ? "正在修改…" : "确认修改"}</button>
+        </div>
+      </form>
+    </ModalFrame>
   );
 }
 
@@ -7891,7 +8032,12 @@ function ClientCombobox({
         }}
       />
       {open && (
-        <div className="client-combobox-menu" id={listID} role="listbox">
+        <div
+          className="client-combobox-menu"
+          id={listID}
+          role="listbox"
+          onWheel={(event) => event.stopPropagation()}
+        >
           {visibleClients.length > 0 ? (
             visibleClients.map((client) => (
               <button

@@ -1450,6 +1450,65 @@ func TestBrowserLoginSessionAndCSRF(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedUserCanChangeOwnPassword(t *testing.T) {
+	handler := testServer(t)
+	created := request(t, handler, http.MethodPost, "/api/v1/users", map[string]any{
+		"username": "self-password-user", "displayName": "自助改密用户", "password": "temporary password value", "role": "operator", "enabled": true, "projectIds": []string{},
+	}, true)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create user = %d: %s", created.Code, created.Body.String())
+	}
+	login := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "self-password-user", "password": "temporary password value"}, false)
+	login = completeTestMFA(t, handler, login)
+	if login.Code != http.StatusOK {
+		t.Fatalf("complete enrollment = %d: %s", login.Code, login.Body.String())
+	}
+	var session struct {
+		CSRFToken string `json:"csrfToken"`
+	}
+	if err := json.Unmarshal(login.Body.Bytes(), &session); err != nil || session.CSRFToken == "" {
+		t.Fatalf("login session = %s, err = %v", login.Body.String(), err)
+	}
+	oldCookie := login.Result().Cookies()[0]
+	change := func(currentPassword, newPassword string) *httptest.ResponseRecorder {
+		payload, _ := json.Marshal(map[string]string{"currentPassword": currentPassword, "newPassword": newPassword})
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", bytes.NewReader(payload))
+		req.AddCookie(oldCookie)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-CSRF-Token", session.CSRFToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	if wrong := change("incorrect current password", "an even newer secure password"); wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong current password = %d: %s", wrong.Code, wrong.Body.String())
+	}
+	changed := change("a new permanent password", "an even newer secure password")
+	if changed.Code != http.StatusOK || len(changed.Result().Cookies()) != 2 {
+		t.Fatalf("change password = %d: %s", changed.Code, changed.Body.String())
+	}
+	oldSessionRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	oldSessionRequest.AddCookie(oldCookie)
+	oldSessionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(oldSessionResponse, oldSessionRequest)
+	if oldSessionResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("old session remained active = %d: %s", oldSessionResponse.Code, oldSessionResponse.Body.String())
+	}
+	newSessionRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	newSessionRequest.AddCookie(changed.Result().Cookies()[0])
+	newSessionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(newSessionResponse, newSessionRequest)
+	if newSessionResponse.Code != http.StatusOK {
+		t.Fatalf("rotated session = %d: %s", newSessionResponse.Code, newSessionResponse.Body.String())
+	}
+	if oldLogin := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "self-password-user", "password": "a new permanent password"}, false); oldLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("old password remained valid = %d: %s", oldLogin.Code, oldLogin.Body.String())
+	}
+	if newLogin := request(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]any{"username": "self-password-user", "password": "an even newer secure password"}, false); newLogin.Code != http.StatusAccepted {
+		t.Fatalf("new password login = %d: %s", newLogin.Code, newLogin.Body.String())
+	}
+}
+
 func TestEmailMFARecoveryAndAdministrativeReset(t *testing.T) {
 	handler := testServer(t)
 	created := request(t, handler, http.MethodPost, "/api/v1/users", map[string]any{
@@ -1581,7 +1640,7 @@ func TestTemporaryPolicyScopeAndRouteBoundaries(t *testing.T) {
 	}
 	project = configureProjectNetworks(t, handler, project, "10.30.0.0/16")
 	deviceResponse := request(t, handler, http.MethodPost, "/api/v1/projects/"+project.ID+"/devices", map[string]any{
-		"host": "10.30.0.1", "name": "授权设备", "deviceType": "network", "source": "manual", "endpoints": []map[string]any{{"name": "后台", "protocol": "http", "targetPort": 8080}},
+		"host": "10.30.0.1", "name": "授权设备", "deviceType": "network", "source": "manual", "endpoints": []map[string]any{{"name": "后台", "protocol": "http", "targetPort": 8080}, {"name": "维护终端", "protocol": "ssh", "targetPort": 22}},
 	}, true)
 	var device store.Device
 	if deviceResponse.Code != http.StatusCreated || json.Unmarshal(deviceResponse.Body.Bytes(), &device) != nil {
@@ -1656,6 +1715,8 @@ func TestTemporaryPolicyScopeAndRouteBoundaries(t *testing.T) {
 	}
 	if response := getAsTemporary("/api/v1/projects/" + project.ID + "/devices"); response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(device.ID)) {
 		t.Fatalf("temporary devices = %d: %s", response.Code, response.Body.String())
+	} else if bytes.Contains(response.Body.Bytes(), []byte("10.30.0.1")) || bytes.Contains(response.Body.Bytes(), []byte(`"targetPort":8080`)) || bytes.Contains(response.Body.Bytes(), []byte(`"protocol":"ssh"`)) {
+		t.Fatalf("temporary device response disclosed internal or unauthorized endpoint metadata: %s", response.Body.String())
 	}
 	if response := getAsTemporary("/api/v1/projects/" + otherProject.ID + "/devices"); response.Code != http.StatusForbidden {
 		t.Fatalf("temporary user crossed project boundary: %d: %s", response.Code, response.Body.String())
@@ -1675,6 +1736,15 @@ func TestTemporaryPolicyScopeAndRouteBoundaries(t *testing.T) {
 	handler.ServeHTTP(sessionResponse, sessionRequest)
 	if sessionResponse.Code != http.StatusCreated {
 		t.Fatalf("temporary web session = %d: %s", sessionResponse.Code, sessionResponse.Body.String())
+	}
+	launchForm := url.Values{"endpointId": {device.Endpoints[0].ID}, "csrfToken": {loginBody.CSRFToken}}
+	launchRequest := httptest.NewRequest(http.MethodPost, "/api/v1/access-sessions/launch", strings.NewReader(launchForm.Encode()))
+	launchRequest.AddCookie(authCookie)
+	launchRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	launchResponse := httptest.NewRecorder()
+	handler.ServeHTTP(launchResponse, launchRequest)
+	if launchResponse.Code != http.StatusOK {
+		t.Fatalf("temporary web launch = %d: %s", launchResponse.Code, launchResponse.Body.String())
 	}
 	otherPayload, _ := json.Marshal(map[string]any{"endpointId": otherDevice.Endpoints[0].ID, "mode": "web"})
 	otherSessionRequest := httptest.NewRequest(http.MethodPost, "/api/v1/access-sessions", bytes.NewReader(otherPayload))
