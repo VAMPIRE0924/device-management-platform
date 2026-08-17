@@ -5124,10 +5124,10 @@ main {
   padding: 7px 9px;
   font-size: 10px;
 }
-.scan-port-row .unified-select-menu,
-.discovery-service-row .unified-select-menu,
-.discovery-port .unified-select-menu {
-  min-width: 150px;
+.scan-port-row .unified-select,
+.discovery-service-row .unified-select,
+.discovery-port .unified-select {
+  --floating-menu-min-width: 150px;
 }
 .settings-card .unified-select-control {
   min-height: 40px;

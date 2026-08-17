@@ -134,8 +134,8 @@ test("uses shared pagination, accessible dialogs and destructive confirmation", 
   contains(page, ["function Pagination", "每页显示", "function ConfirmButton", 'role="dialog"', "aria-modal", 'event.key === "Escape"', 'confirmLabel="确认停止？"', 'label="删除设备"', 'label="删除项目"']);
   contains(page, ["搜索用户、项目、目标、来源 IP 或域名前缀", "visibleSessions"]);
   contains(styles, [".pagination-footer", ".showcase-hero", ".app-shell", ".sidebar", "main {", "overflow-y: auto"]);
-  contains(page, ["function FloatingMenu", "createPortal", 'event.target !== menuRef.current', 'window.addEventListener("scroll", handleScroll, true)', 'onWheel={(event) => event.stopPropagation()}', 'onTouchMove={(event) => event.stopPropagation()}']);
-  contains(styles, ["overscroll-behavior: contain", "scrollbar-gutter: stable", "-webkit-overflow-scrolling: touch", "touch-action: pan-y"]);
+  contains(page, ["function FloatingMenu", "createPortal", 'event.target !== menuRef.current', 'window.addEventListener("scroll", handleScroll, true)', 'onWheel={(event) => event.stopPropagation()}', 'onTouchMove={(event) => event.stopPropagation()}', 'getPropertyValue("--floating-menu-min-width")']);
+  contains(styles, ["overscroll-behavior: contain", "scrollbar-gutter: stable", "-webkit-overflow-scrolling: touch", "touch-action: pan-y", "--floating-menu-min-width: 150px"]);
   contains(styles, [".pagination-footer .pagination-buttons > button", ".pagination-footer .pagination-buttons > button.current", ".pagination-footer .pagination-buttons > button:disabled"]);
   assert.doesNotMatch(styles, /\.table-footer\s+div\s*\{/);
   assert.doesNotMatch(styles, /\.table-footer\s+button(?:\.[\w-]+)?\s*\{/);
