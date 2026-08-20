@@ -67,10 +67,16 @@ func TestMigrateAndCreateControlPlaneObjects(t *testing.T) {
 			t.Fatalf("projects.%s must be physically removed, found %d column", column, count)
 		}
 	}
-	for _, indexName := range []string{"idx_discovery_jobs_project_created", "idx_access_sessions_project_status_expiry", "idx_access_sessions_activity"} {
+	for _, indexName := range []string{"idx_discovery_jobs_project_created", "idx_access_sessions_project_status_expiry", "idx_access_sessions_activity", "idx_access_logs_started"} {
 		var count int
 		if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=?`, indexName).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("migration index %s count = %d, err = %v", indexName, count, err)
+		}
+	}
+	for _, triggerName := range []string{"trg_access_sessions_log_insert", "trg_access_sessions_log_update"} {
+		var count int
+		if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name=?`, triggerName).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("migration trigger %s count = %d, err = %v", triggerName, count, err)
 		}
 	}
 	assertQueryUsesIndex(t, db, ctx, `SELECT id FROM discovery_jobs WHERE project_id=? ORDER BY created_at DESC`, "idx_discovery_jobs_project_created", "project")

@@ -60,6 +60,7 @@ type storage interface {
 	EndpointRoute(context.Context, string) (store.EndpointRoute, error)
 	CreateAccessSession(context.Context, store.CreateAccessSessionInput, store.AuditInput) (store.AccessSession, error)
 	ListActiveAccessSessions(context.Context, time.Time) ([]store.AccessSession, error)
+	ListAccessLogs(context.Context, string, int, int) ([]store.AccessLog, error)
 	RevokeAccessSession(context.Context, string, store.AuditInput) error
 	ExchangeAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error)
 	ResolveAccessGrant(context.Context, string, string, time.Time) (store.AccessSession, store.EndpointRoute, error)
@@ -105,7 +106,7 @@ type storage interface {
 	UpdateAccessPolicy(context.Context, string, store.SaveAccessPolicyInput, store.AuditInput) (store.AccessPolicy, error)
 	DeleteAccessPolicy(context.Context, string, store.AuditInput) error
 	HasPolicyCapability(context.Context, string, string, string, time.Time) (bool, error)
-	ListAuditLogs(context.Context, string, int, int) ([]store.AuditLog, error)
+	ListAuditLogs(context.Context, string, string, int, int) ([]store.AuditLog, error)
 	AppendAudit(context.Context, store.AuditInput) error
 	Backup(context.Context, string) error
 }
@@ -272,6 +273,8 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("DELETE /api/v1/access-policies/{policyID}", s.requireAuth(http.HandlerFunc(s.deleteAccessPolicy)))
 	mux.Handle("GET /api/v1/audit-logs", s.requireAuth(http.HandlerFunc(s.listAuditLogs)))
 	mux.Handle("GET /api/v1/audit-logs/export", s.requireAuth(http.HandlerFunc(s.exportAuditLogs)))
+	mux.Handle("GET /api/v1/access-logs", s.requireAuth(http.HandlerFunc(s.listAccessLogs)))
+	mux.Handle("GET /api/v1/access-logs/export", s.requireAuth(http.HandlerFunc(s.exportAccessLogs)))
 	mux.Handle("GET /api/v1/data/backup", s.requireAuth(http.HandlerFunc(s.backupData)))
 	mux.Handle("GET /api/v1/meta", s.requireAuth(http.HandlerFunc(s.meta)))
 	mux.Handle("GET /api/v1/settings/security", s.requireAuth(http.HandlerFunc(s.securitySettings)))
@@ -1054,7 +1057,7 @@ func (s *server) updateProject(w http.ResponseWriter, r *http.Request) {
 	for _, network := range input.Networks {
 		prefix, err := netip.ParsePrefix(network)
 		if err != nil || !prefix.Addr().Is4() {
-			fields["networks"] = "设备发现网段必须是合法 IPv4 CIDR"
+			fields["networks"] = "设备发现范围必须是合法 IPv4 CIDR 或单 IP"
 		}
 	}
 	if len(fields) > 0 {
@@ -2042,7 +2045,7 @@ func validateDiscoveryInput(input createDiscoveryJobRequest, allowedNetworks []s
 	for _, network := range input.Networks {
 		requested, err := netip.ParsePrefix(network)
 		if err != nil || !requested.Addr().Is4() {
-			fields["networks"] = "发现范围必须是合法 IPv4 CIDR"
+			fields["networks"] = "发现范围必须是合法 IPv4 CIDR 或单 IP"
 			break
 		}
 		allowed := false
@@ -2192,11 +2195,16 @@ func canonicalCIDRs(values []string) []string {
 	result := make([]string, 0, len(values))
 	seen := map[string]struct{}{}
 	for _, value := range values {
-		prefix, err := netip.ParsePrefix(value)
-		if err != nil {
+		value = strings.TrimSpace(value)
+		if value == "" {
 			continue
 		}
-		canonical := prefix.Masked().String()
+		canonical := value
+		if address, err := netip.ParseAddr(value); err == nil && address.Is4() {
+			canonical = netip.PrefixFrom(address, 32).String()
+		} else if prefix, err := netip.ParsePrefix(value); err == nil && prefix.Addr().Is4() {
+			canonical = prefix.Masked().String()
+		}
 		if _, exists := seen[canonical]; exists {
 			continue
 		}
@@ -2223,7 +2231,7 @@ func validateProject(input store.CreateProjectInput) map[string]string {
 	for _, network := range input.Networks {
 		prefix, err := netip.ParsePrefix(network)
 		if err != nil || !prefix.Addr().Is4() {
-			fields["networks"] = "设备发现网段必须是合法 IPv4 CIDR"
+			fields["networks"] = "设备发现范围必须是合法 IPv4 CIDR 或单 IP"
 			break
 		}
 	}
@@ -3255,7 +3263,7 @@ func (s *server) listAuditLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	items, err := s.store.ListAuditLogs(r.Context(), strings.TrimSpace(r.URL.Query().Get("search")), limit, offset)
+	items, err := s.store.ListAuditLogs(r.Context(), strings.TrimSpace(r.URL.Query().Get("search")), strings.TrimSpace(r.URL.Query().Get("category")), limit, offset)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "读取审计日志失败", nil)
 		return
@@ -3267,7 +3275,7 @@ func (s *server) exportAuditLogs(w http.ResponseWriter, r *http.Request) {
 	if !requireSystemAdmin(w, r) {
 		return
 	}
-	items, err := s.store.ListAuditLogs(r.Context(), strings.TrimSpace(r.URL.Query().Get("search")), 1000, 0)
+	items, err := s.store.ListAuditLogs(r.Context(), strings.TrimSpace(r.URL.Query().Get("search")), strings.TrimSpace(r.URL.Query().Get("category")), 1000, 0)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "导出审计日志失败", nil)
 		return
@@ -3280,6 +3288,53 @@ func (s *server) exportAuditLogs(w http.ResponseWriter, r *http.Request) {
 	_ = writer.Write([]string{"time", "actor", "action", "resource_type", "resource_id", "result", "request_id", "source_ip", "metadata"})
 	for _, item := range items {
 		row := []string{item.CreatedAt.Format(time.RFC3339), item.Actor, item.Action, item.ResourceType, item.ResourceID, item.Result, item.RequestID, item.SourceIP, item.MetadataJSON}
+		for index := range row {
+			row[index] = safeCSVCell(row[index])
+		}
+		_ = writer.Write(row)
+	}
+	writer.Flush()
+}
+
+func (s *server) listAccessLogs(w http.ResponseWriter, r *http.Request) {
+	if !requireSystemAdmin(w, r) {
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	items, err := s.store.ListAccessLogs(r.Context(), strings.TrimSpace(r.URL.Query().Get("search")), limit, offset)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "database_error", "读取访问日志失败", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items), "limit": limit, "offset": offset})
+}
+
+func (s *server) exportAccessLogs(w http.ResponseWriter, r *http.Request) {
+	if !requireSystemAdmin(w, r) {
+		return
+	}
+	items, err := s.store.ListAccessLogs(r.Context(), strings.TrimSpace(r.URL.Query().Get("search")), 1000, 0)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "database_error", "导出访问日志失败", nil)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="access-logs.csv"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte{0xEF, 0xBB, 0xBF})
+	writer := csv.NewWriter(w)
+	_ = writer.Write([]string{"started_at", "accessed_at", "last_seen_at", "ended_at", "username", "project", "device", "service", "mode", "source_ip", "status", "session_id"})
+	for _, item := range items {
+		accessedAt := ""
+		if item.AccessedAt != nil {
+			accessedAt = item.AccessedAt.Format(time.RFC3339)
+		}
+		endedAt := ""
+		if item.EndedAt != nil {
+			endedAt = item.EndedAt.Format(time.RFC3339)
+		}
+		row := []string{item.StartedAt.Format(time.RFC3339), accessedAt, item.LastSeenAt.Format(time.RFC3339), endedAt, item.Username, item.ProjectName, item.DeviceName, item.EndpointName, item.Mode, item.SourceIP, item.Status, item.ID}
 		for index := range row {
 			row[index] = safeCSVCell(row[index])
 		}
@@ -3616,6 +3671,7 @@ func sensitiveAPIResponse(path string) bool {
 		"/api/v1/users",
 		"/api/v1/access-policies",
 		"/api/v1/access-sessions",
+		"/api/v1/access-logs",
 		"/api/v1/audit-logs",
 		"/api/v1/data/",
 		"/api/v1/settings/",

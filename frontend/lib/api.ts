@@ -413,6 +413,25 @@ export type APIAccessSession = {
   lastSeenAt: string;
 };
 
+export type APIAccessLog = {
+  id: string;
+  userId: string | null;
+  username: string;
+  projectId: string;
+  projectName: string;
+  endpointId: string;
+  endpointName: string;
+  deviceName: string;
+  mode: "web" | "ssh";
+  sourceIp: string;
+  status: string;
+  accessedAt: string | null;
+  expiresAt: string;
+  startedAt: string;
+  lastSeenAt: string;
+  endedAt: string | null;
+};
+
 export type APIAccessPolicy = {
   id: string;
   name: string;
@@ -556,9 +575,10 @@ export const api = {
   async updatePolicy(policyId: string, input: Record<string, unknown>) { return request<APIAccessPolicy>(`/api/v1/access-policies/${encodeURIComponent(policyId)}`, { method: "PATCH", body: JSON.stringify(input) }); },
   async deletePolicy(policyId: string) { return request<void>(`/api/v1/access-policies/${encodeURIComponent(policyId)}`, { method: "DELETE" }); },
   async sessions() { return (await request<{ items: APIAccessSession[] }>("/api/v1/access-sessions")).items; },
+  async accessLogs(search = "", fresh = false) { return (await request<{ items: APIAccessLog[] }>(`/api/v1/access-logs?limit=200&search=${encodeURIComponent(search)}`, {}, { fresh })).items; },
   async monitorSnapshot(fresh = false) { return request<APIMonitorSnapshot>("/api/v1/monitor/snapshot", {}, { fresh }); },
   async revokeSession(sessionId: string) { return request<void>(`/api/v1/access-sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }); },
-  async auditLogs(search = "") { return (await request<{ items: APIAuditLog[] }>(`/api/v1/audit-logs?limit=200&search=${encodeURIComponent(search)}`)).items; },
+  async auditLogs(search = "", fresh = false) { return (await request<{ items: APIAuditLog[] }>(`/api/v1/audit-logs?limit=200&category=operation&search=${encodeURIComponent(search)}`, {}, { fresh })).items; },
   async portForwards(projectId: string) { return (await request<{ items: APIPortForward[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/port-forwards`)).items; },
   async createPortForward(projectId: string, input: { endpointId: string; serverPort: number; expiresAt: string | null }) { return request<APIPortForward>(`/api/v1/projects/${encodeURIComponent(projectId)}/port-forwards`, { method: "POST", body: JSON.stringify(input) }); },
   async setPortForward(forwardId: string, running: boolean) { return request<{ id: string; status: string }>(`/api/v1/port-forwards/${encodeURIComponent(forwardId)}/${running ? "start" : "stop"}`, { method: "POST" }); },

@@ -179,6 +179,28 @@ type AccessSession struct {
 	EndedAt       *time.Time `json:"endedAt"`
 }
 
+// AccessLog is the read-only, credential-free history projection used by the
+// access audit page. It deliberately excludes route tokens, token hashes and
+// one-time grants.
+type AccessLog struct {
+	ID           string     `json:"id"`
+	UserID       *string    `json:"userId"`
+	Username     string     `json:"username"`
+	ProjectID    string     `json:"projectId"`
+	ProjectName  string     `json:"projectName"`
+	EndpointID   string     `json:"endpointId"`
+	EndpointName string     `json:"endpointName"`
+	DeviceName   string     `json:"deviceName"`
+	Mode         string     `json:"mode"`
+	SourceIP     string     `json:"sourceIp"`
+	Status       string     `json:"status"`
+	AccessedAt   *time.Time `json:"accessedAt"`
+	ExpiresAt    time.Time  `json:"expiresAt"`
+	StartedAt    time.Time  `json:"startedAt"`
+	LastSeenAt   time.Time  `json:"lastSeenAt"`
+	EndedAt      *time.Time `json:"endedAt"`
+}
+
 type CreateAccessSessionInput struct {
 	UserID        *string
 	AuthSessionID string

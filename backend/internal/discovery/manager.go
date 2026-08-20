@@ -472,8 +472,8 @@ func sanitizeBanner(value string) string {
 func countHosts(cidrs []string) (int, error) {
 	total := 0
 	for _, cidr := range cidrs {
-		prefix, err := netip.ParsePrefix(cidr)
-		if err != nil || !prefix.Addr().Is4() {
+		prefix, err := parseDiscoveryPrefix(cidr)
+		if err != nil {
 			return 0, fmt.Errorf("invalid IPv4 discovery network %q", cidr)
 		}
 		bits := 32 - prefix.Bits()
@@ -484,7 +484,7 @@ func countHosts(cidrs []string) (int, error) {
 }
 
 func forEachHost(cidr string, fn func(string) bool) error {
-	prefix, err := netip.ParsePrefix(cidr)
+	prefix, err := parseDiscoveryPrefix(cidr)
 	if err != nil {
 		return err
 	}
@@ -498,4 +498,16 @@ func forEachHost(cidr string, fn func(string) bool) error {
 		address = address.Next()
 	}
 	return nil
+}
+
+func parseDiscoveryPrefix(value string) (netip.Prefix, error) {
+	value = strings.TrimSpace(value)
+	if address, err := netip.ParseAddr(value); err == nil && address.Is4() {
+		return netip.PrefixFrom(address, 32), nil
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil || !prefix.Addr().Is4() {
+		return netip.Prefix{}, fmt.Errorf("invalid IPv4 discovery network")
+	}
+	return prefix.Masked(), nil
 }
