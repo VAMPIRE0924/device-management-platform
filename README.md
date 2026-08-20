@@ -6,11 +6,11 @@
 
 面向客户内网设备的远程管理平台。本项目基于重构版 [NPS](https://github.com/VAMPIRE0924/NPS)，通过其 HTTPS/HMAC-SHA256 管理 API 接入既有 Client 和 SOCKS隧道，提供设备发现、隔离 Web 访问、WebSocket、WebSSH、权限控制与访问审计。
 
-- 当前正式版本：[`v2.0.0`](https://github.com/VAMPIRE0924/device-management-platform/releases/tag/v2.0.0)
+- 当前正式版本：[`v2.1.0`](https://github.com/VAMPIRE0924/device-management-platform/releases/tag/v2.1.0)
 - Docker 镜像：[`vampirerune/device-management-platform`](https://hub.docker.com/r/vampirerune/device-management-platform)
 - 更新记录：[`CHANGELOG.md`](https://github.com/VAMPIRE0924/device-management-platform/blob/main/CHANGELOG.md)
 
-## v2.0 主要能力
+## v2.x 主要能力
 
 - 使用 HTTPS、TLS 主机名校验和 HMAC-SHA256 请求签名连接新版 NPS API。
 - 管理 NPS 接入节点与既有 Client；项目绑定 Client，不代替 NPS 管理 Client 生命周期。
@@ -41,7 +41,7 @@
 git clone https://github.com/VAMPIRE0924/device-management-platform.git
 cd device-management-platform
 
-export DMP_IMAGE=vampirerune/device-management-platform:v2.0.0
+export DMP_IMAGE=vampirerune/device-management-platform:v2.1.0
 docker compose pull
 docker compose up -d
 docker compose ps
@@ -66,15 +66,15 @@ Compose 默认不映射宿主机端口：容器监听 HTTP 80，配置证书后�
 
 | Docker 标签 | 用途 | 建议 |
 |---|---|---|
-| `v2.0.0` | 当前固定正式版本 | 生产环境推荐 |
+| `v2.1.0` | 当前固定正式版本 | 生产环境推荐 |
 | `main` | 最新正式版本的滚动标签 | 接受人工拉取时跟随 |
 | `dev` | `dev` 分支的开发测试镜像 | 不得连接生产数据目录 |
 
 正式镜像包含 `linux/amd64` 与 `linux/arm64`。项目不发布 `latest` 标签，避免部署端在未明确选择渠道时自动跨版本升级。
 
 ```bash
-docker pull vampirerune/device-management-platform:v2.0.0
-docker buildx imagetools inspect vampirerune/device-management-platform:v2.0.0
+docker pull vampirerune/device-management-platform:v2.1.0
+docker buildx imagetools inspect vampirerune/device-management-platform:v2.1.0
 ```
 
 ## 数据、安全与备份
@@ -90,7 +90,7 @@ docker buildx imagetools inspect vampirerune/device-management-platform:v2.0.0
 升级固定版本时修改 `DMP_IMAGE` 后重新创建容器：
 
 ```bash
-export DMP_IMAGE=vampirerune/device-management-platform:v2.0.0
+export DMP_IMAGE=vampirerune/device-management-platform:v2.1.0
 docker compose pull
 docker compose up -d
 docker compose ps
@@ -100,10 +100,10 @@ docker compose ps
 
 ```bash
 docker build \
-  --build-arg VERSION=v2.0.0 \
+  --build-arg VERSION=v2.1.0 \
   --build-arg VCS_REF="$(git rev-parse HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -t device-management-platform:v2.0.0 .
+  -t device-management-platform:v2.1.0 .
 ```
 
 开发环境使用 Go 1.26.6、Node.js 22 和 Docker。完整检查入口：

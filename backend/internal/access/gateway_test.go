@@ -1,6 +1,7 @@
 package access
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -79,7 +80,7 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 		t.Fatalf("bootstrap X-Robots-Tag = %q", got)
 	}
 	body := bootstrapResponse.Body.String()
-	if !strings.Contains(body, "location.hash") || !strings.Contains(body, "fetch('/.dmp/session'") || strings.Contains(body, "?grant=") {
+	if !strings.Contains(body, "location.hash") || !strings.Contains(body, "fetch('/.dmp/session'") || strings.Contains(body, "?grant=") || !strings.Contains(body, `data-i5cloud-proxy-notice="true"`) || !strings.Contains(body, `id="dismiss"`) || !strings.Contains(body, `aria-label="&#x5173;&#x95ED;&#x63D0;&#x793A;"`) {
 		t.Fatalf("bootstrap does not use fragment-to-POST exchange: %s", body)
 	}
 
@@ -120,7 +121,7 @@ func TestWebGatewayBootstrapsAndExchangesFragmentGrant(t *testing.T) {
 	formResponse := httptest.NewRecorder()
 	mux.ServeHTTP(formResponse, WithSessionSubdomainAccess(formRequest))
 	formCookie := gatewayNamedCookie(formResponse.Result().Cookies(), accessGrantCookie)
-	if formResponse.Code != http.StatusOK || formResponse.Header().Get("Location") != "" || !strings.Contains(formResponse.Body.String(), "I5CLOUD 远程管理平台") || !strings.Contains(formResponse.Body.String(), `location.replace("/")`) {
+	if formResponse.Code != http.StatusOK || formResponse.Header().Get("Location") != "" || !strings.Contains(formResponse.Body.String(), "I5CLOUD 远程管理平台") || !strings.Contains(formResponse.Body.String(), `location.replace("/")`) || !strings.Contains(formResponse.Body.String(), `id="dismiss"`) {
 		t.Fatalf("form exchange = %d location=%q: %s", formResponse.Code, formResponse.Header().Get("Location"), formResponse.Body.String())
 	}
 	if formCookie == nil || formCookie.Path != "/" || formCookie.SameSite != http.SameSiteLaxMode {
@@ -153,33 +154,6 @@ func TestRandomOriginDeviceCookiesKeepNativeNames(t *testing.T) {
 	stripControlPlaneHeaders(requestHeader)
 	if got := requestHeader.Get("Cookie"); got != "device_session=value-a; unrelated=device-value" {
 		t.Fatalf("device cookies were changed or platform cookies leaked upstream: %q", got)
-	}
-}
-
-func TestHTMLGetsVisibleProxyDisclosure(t *testing.T) {
-	body := `<!doctype html><html><body><form><input name="username"><input type="password"></form></body></html>`
-	response := &http.Response{Header: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}, Body: io.NopCloser(strings.NewReader(body))}
-	if err := injectProxyDisclosureResponse(response); err != nil {
-		t.Fatal(err)
-	}
-	rewritten, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(rewritten), `data-i5cloud-proxy-notice="true"`) || !strings.Contains(string(rewritten), "远程连接安全访问通道") || !strings.Contains(string(rewritten), "已连接目标内网设备") || !strings.Contains(string(rewritten), "页面内容由目标设备提供") {
-		t.Fatalf("credential disclosure missing: %s", rewritten)
-	}
-	if response.ContentLength != int64(len(rewritten)) || response.Header.Get("Content-Length") != strconv.Itoa(len(rewritten)) {
-		t.Fatalf("rewritten content length = %d / %q", response.ContentLength, response.Header.Get("Content-Length"))
-	}
-
-	plainText := &http.Response{Header: http.Header{"Content-Type": []string{"text/plain"}}, Body: io.NopCloser(strings.NewReader("status"))}
-	if err := injectProxyDisclosureResponse(plainText); err != nil {
-		t.Fatal(err)
-	}
-	plainBody, _ := io.ReadAll(plainText.Body)
-	if strings.Contains(string(plainBody), "data-i5cloud-proxy-notice") {
-		t.Fatalf("non-HTML response was modified: %s", plainBody)
 	}
 }
 
@@ -353,6 +327,236 @@ func TestWebGatewayProxiesThroughAuthenticatedSOCKS(t *testing.T) {
 	}
 	if cookie := response.Header().Get("Set-Cookie"); !strings.Contains(cookie, "Path=/") || !strings.Contains(cookie, "HttpOnly") || strings.Contains(cookie, "/access/web/") {
 		t.Fatalf("cookie was not scoped to the random origin: %q", cookie)
+	}
+}
+
+func TestWebGatewayPreservesAllUpstreamBodiesWithoutInjection(t *testing.T) {
+	const logBody = "2026-08-20 passwall service started\n"
+	const packageUpdatePath = "/cgi-bin/luci/admin/system/package-manager/update"
+	const packageUpdateRequest = "update=1"
+	const packageUpdateBody = "Downloading https://downloads.openwrt.org/Packages.gz\nUpdated list of available packages\n"
+	const packageArchivePath = "/downloads/openwrt/base/Packages.gz"
+	const compressedPagePath = "/cgi-bin/luci/compressed"
+	const documentBody = "<!doctype html><html><head><meta charset=utf-8></head><body>OpenWrt</body></html>"
+	packageArchiveBody := []byte{0x1f, 0x8b, 0x08, 0x00, 0x50, 0x4b, 0x47, 0x00}
+	compressedPageBody := []byte{0x1f, 0x8b, 0x08, 0x00, 0x48, 0x54, 0x4d, 0x4c}
+	var headerMu sync.Mutex
+	acceptEncoding := make(map[string]string)
+	requestBodies := make(map[string]string)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestBody, _ := io.ReadAll(r.Body)
+		headerMu.Lock()
+		acceptEncoding[r.URL.Path] = r.Header.Get("Accept-Encoding")
+		requestBodies[r.URL.Path] = string(requestBody)
+		headerMu.Unlock()
+		switch r.URL.Path {
+		case "/cgi-bin/luci/admin/services/passwall/get_log":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, logBody)
+		case packageUpdatePath:
+			// LuCI package actions commonly return command output through an AJAX
+			// endpoint whose content type is text/html.
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, packageUpdateBody)
+		case packageArchivePath:
+			w.Header().Set("Content-Type", "application/gzip")
+			_, _ = w.Write(packageArchiveBody)
+		case compressedPagePath:
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Content-Encoding", "gzip")
+			_, _ = w.Write(compressedPageBody)
+		default:
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, documentBody)
+		}
+	}))
+	defer upstream.Close()
+	upstreamAddress := strings.TrimPrefix(upstream.URL, "http://")
+	socksAddress := startForwardingSOCKS(t, upstreamAddress, "proxy-user", "proxy-pass")
+	host, portText, _ := net.SplitHostPort(upstreamAddress)
+	port, _ := strconv.Atoi(portText)
+	token := testWebRoute(t)
+	gateway := NewWebGateway(
+		fakeSessionResolver{
+			session: store.AccessSession{Mode: "web"},
+			route:   store.EndpointRoute{Protocol: "http", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1},
+		},
+		fakeRouteResolver{route: nodeadapter.SOCKSRoute{Address: socksAddress, Username: "proxy-user", Password: "proxy-pass"}},
+	)
+	mux := http.NewServeMux()
+	mux.Handle("/access/web/{token}/{path...}", gateway)
+
+	logRequest := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/cgi-bin/luci/admin/services/passwall/get_log", nil)
+	authorizeGatewayRequest(logRequest)
+	logRequest.Header.Set("Sec-Fetch-Dest", "empty")
+	logRequest.Header.Set("Sec-Fetch-Mode", "cors")
+	logRequest.Header.Set("Accept-Encoding", "br")
+	logResponse := httptest.NewRecorder()
+	mux.ServeHTTP(logResponse, WithSessionSubdomainAccess(logRequest))
+	if logResponse.Code != http.StatusOK || logResponse.Body.String() != logBody {
+		t.Fatalf("PassWall log response changed: status=%d body=%q", logResponse.Code, logResponse.Body.String())
+	}
+	if strings.Contains(logResponse.Body.String(), "data-i5cloud-proxy-notice") {
+		t.Fatalf("proxy disclosure leaked into PassWall log: %q", logResponse.Body.String())
+	}
+
+	packageUpdate := httptest.NewRequest(http.MethodPost, "/access/web/"+token+packageUpdatePath, strings.NewReader(packageUpdateRequest))
+	authorizeGatewayRequest(packageUpdate)
+	packageUpdate.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	packageUpdate.Header.Set("Sec-Fetch-Dest", "empty")
+	packageUpdate.Header.Set("Sec-Fetch-Mode", "cors")
+	packageUpdate.Header.Set("Accept-Encoding", "gzip, br, zstd")
+	packageUpdateResponse := httptest.NewRecorder()
+	mux.ServeHTTP(packageUpdateResponse, WithSessionSubdomainAccess(packageUpdate))
+	if packageUpdateResponse.Code != http.StatusOK || packageUpdateResponse.Body.String() != packageUpdateBody {
+		t.Fatalf("OpenWrt package update response changed: status=%d body=%q", packageUpdateResponse.Code, packageUpdateResponse.Body.String())
+	}
+
+	packageArchive := httptest.NewRequest(http.MethodGet, "/access/web/"+token+packageArchivePath, nil)
+	authorizeGatewayRequest(packageArchive)
+	packageArchive.Header.Set("Sec-Fetch-Dest", "document")
+	packageArchive.Header.Set("Sec-Fetch-Mode", "navigate")
+	packageArchive.Header.Set("Accept-Encoding", "gzip, br, zstd")
+	packageArchiveResponse := httptest.NewRecorder()
+	mux.ServeHTTP(packageArchiveResponse, WithSessionSubdomainAccess(packageArchive))
+	if packageArchiveResponse.Code != http.StatusOK || !bytes.Equal(packageArchiveResponse.Body.Bytes(), packageArchiveBody) {
+		t.Fatalf("OpenWrt package archive changed: status=%d body=%x", packageArchiveResponse.Code, packageArchiveResponse.Body.Bytes())
+	}
+
+	compressedPage := httptest.NewRequest(http.MethodGet, "/access/web/"+token+compressedPagePath, nil)
+	authorizeGatewayRequest(compressedPage)
+	compressedPage.Header.Set("Sec-Fetch-Dest", "document")
+	compressedPage.Header.Set("Sec-Fetch-Mode", "navigate")
+	compressedPage.Header.Set("Accept-Encoding", "gzip")
+	compressedPageResponse := httptest.NewRecorder()
+	mux.ServeHTTP(compressedPageResponse, WithSessionSubdomainAccess(compressedPage))
+	if compressedPageResponse.Code != http.StatusOK || compressedPageResponse.Header().Get("Content-Encoding") != "gzip" || !bytes.Equal(compressedPageResponse.Body.Bytes(), compressedPageBody) {
+		t.Fatalf("compressed OpenWrt page changed: status=%d encoding=%q body=%x", compressedPageResponse.Code, compressedPageResponse.Header().Get("Content-Encoding"), compressedPageResponse.Body.Bytes())
+	}
+
+	documentRequest := httptest.NewRequest(http.MethodGet, "/access/web/"+token+"/", nil)
+	authorizeGatewayRequest(documentRequest)
+	documentRequest.Header.Set("Sec-Fetch-Dest", "document")
+	documentRequest.Header.Set("Sec-Fetch-Mode", "navigate")
+	documentRequest.Header.Set("Accept-Encoding", "br")
+	documentResponse := httptest.NewRecorder()
+	mux.ServeHTTP(documentResponse, WithSessionSubdomainAccess(documentRequest))
+	if documentResponse.Code != http.StatusOK || documentResponse.Body.String() != documentBody {
+		t.Fatalf("OpenWrt document response changed: status=%d body=%q", documentResponse.Code, documentResponse.Body.String())
+	}
+	if strings.Contains(documentResponse.Body.String(), "data-i5cloud-proxy-notice") {
+		t.Fatalf("platform notice leaked into OpenWrt document: %q", documentResponse.Body.String())
+	}
+	headerMu.Lock()
+	logEncoding := acceptEncoding["/cgi-bin/luci/admin/services/passwall/get_log"]
+	updateEncoding := acceptEncoding[packageUpdatePath]
+	archiveEncoding := acceptEncoding[packageArchivePath]
+	compressedEncoding := acceptEncoding[compressedPagePath]
+	documentEncoding := acceptEncoding["/"]
+	gotPackageUpdateRequest := requestBodies[packageUpdatePath]
+	headerMu.Unlock()
+	if logEncoding != "br" {
+		t.Fatalf("subresource Accept-Encoding changed: %q", logEncoding)
+	}
+	if updateEncoding != "gzip, br, zstd" || archiveEncoding != "gzip, br, zstd" || compressedEncoding != "gzip" || documentEncoding != "br" {
+		t.Fatalf("Accept-Encoding changed: update=%q archive=%q compressed=%q document=%q", updateEncoding, archiveEncoding, compressedEncoding, documentEncoding)
+	}
+	if gotPackageUpdateRequest != packageUpdateRequest {
+		t.Fatalf("OpenWrt package update request changed: %q", gotPackageUpdateRequest)
+	}
+}
+
+func TestWebGatewayStreamsOpaqueHTMLWithoutWaitingForEOF(t *testing.T) {
+	const firstChunk = "package operation started\n"
+	const secondChunk = "package operation completed\n"
+	firstWritten := make(chan struct{})
+	releaseUpstream := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, firstChunk)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(firstWritten)
+		<-releaseUpstream
+		_, _ = io.WriteString(w, secondChunk)
+	}))
+	defer upstream.Close()
+	upstreamAddress := strings.TrimPrefix(upstream.URL, "http://")
+	socksAddress := startForwardingSOCKS(t, upstreamAddress, "proxy-user", "proxy-pass")
+	host, portText, _ := net.SplitHostPort(upstreamAddress)
+	port, _ := strconv.Atoi(portText)
+	token := testWebRoute(t)
+	gateway := NewWebGateway(
+		fakeSessionResolver{
+			session: store.AccessSession{Mode: "web"},
+			route:   store.EndpointRoute{Protocol: "http", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1},
+		},
+		fakeRouteResolver{route: nodeadapter.SOCKSRoute{Address: socksAddress, Username: "proxy-user", Password: "proxy-pass"}},
+	)
+	mux := http.NewServeMux()
+	mux.Handle("/access/web/{token}/{path...}", gateway)
+	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, WithSessionSubdomainAccess(r))
+	}))
+	defer gatewayServer.Close()
+	defer release()
+
+	type firstReadResult struct {
+		response *http.Response
+		chunk    string
+		err      error
+	}
+	result := make(chan firstReadResult, 1)
+	go func() {
+		request, err := http.NewRequest(http.MethodPost, gatewayServer.URL+"/access/web/"+token+"/package/update", strings.NewReader("update=1"))
+		if err != nil {
+			result <- firstReadResult{err: err}
+			return
+		}
+		authorizeGatewayRequest(request)
+		request.Header.Set("Sec-Fetch-Dest", "empty")
+		request.Header.Set("Sec-Fetch-Mode", "cors")
+		response, err := gatewayServer.Client().Do(request)
+		if err != nil {
+			result <- firstReadResult{err: err}
+			return
+		}
+		buffer := make([]byte, len(firstChunk))
+		_, err = io.ReadFull(response.Body, buffer)
+		result <- firstReadResult{response: response, chunk: string(buffer), err: err}
+	}()
+
+	select {
+	case <-firstWritten:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not produce the first streaming chunk")
+	}
+	var first firstReadResult
+	select {
+	case first = <-result:
+	case <-time.After(time.Second):
+		release()
+		<-result
+		t.Fatal("gateway waited for the upstream HTML response to finish before forwarding data")
+	}
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	if first.response.StatusCode != http.StatusOK || first.chunk != firstChunk {
+		t.Fatalf("first streamed chunk changed: status=%d chunk=%q", first.response.StatusCode, first.chunk)
+	}
+	release()
+	rest, err := io.ReadAll(first.response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = first.response.Body.Close()
+	if string(rest) != secondChunk {
+		t.Fatalf("remaining streamed body changed: %q", rest)
 	}
 }
 

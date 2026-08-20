@@ -19,6 +19,7 @@ import {
   api,
   APIError,
   submitWebAccessLaunch,
+  type APIAccessLog,
   type APIAccessPolicy,
   type APIAccessSession,
   type APIAuditLog,
@@ -328,7 +329,7 @@ const ipv4ToNumber = (value: string) => {
   return parts.reduce((total, part) => total * 256 + Number(part), 0) >>> 0;
 };
 
-const parseIPv4Cidrs = (value: string) => [
+const parseIPv4Networks = (value: string) => [
   ...new Set(
     value
       .split(/[,，;；\n]+/)
@@ -337,8 +338,12 @@ const parseIPv4Cidrs = (value: string) => [
   ),
 ];
 
-const isValidIPv4Cidr = (value: string) => {
-  const [address, prefixText] = value.split("/");
+const isValidIPv4Network = (value: string) => {
+  const parts = value.trim().split("/");
+  if (parts.length === 1) return ipv4ToNumber(parts[0]) !== null;
+  if (parts.length !== 2) return false;
+  const [address, prefixText] = parts;
+  if (!/^(0|[1-9]\d*)$/.test(prefixText)) return false;
   const prefix = Number(prefixText);
   return (
     ipv4ToNumber(address) !== null &&
@@ -1659,6 +1664,7 @@ export default function Home() {
   const [userItems, setUserItems] = useState<APIUser[]>([]);
   const [policyItems, setPolicyItems] = useState<APIAccessPolicy[]>([]);
   const [sessionItems, setSessionItems] = useState<APIAccessSession[]>([]);
+  const [accessLogItems, setAccessLogItems] = useState<APIAccessLog[]>([]);
   const [auditItems, setAuditItems] = useState<APIAuditLog[]>([]);
   const [forwardItems, setForwardItems] = useState<APIPortForward[]>([]);
   const [platformState, setPlatformState] = useState<
@@ -1771,6 +1777,7 @@ export default function Home() {
         backendUsers,
         backendPolicies,
         backendSessions,
+        backendAccessLogs,
         backendAudits,
         forwardGroups,
         backendSecurity,
@@ -1778,6 +1785,7 @@ export default function Home() {
         user.role === "system_admin" ? api.users().catch(() => []) : Promise.resolve([]),
         user.role === "system_admin" ? api.policies().catch(() => []) : Promise.resolve([]),
         user.role === "system_admin" ? api.sessions().catch(() => []) : Promise.resolve([]),
+        user.role === "system_admin" ? api.accessLogs().catch(() => []) : Promise.resolve([]),
         user.role === "system_admin" ? api.auditLogs().catch(() => []) : Promise.resolve([]),
         user.role === "system_admin" || user.role === "project_admin"
           ? Promise.all(backendProjects.map((project) => api.portForwards(project.id).catch(() => [])))
@@ -1804,6 +1812,7 @@ export default function Home() {
       setUserItems(backendUsers);
       setPolicyItems(backendPolicies);
       setSessionItems(backendSessions);
+      setAccessLogItems(backendAccessLogs);
       setAuditItems(backendAudits);
       setForwardItems(forwardGroups.flat());
       setSecuritySettings(backendSecurity);
@@ -1886,6 +1895,23 @@ export default function Home() {
       setModal(null);
     });
   }, [currentUser, view]);
+
+  useEffect(() => {
+    if (view !== "logs" || currentUser?.role !== "system_admin") return;
+    let cancelled = false;
+    void Promise.all([api.accessLogs("", true), api.auditLogs("", true)])
+      .then(([accessLogs, operationLogs]) => {
+        if (cancelled) return;
+        setAccessLogItems(accessLogs);
+        setAuditItems(operationLogs);
+      })
+      .catch(() => {
+        if (!cancelled) setToast("审计日志刷新失败，请稍后重试");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.role, view]);
 
   useEffect(() => {
     if (!scanActive || !scanJobId) return;
@@ -2692,19 +2718,24 @@ export default function Home() {
                 }}
                 onNetworksChange={async (networks) => {
                   if (!activeProject.id) throw new Error("项目尚未写入后台");
-                  await api.updateProject(activeProject.id, {
+                  const updated = await api.updateProject(activeProject.id, {
                     name: activeProject.name,
                     ownerName: activeProject.owner,
                     networks,
                   });
-                  setActiveProject((project) => ({ ...project, networks }));
+                  const savedNetworks = updated.networks;
+                  setActiveProject((project) => ({
+                    ...project,
+                    networks: savedNetworks,
+                  }));
                   setProjectItems((items) =>
                     items.map((project) =>
                       project.code === activeProject.code
-                        ? { ...project, networks }
+                        ? { ...project, networks: savedNetworks }
                         : project,
                     ),
                   );
+                  return savedNetworks;
                 }}
               />
             )}
@@ -3135,7 +3166,11 @@ export default function Home() {
               />
             )}
             {view === "logs" && (
-              <LogsView logs={auditItems} onToast={setToast} />
+              <LogsView
+                accessLogs={accessLogItems}
+                operationLogs={auditItems}
+                onToast={setToast}
+              />
             )}
             {view === "settings" && (
               <SettingsView
@@ -3274,14 +3309,20 @@ export default function Home() {
             }
             onSave={async (project) => {
               if (!project.id) throw new Error("项目尚未写入后台");
-              await api.updateProject(project.id, {
+              const updated = await api.updateProject(project.id, {
                 name: project.name,
                 ownerName: project.owner,
                 networks: project.networks,
               });
-              setActiveProject(project);
+              const savedProject = {
+                ...project,
+                networks: updated.networks,
+              };
+              setActiveProject(savedProject);
               setProjectItems((items) =>
-                items.map((item) => (item.id === project.id ? project : item)),
+                items.map((item) =>
+                  item.id === project.id ? savedProject : item,
+                ),
               );
               setModal(null);
               setToast(`${project.name}项目设置已保存`);
@@ -4799,34 +4840,28 @@ function ProjectAccessSummary({
   onImport: () => void;
   onAdd: () => void;
   onToast: (value: string) => void;
-  onNetworksChange: (networks: string[]) => Promise<void>;
+  onNetworksChange: (networks: string[]) => Promise<string[]>;
 }) {
-  const [scopes, setScopes] = useState(project.networks.join(", "));
+  const [scopes, setScopes] = useState(project.networks.join("\n"));
   const [verified, setVerified] = useState(true);
   const [saving, setSaving] = useState(false);
-  const isValidCidr = (value: string) => {
-    const match = value
-      .trim()
-      .match(/^(\d{1,3})(?:\.(\d{1,3})){3}\/(\d|[12]\d|3[0-2])$/);
-    if (!match) return false;
-    return value
-      .trim()
-      .split("/")[0]
-      .split(".")
-      .every((part) => Number(part) <= 255);
-  };
   const save = async () => {
-    const networks = parseIPv4Cidrs(scopes);
-    if (!networks.length || !networks.every(isValidCidr)) {
+    const networks = parseIPv4Networks(scopes);
+    if (!networks.every(isValidIPv4Network)) {
       setVerified(false);
-      onToast("网段格式无效，请使用 IPv4 CIDR，例如 192.168.10.0/24");
+      onToast("格式无效：每行填写一个 IPv4 CIDR 或单 IP");
       return;
     }
     setSaving(true);
     try {
-      await onNetworksChange(networks);
+      const savedNetworks = await onNetworksChange(networks);
+      setScopes(savedNetworks.join("\n"));
       setVerified(true);
-      onToast(`${project.name}：${networks.length} 个网段已保存`);
+      onToast(
+        savedNetworks.length
+          ? `${project.name}：${savedNetworks.length} 个扫描范围已保存`
+          : `${project.name}：扫描范围已清空，可稍后配置`,
+      );
     } catch (error) {
       setVerified(false);
       onToast(error instanceof Error ? error.message : "网段保存失败");
@@ -4882,17 +4917,18 @@ function ProjectAccessSummary({
         <div className="access-scope">
           <div>
             <span className="label-with-help">
-              设备发现网段{" "}
-              <HelpTip text="只控制内网设备发现功能扫描哪些 IPv4 网段，不限制手工添加、已登记设备或远程访问。" />
+              设备发现范围（可选）{" "}
+              <HelpTip text="每行一个 IPv4 CIDR 或单 IP；可留空后续设置。CIDR 扫描包含起始和末尾地址的全部 IP，不限制手工添加、已登记设备或远程访问。" />
             </span>
             <Tag tone={verified ? "green" : "amber"}>
               {verified ? "已保存" : "待保存"}
             </Tag>
           </div>
           <label>
-            <input
+            <textarea
               aria-label="项目设备发现网段"
               value={scopes}
+              rows={2}
               readOnly={!canManage || saving}
               onChange={(event) => {
                 setScopes(event.target.value);
@@ -4910,7 +4946,7 @@ function ProjectAccessSummary({
             )}
           </label>
           <small>
-            多个 CIDR 可用逗号或换行分隔；不会影响已登记设备的 Web 或 SSH 访问
+            可留空后续设置；每行一个，支持 CIDR（10.10.0.0/24）或单 IP（10.10.0.1）
           </small>
         </div>
       </div>
@@ -5149,7 +5185,7 @@ function Workspace({
   onManage: (device: Device) => void;
   onVerify: (device: Device) => Promise<{ verified: number; failed: number }>;
   onToast: (value: string) => void;
-  onNetworksChange: (networks: string[]) => Promise<void>;
+  onNetworksChange: (networks: string[]) => Promise<string[]>;
 }) {
   const [onlyOnline, setOnlyOnline] = useState(false);
   const [verifyingDevice, setVerifyingDevice] = useState<string | null>(null);
@@ -5174,7 +5210,7 @@ function Workspace({
   return (
     <>
       <ProjectAccessSummary
-        key={project.code}
+        key={`${project.code}:${project.networks.join(",")}`}
         project={project}
         socksRunning={socksRunning}
         canManage={canManage}
@@ -6709,7 +6745,7 @@ function DiscoveryView({
           <div>
             <strong>尚未配置扫描内网 IP 段</strong>
             <small>
-              点击页面上方“项目设置”，填写一个或多个 IPv4 CIDR 后即可开始扫描。
+              点击页面上方“项目设置”，每行填写一个 IPv4 CIDR 或单 IP 后即可开始扫描。
             </small>
           </div>
         </div>
@@ -6732,7 +6768,7 @@ function DiscoveryView({
           <div className="scan-network-boundary">
             <span className="label-with-help">
               扫描内网 IP 段{" "}
-              <HelpTip text="扫描范围来自项目设置中保存的 IPv4 CIDR。" />
+              <HelpTip text="扫描范围来自项目设置中保存的 IPv4 CIDR 或单 IP；CIDR 会覆盖全部地址。" />
             </span>
             <div>
               {project.networks.length ? (
@@ -7164,51 +7200,103 @@ function DiscoveryView({
 }
 
 function LogsView({
-  logs,
+  accessLogs,
+  operationLogs,
   onToast,
 }: {
-  logs: APIAuditLog[];
+  accessLogs: APIAccessLog[];
+  operationLogs: APIAuditLog[];
   onToast: (value: string) => void;
 }) {
+  const [activeTab, setActiveTab] = useState<"access" | "operation">("access");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
-  const visibleLogs = logs.filter((log) =>
+  const normalizedQuery = query.toLowerCase();
+  const visibleAccessLogs = accessLogs.filter((log) =>
+    `${log.username}${log.projectName}${log.deviceName}${log.endpointName}${log.mode}${log.sourceIp}${log.status}${log.id}`
+      .toLowerCase()
+      .includes(normalizedQuery),
+  );
+  const visibleOperationLogs = operationLogs.filter((log) =>
     `${log.actor}${log.resourceType}${log.resourceId}${log.action}${log.result}${log.sourceIp}`
       .toLowerCase()
-      .includes(query.toLowerCase()),
+      .includes(normalizedQuery),
   );
+  const visibleCount =
+    activeTab === "access"
+      ? visibleAccessLogs.length
+      : visibleOperationLogs.length;
   const safePage = Math.min(
     page,
-    Math.max(1, Math.ceil(visibleLogs.length / pageSize)),
+    Math.max(1, Math.ceil(visibleCount / pageSize)),
   );
-  const pagedLogs = visibleLogs.slice(
+  const pagedAccessLogs = visibleAccessLogs.slice(
     (safePage - 1) * pageSize,
     safePage * pageSize,
   );
+  const pagedOperationLogs = visibleOperationLogs.slice(
+    (safePage - 1) * pageSize,
+    safePage * pageSize,
+  );
+  const exportCurrentTab = () => {
+    const endpoint =
+      activeTab === "access"
+        ? "/api/v1/access-logs/export"
+        : "/api/v1/audit-logs/export?category=operation";
+    const separator = endpoint.includes("?") ? "&" : "?";
+    window.location.href = `${endpoint}${separator}search=${encodeURIComponent(query)}`;
+    onToast(
+      `正在导出当前筛选的${activeTab === "access" ? "访问日志" : "操作日志"}`,
+    );
+  };
   return (
     <>
       <div className="page-heading">
         <div>
           <div className="breadcrumb">安全审计</div>
-          <h1>访问记录</h1>
-          <p>跟踪项目 Web、WebSSH、扫描和端口转发操作</p>
+          <h1>访问审计</h1>
+          <p>分别查看真实 Web / WebSSH 访问会话与平台管理操作</p>
         </div>
+        <button className="btn secondary" onClick={exportCurrentTab}>
+          导出记录
+        </button>
+      </div>
+      <div className="settings-tabs audit-tabs" role="tablist" aria-label="访问审计分类">
         <button
-          className="btn secondary"
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "access"}
+          className={activeTab === "access" ? "active" : ""}
           onClick={() => {
-            window.location.href = `/api/v1/audit-logs/export?search=${encodeURIComponent(query)}`;
-            onToast(`正在导出 ${visibleLogs.length} 条可见记录`);
+            setActiveTab("access");
+            setPage(1);
           }}
         >
-          导出记录
+          访问日志
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "operation"}
+          className={activeTab === "operation" ? "active" : ""}
+          onClick={() => {
+            setActiveTab("operation");
+            setPage(1);
+          }}
+        >
+          操作日志
         </button>
       </div>
       <div className="content-card">
         <div className="card-header">
           <div>
-            <h2>审计日志</h2>
-            <p>敏感凭据和会话内容不会记录</p>
+            <h2>{activeTab === "access" ? "访问日志" : "操作日志"}</h2>
+            <p>
+              {activeTab === "access"
+                ? "记录访问目标与会话时间，不记录设备凭据或页面内容"
+                : "记录登录、配置、扫描及端口转发等管理操作"}
+            </p>
           </div>
           <div className="table-search">
             <span>⌕</span>
@@ -7218,70 +7306,94 @@ function LogsView({
                 setQuery(event.target.value);
                 setPage(1);
               }}
-              placeholder="搜索用户、资源或操作"
+              placeholder={
+                activeTab === "access"
+                  ? "搜索用户、项目、设备或来源 IP"
+                  : "搜索用户、资源或操作"
+              }
             />
           </div>
         </div>
-        {visibleLogs.length ? (
+        {visibleCount ? (
           <>
             <div className="table-wrap">
-              <table className="device-table">
-                <thead>
-                  <tr>
-                    <th>时间</th>
-                    <th>用户</th>
-                    <th>资源</th>
-                    <th>操作</th>
-                    <th>来源 IP</th>
-                    <th>结果</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pagedLogs.map((log) => (
-                    <tr key={log.id}>
-                      <td>
-                        <code>
-                          {new Date(log.createdAt).toLocaleString("zh-CN")}
-                        </code>
-                      </td>
-                      <td>
-                        <strong>{log.actor}</strong>
-                      </td>
-                      <td>
-                        {log.resourceType} · {log.resourceId || "—"}
-                      </td>
-                      <td>
-                        <Tag
-                          tone={
-                            log.action.includes("access") ? "violet" : "neutral"
-                          }
-                        >
-                          {log.action}
-                        </Tag>
-                      </td>
-                      <td>
-                        <code>{log.sourceIp || "—"}</code>
-                      </td>
-                      <td>
-                        <Tag
-                          tone={
-                            log.result === "success"
-                              ? "green"
-                              : log.result === "failed"
-                                ? "amber"
-                                : "gray"
-                          }
-                        >
-                          {log.result}
-                        </Tag>
-                      </td>
+              {activeTab === "access" ? (
+                <table className="device-table audit-log-table">
+                  <thead>
+                    <tr>
+                      <th>开始时间</th>
+                      <th>用户</th>
+                      <th>项目</th>
+                      <th>访问目标</th>
+                      <th>方式</th>
+                      <th>来源 IP</th>
+                      <th>会话活动</th>
+                      <th>状态</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {pagedAccessLogs.map((log) => {
+                      const status = accessLogStatus(log);
+                      return (
+                        <tr key={log.id}>
+                          <td><code>{formatAuditTime(log.startedAt)}</code></td>
+                          <td><strong>{log.username || "已删除用户"}</strong></td>
+                          <td>{log.projectName}</td>
+                          <td>
+                            <strong>{log.deviceName}</strong>
+                            <small className="audit-cell-detail">{log.endpointName}</small>
+                          </td>
+                          <td><Tag tone={log.mode === "ssh" ? "violet" : "blue"}>{log.mode === "ssh" ? "WebSSH" : "Web"}</Tag></td>
+                          <td><code>{log.sourceIp || "—"}</code></td>
+                          <td>
+                            {log.accessedAt ? (
+                              <>
+                                <span>{log.endedAt ? "结束" : "最近活动"}</span>
+                                <small className="audit-cell-detail">{formatAuditTime(log.endedAt || log.lastSeenAt)}</small>
+                              </>
+                            ) : (
+                              <span className="muted-text">尚未建立连接</span>
+                            )}
+                          </td>
+                          <td><Tag tone={status.tone}>{status.label}</Tag></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              ) : (
+                <table className="device-table audit-log-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>用户</th>
+                      <th>资源</th>
+                      <th>操作</th>
+                      <th>来源 IP</th>
+                      <th>结果</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pagedOperationLogs.map((log) => (
+                      <tr key={log.id}>
+                        <td><code>{formatAuditTime(log.createdAt)}</code></td>
+                        <td><strong>{log.actor}</strong></td>
+                        <td>{log.resourceType} · {log.resourceId || "—"}</td>
+                        <td><Tag tone="neutral">{log.action}</Tag></td>
+                        <td><code>{log.sourceIp || "—"}</code></td>
+                        <td>
+                          <Tag tone={log.result === "success" ? "green" : log.result === "failed" ? "amber" : "gray"}>
+                            {log.result}
+                          </Tag>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
             <PaginationFooter
-              total={visibleLogs.length}
+              total={visibleCount}
               page={safePage}
               pageSize={pageSize}
               onPageChange={setPage}
@@ -7291,14 +7403,26 @@ function LogsView({
           </>
         ) : (
           <EmptyState
-            title="没有匹配的记录"
-            detail="请调整用户、资源或操作关键词"
+            title={activeTab === "access" ? "没有匹配的访问日志" : "没有匹配的操作日志"}
+            detail={activeTab === "access" ? "请调整用户、项目、设备或来源 IP 关键词" : "请调整用户、资源或操作关键词"}
             onClear={() => setQuery("")}
           />
         )}
       </div>
     </>
   );
+}
+
+function formatAuditTime(value: string) {
+  return new Date(value).toLocaleString("zh-CN");
+}
+
+function accessLogStatus(log: APIAccessLog): { label: string; tone: string } {
+  if (!log.accessedAt) return { label: "未进入", tone: "gray" };
+  if (log.status === "active") return { label: "访问中", tone: "green" };
+  if (log.status === "revoked") return { label: "已终止", tone: "amber" };
+  if (log.status === "expired") return { label: "已过期", tone: "gray" };
+  return { label: log.status, tone: "neutral" };
 }
 
 function ModalFrame({
@@ -7439,10 +7563,12 @@ function ProjectSettingsModal({
           setSubmitting(true);
           setError("");
           try {
-            const networks = parseIPv4Cidrs(String(form.get("networks") || ""));
-            if (!networks.length || !networks.every(isValidIPv4Cidr)) {
+            const networks = parseIPv4Networks(
+              String(form.get("networks") || ""),
+            );
+            if (!networks.every(isValidIPv4Network)) {
               setError(
-                "请填写合法的扫描内网 IP 段，例如 192.168.1.0/24；多个网段可换行或用逗号分隔",
+                "请每行填写一个合法的 IPv4 CIDR 或单 IP，也可留空后续设置",
               );
               setSubmitting(false);
               return;
@@ -7512,16 +7638,18 @@ function ProjectSettingsModal({
           </label>
           <label className="full">
             <span className="field-label-help">
-              扫描内网 IP 段{" "}
-              <HelpTip text="设备发现只扫描这里配置的 IPv4 CIDR；支持多个网段，每行一个或使用逗号分隔。" />
+              扫描内网 IP 段（可选）{" "}
+              <HelpTip text="可留空后续设置；每行一个，支持 CIDR（10.10.0.0/24）和单 IP（10.10.0.1）。CIDR 会覆盖从起始地址到末尾地址的全部 IP。" />
             </span>
             <textarea
               name="networks"
-              required
               rows={4}
               defaultValue={project.networks.join("\n")}
-              placeholder={"192.168.1.0/24\n10.10.0.0/16"}
+              placeholder={"10.10.0.0/24\n10.10.0.1"}
             />
+            <small className="field-hint">
+              可留空；保存后可在“设备发现”前再次设置
+            </small>
           </label>
         </div>
         {error && (
@@ -7911,7 +8039,9 @@ function CreateProjectModal({
           event.preventDefault();
           const form = new FormData(event.currentTarget);
           const clientId = Number(form.get("clientId"));
-          const networks = parseIPv4Cidrs(String(form.get("networks") || ""));
+          const networks = parseIPv4Networks(
+            String(form.get("networks") || ""),
+          );
           if (!nodeId) {
             setError("请选择接入节点");
             return;
@@ -7920,9 +8050,9 @@ function CreateProjectModal({
             setError("请选择 Client 或手动输入合法 Client ID");
             return;
           }
-          if (!networks.length || !networks.every(isValidIPv4Cidr)) {
+          if (!networks.every(isValidIPv4Network)) {
             setError(
-              "请填写合法的扫描内网 IP 段，例如 192.168.1.0/24；多个网段可换行或用逗号分隔",
+              "请每行填写一个合法的 IPv4 CIDR 或单 IP，也可留空后续设置",
             );
             return;
           }
@@ -8029,17 +8159,16 @@ function CreateProjectModal({
           </div>
           <label className="full">
             <span className="field-label-help">
-              扫描内网 IP 段{" "}
-              <HelpTip text="填写客户现场允许扫描的 IPv4 CIDR；支持多个网段，每行一个或使用逗号分隔。" />
+              扫描内网 IP 段（可选）{" "}
+              <HelpTip text="创建时可留空，后续在项目设置中配置。每行一个，支持 CIDR（10.10.0.0/24）和单 IP（10.10.0.1）。CIDR 会扫描全部 IP，包括起始和末尾地址。" />
             </span>
             <textarea
               name="networks"
-              required
               rows={4}
-              placeholder={"192.168.1.0/24\n10.10.0.0/16"}
+              placeholder={"10.10.0.0/24\n10.10.0.1"}
             />
             <small className="field-hint">
-              保存后可直接在“设备发现”中扫描这些网段
+              可留空后续设置；每行一个，支持 CIDR 和单 IP
             </small>
           </label>
         </div>

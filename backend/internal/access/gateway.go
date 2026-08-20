@@ -1,14 +1,12 @@
 package access
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -227,7 +225,7 @@ func serveGrantExchangeComplete(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>I5CLOUD 内网设备代理</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{max-width:38rem;padding:2rem;text-align:center}strong{display:block;font-size:1.3rem;margin-bottom:.75rem}p{line-height:1.65;color:#526471}</style><main><strong>I5CLOUD 远程管理平台</strong><p>正在进入由目标内网设备提供的第三方管理页面。</p><p>请仅在确认设备身份后输入该设备的凭据。</p></main><script>setTimeout(()=>location.replace("/"),300)</script></html>`)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>I5CLOUD 内网设备代理</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{position:relative;box-sizing:border-box;max-width:42rem;margin:1rem;padding:2rem 4rem;border:1px solid #d7e1e8;border-radius:14px;background:#fff;text-align:center;box-shadow:0 12px 32px rgba(16,42,67,.1)}strong{display:block;font-size:1.3rem;margin-bottom:.75rem}p{line-height:1.65;color:#526471}button{position:absolute;top:12px;right:12px;width:32px;height:32px;border:1px solid #aab9c4;border-radius:8px;background:#fff;color:#23313d;font:700 21px/28px system-ui,sans-serif;cursor:pointer}</style><main data-i5cloud-proxy-notice="true"><button id="dismiss" type="button" aria-label="&#x5173;&#x95ED;&#x63D0;&#x793A;" title="&#x5173;&#x95ED;&#x63D0;&#x793A;">&#xD7;</button><strong>I5CLOUD 远程管理平台</strong><p>&#x8FDC;&#x7A0B;&#x8FDE;&#x63A5;&#x5B89;&#x5168;&#x8BBF;&#x95EE;&#x901A;&#x9053; &#xB7; &#x5DF2;&#x8FDE;&#x63A5;&#x76EE;&#x6807;&#x5185;&#x7F51;&#x8BBE;&#x5907; &#xB7; &#x9875;&#x9762;&#x5185;&#x5BB9;&#x7531;&#x76EE;&#x6807;&#x8BBE;&#x5907;&#x63D0;&#x4F9B;</p><p>请仅在确认设备身份后输入该设备的凭据。</p></main><script>(()=>{let entered=false;const enter=()=>{if(entered)return;entered=true;location.replace("/")};document.getElementById('dismiss').addEventListener('click',enter);setTimeout(enter,1500)})()</script></html>`)
 }
 
 func clearUpstreamSchemeCookies(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +256,7 @@ func serveGrantBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>I5CLOUD 内网设备代理</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{max-width:34rem;padding:2rem;text-align:center}strong{display:block;font-size:1.25rem;margin-bottom:.75rem}p{line-height:1.65;color:#526471}</style><main><strong>I5CLOUD 远程管理平台</strong><p>此页面用于安全连接由目标内网设备提供的第三方管理界面。</p><p id="status">正在建立安全访问…</p></main><script>(()=>{const match=/^#grant=([0-9a-f]{48})$/.exec(location.hash);const status=document.getElementById('status');if(!match){status.textContent='访问授权无效，请返回平台重新打开';return}fetch('/.dmp/session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({grant:match[1]})}).then(response=>{if(!response.ok)throw new Error('exchange failed');history.replaceState(null,'','/'+location.search);location.replace('/'+location.search)}).catch(()=>{history.replaceState(null,'','/'+location.search);status.textContent='访问授权已失效，请返回平台重新打开'})})();</script></html>`)
+	_, _ = io.WriteString(w, `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>I5CLOUD 内网设备代理</title><style>body{font:16px system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f8fa;color:#23313d}main{position:relative;box-sizing:border-box;max-width:42rem;margin:1rem;padding:2rem 4rem;border:1px solid #d7e1e8;border-radius:14px;background:#fff;text-align:center;box-shadow:0 12px 32px rgba(16,42,67,.1)}strong{display:block;font-size:1.25rem;margin-bottom:.75rem}p{line-height:1.65;color:#526471}button{position:absolute;top:12px;right:12px;width:32px;height:32px;border:1px solid #aab9c4;border-radius:8px;background:#fff;color:#23313d;font:700 21px/28px system-ui,sans-serif;cursor:pointer}button:disabled{cursor:wait;opacity:.45}</style><main data-i5cloud-proxy-notice="true"><button id="dismiss" type="button" disabled aria-label="&#x5173;&#x95ED;&#x63D0;&#x793A;" title="&#x5173;&#x95ED;&#x63D0;&#x793A;">&#xD7;</button><strong>I5CLOUD 远程管理平台</strong><p>&#x8FDC;&#x7A0B;&#x8FDE;&#x63A5;&#x5B89;&#x5168;&#x8BBF;&#x95EE;&#x901A;&#x9053; &#xB7; &#x9875;&#x9762;&#x5185;&#x5BB9;&#x7531;&#x76EE;&#x6807;&#x8BBE;&#x5907;&#x63D0;&#x4F9B;</p><p id="status">正在建立安全访问…</p></main><script>(()=>{const match=/^#grant=([0-9a-f]{48})$/.exec(location.hash);const status=document.getElementById('status');const dismiss=document.getElementById('dismiss');let ready=false;let entered=false;const enter=()=>{if(!ready||entered)return;entered=true;location.replace('/'+location.search)};dismiss.addEventListener('click',enter);if(!match){status.textContent='访问授权无效，请返回平台重新打开';return}fetch('/.dmp/session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({grant:match[1]})}).then(response=>{if(!response.ok)throw new Error('exchange failed');history.replaceState(null,'','/'+location.search);ready=true;dismiss.disabled=false;status.textContent='安全访问已建立，正在进入设备页面';setTimeout(enter,1500)}).catch(()=>{history.replaceState(null,'','/'+location.search);status.textContent='访问授权已失效，请返回平台重新打开'})})();</script></html>`)
 }
 
 func webRequestPath(r *http.Request) string {
@@ -328,10 +326,6 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, reques
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
 			request := proxyRequest.Out
 			stripControlPlaneHeaders(request.Header)
-			// The gateway injects a clear proxy disclosure into HTML. Removing the
-			// browser's Accept-Encoding lets net/http transparently decompress the
-			// upstream body before ModifyResponse sees it.
-			request.Header.Del("Accept-Encoding")
 			request.URL.Scheme = upstreamScheme
 			request.URL.Host = targetAuthority
 			request.URL.Path = upstreamPath
@@ -342,6 +336,11 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, reques
 			rewriteBrowserOrigin(request.Header, upstreamScheme+"://"+upstreamAuthority)
 		},
 		ModifyResponse: func(response *http.Response) error {
+			// The target response body is an opaque stream. Never inspect, buffer or
+			// inject platform markup here: LuCI applications use HTML content types
+			// for logs and package-operation output, and any body transform can break
+			// the real device UI or data flow. The disclosure lives only on the
+			// gateway-owned authorization page shown before this proxy starts.
 			rewriteLocation(response.Header, upstreamScheme, route.Host, upstreamPort, route.TLSServerName)
 			// Rewrite upstream cookies first. That function intentionally discards
 			// names reserved by the platform, so the trusted gateway marker must be
@@ -349,9 +348,6 @@ func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, reques
 			// cookie and removed again.
 			rewriteCookies(response.Header)
 			appendTrustedUpstreamSchemeCookie(response.Header, r, route.Protocol, upstreamScheme)
-			if err := injectProxyDisclosureResponse(response); err != nil {
-				return err
-			}
 			response.Header.Set("Cache-Control", "no-store")
 			response.Header.Set("Referrer-Policy", "no-referrer")
 			response.Header.Set("X-Robots-Tag", "noindex, nofollow, noarchive")
@@ -631,59 +627,6 @@ func gatewayUpstream(route store.EndpointRoute, pathValue string, stickyHTTPS bo
 	}
 	path = "/" + trimmed
 	return
-}
-
-const maxDisclosureResponseBytes = 16 << 20
-
-func injectProxyDisclosureResponse(response *http.Response) error {
-	if response.Body == nil || !isHTMLContentType(response.Header.Get("Content-Type")) {
-		return nil
-	}
-	if encoding := strings.TrimSpace(response.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
-		return nil
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxDisclosureResponseBytes+1))
-	if err != nil {
-		return fmt.Errorf("read upstream text response: %w", err)
-	}
-	if len(body) > maxDisclosureResponseBytes {
-		response.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), response.Body))
-		return nil
-	}
-	_ = response.Body.Close()
-	rewritten := injectProxyDisclosure(body)
-	response.Body = io.NopCloser(bytes.NewReader(rewritten))
-	response.ContentLength = int64(len(rewritten))
-	response.Header.Set("Content-Length", strconv.Itoa(len(rewritten)))
-	response.Header.Del("ETag")
-	response.Header.Del("Content-MD5")
-	return nil
-}
-
-func isHTMLContentType(contentType string) bool {
-	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
-	return mediaType == "text/html" || mediaType == "application/xhtml+xml"
-}
-
-var proxyDisclosure = []byte(`<div data-i5cloud-proxy-notice="true" role="banner" style="position:sticky;top:0;z-index:2147483647;box-sizing:border-box;width:100%;padding:8px 12px;background:#073b4c;color:#fff;text-align:center;font:600 13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">远程连接安全访问通道 · 已连接目标内网设备 · 页面内容由目标设备提供</div>`)
-
-func injectProxyDisclosure(input []byte) []byte {
-	lower := bytes.ToLower(input)
-	if bytes.Contains(lower, []byte(`data-i5cloud-proxy-notice=`)) {
-		return input
-	}
-	bodyStart := bytes.Index(lower, []byte(`<body`))
-	insertAt := 0
-	if bodyStart >= 0 {
-		if bodyEnd := bytes.IndexByte(lower[bodyStart:], '>'); bodyEnd >= 0 {
-			insertAt = bodyStart + bodyEnd + 1
-		}
-	}
-	output := make([]byte, 0, len(input)+len(proxyDisclosure))
-	output = append(output, input[:insertAt]...)
-	output = append(output, proxyDisclosure...)
-	output = append(output, input[insertAt:]...)
-	return output
 }
 
 // stripControlPlaneHeaders prevents platform credentials and caller-supplied

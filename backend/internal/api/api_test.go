@@ -297,6 +297,33 @@ func configureProjectNetworks(t *testing.T, handler http.Handler, project store.
 	return project
 }
 
+func TestCanonicalCIDRsAcceptsSingleIPAndDoesNotHideInvalidInput(t *testing.T) {
+	got := canonicalCIDRs([]string{
+		"10.10.0.1",
+		"10.10.0.1/32",
+		"10.10.0.42/24",
+		"invalid-range",
+		"  ",
+	})
+	want := []string{"10.10.0.1/32", "10.10.0.0/24", "invalid-range"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("canonical discovery networks = %#v, want %#v", got, want)
+	}
+	clientID := 1
+	validInput := store.CreateProjectInput{Name: "project", NodeID: "node", OwnerName: "owner", ClientID: &clientID}
+	if fields := validateProject(validInput); fields["networks"] != "" {
+		t.Fatalf("empty optional discovery range was rejected: %#v", fields)
+	}
+	validInput.Networks = canonicalCIDRs([]string{"10.10.0.1"})
+	if fields := validateProject(validInput); fields["networks"] != "" {
+		t.Fatalf("single-IP discovery range was rejected: %#v", fields)
+	}
+	validInput.Networks = canonicalCIDRs([]string{"not-an-ip"})
+	if fields := validateProject(validInput); fields["networks"] == "" {
+		t.Fatalf("invalid discovery range was silently discarded: %#v", fields)
+	}
+}
+
 func TestHealthAndAuthentication(t *testing.T) {
 	handler := testServer(t)
 	if got := request(t, handler, http.MethodGet, "/health/ready", nil, false).Code; got != http.StatusOK {
@@ -984,6 +1011,13 @@ func TestCreateNodeAndProject(t *testing.T) {
 	if err := json.Unmarshal(projectResponse.Body.Bytes(), &project); err != nil {
 		t.Fatal(err)
 	}
+	if len(project.Networks) != 0 {
+		t.Fatalf("project created without a discovery range = %#v", project.Networks)
+	}
+	project = configureProjectNetworks(t, handler, project, "10.10.0.1")
+	if len(project.Networks) != 1 || project.Networks[0] != "10.10.0.1/32" {
+		t.Fatalf("single-IP project discovery range = %#v", project.Networks)
+	}
 	project = configureProjectNetworks(t, handler, project, "10.10.0.0/16", "192.168.1.0/24")
 	temporaryUserResponse := request(t, handler, http.MethodPost, "/api/v1/users", map[string]any{
 		"username": "temporary-user", "displayName": "临时运维", "password": "temporary access password", "role": "temporary",
@@ -1092,6 +1126,23 @@ func TestCreateNodeAndProject(t *testing.T) {
 	revokeSession := request(t, handler, http.MethodDelete, "/api/v1/access-sessions/"+sessionResult.SessionID, nil, true)
 	if revokeSession.Code != http.StatusNoContent {
 		t.Fatalf("revoke session status = %d: %s", revokeSession.Code, revokeSession.Body.String())
+	}
+	accessLogs := request(t, handler, http.MethodGet, "/api/v1/access-logs?search="+url.QueryEscape(sessionResult.SessionID), nil, true)
+	if accessLogs.Code != http.StatusOK || !bytes.Contains(accessLogs.Body.Bytes(), []byte(sessionResult.SessionID)) || !bytes.Contains(accessLogs.Body.Bytes(), []byte("OpenWrt")) || !bytes.Contains(accessLogs.Body.Bytes(), []byte("LuCI")) || !bytes.Contains(accessLogs.Body.Bytes(), []byte(`"status":"revoked"`)) {
+		t.Fatalf("access log status = %d: %s", accessLogs.Code, accessLogs.Body.String())
+	}
+	for _, secret := range []string{"tokenHash", "grantHash", "node-password", "ssh-password"} {
+		if bytes.Contains(accessLogs.Body.Bytes(), []byte(secret)) {
+			t.Fatalf("access log disclosed %q: %s", secret, accessLogs.Body.String())
+		}
+	}
+	operationOnly := request(t, handler, http.MethodGet, "/api/v1/audit-logs?category=operation&search=access_session", nil, true)
+	if operationOnly.Code != http.StatusOK || !bytes.Contains(operationOnly.Body.Bytes(), []byte(`"items":[]`)) || bytes.Contains(operationOnly.Body.Bytes(), []byte(sessionResult.SessionID)) {
+		t.Fatalf("access session events leaked into operation log: %d %s", operationOnly.Code, operationOnly.Body.String())
+	}
+	accessExport := request(t, handler, http.MethodGet, "/api/v1/access-logs/export?search="+url.QueryEscape(sessionResult.SessionID), nil, true)
+	if accessExport.Code != http.StatusOK || !strings.Contains(accessExport.Header().Get("Content-Disposition"), "access-logs.csv") || !bytes.Contains(accessExport.Body.Bytes(), []byte(sessionResult.SessionID)) {
+		t.Fatalf("access log export = %d %q: %s", accessExport.Code, accessExport.Header().Get("Content-Disposition"), accessExport.Body.String())
 	}
 	updateProject := request(t, handler, http.MethodPatch, "/api/v1/projects/"+project.ID, map[string]any{
 		"name": "真实验收项目 A", "ownerName": "系统管理员", "networks": []string{"10.10.0.0/16", "192.168.1.0/24"},
