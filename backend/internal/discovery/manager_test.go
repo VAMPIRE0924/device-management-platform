@@ -3,6 +3,7 @@ package discovery
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -86,25 +87,44 @@ func TestManagerDiscoversHTTPOnConfiguredNonStandardPort(t *testing.T) {
 }
 
 func TestCountHostsTreatsCIDRAsCompleteScanRange(t *testing.T) {
-	count, err := countHosts([]string{"192.168.10.0/24", "10.0.0.1/32"})
+	count, err := countHosts([]string{"192.168.10.0/24", "10.0.0.1"})
 	if err != nil || count != 257 {
 		t.Fatalf("count = %d, err = %v", count, err)
 	}
 }
 
-func TestForEachHostIncludesRangeEndDot255(t *testing.T) {
-	found := false
+func TestForEachHostIncludesEveryAddressFromDotZeroThroughDot255(t *testing.T) {
+	hosts := make([]string, 0, 256)
 	if err := forEachHost("10.10.0.0/24", func(host string) bool {
-		if host == "10.10.0.255" {
-			found = true
-			return false
-		}
+		hosts = append(hosts, host)
 		return true
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !found {
-		t.Fatal("10.10.0.255 must be scanned as the final address in the configured /24 range")
+	if len(hosts) != 256 {
+		t.Fatalf("full /24 range count = %d, want 256", len(hosts))
+	}
+	if hosts[0] != "10.10.0.0" || hosts[255] != "10.10.0.255" {
+		t.Fatalf("full /24 boundaries = %q through %q", hosts[0], hosts[255])
+	}
+	for index, host := range hosts {
+		want := fmt.Sprintf("10.10.0.%d", index)
+		if host != want {
+			t.Fatalf("host %d = %q, want %q", index, host, want)
+		}
+	}
+}
+
+func TestForEachHostAcceptsSingleIPv4Address(t *testing.T) {
+	hosts := []string{}
+	if err := forEachHost("10.10.0.1", func(host string) bool {
+		hosts = append(hosts, host)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 1 || hosts[0] != "10.10.0.1" {
+		t.Fatalf("single-IP scan = %#v", hosts)
 	}
 }
 
