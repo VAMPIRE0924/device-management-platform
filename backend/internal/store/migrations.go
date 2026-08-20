@@ -1,6 +1,6 @@
 package store
 
-const schemaVersion = 27
+const schemaVersion = 28
 
 var migrations = []string{`
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -374,4 +374,60 @@ SELECT
 FROM mfa_challenges_v26;
 DROP TABLE mfa_challenges_v26;
 CREATE INDEX idx_mfa_challenges_token ON mfa_challenges(token_hash,status,expires_at);
+`, `
+CREATE TABLE access_logs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT,
+  username TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  project_name TEXT NOT NULL,
+  endpoint_id TEXT NOT NULL,
+  endpoint_name TEXT NOT NULL,
+  device_name TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  source_ip TEXT NOT NULL,
+  status TEXT NOT NULL,
+  accessed_at TEXT,
+  expires_at TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  ended_at TEXT
+);
+
+INSERT INTO access_logs(id,user_id,username,project_id,project_name,endpoint_id,endpoint_name,device_name,mode,source_ip,status,accessed_at,expires_at,started_at,last_seen_at,ended_at)
+SELECT s.id,s.user_id,COALESCE(u.username,''),s.project_id,COALESCE(p.name,''),s.endpoint_id,COALESCE(e.name,''),COALESCE(d.name,''),
+       s.mode,s.source_ip,s.status,s.grant_exchanged_at,s.expires_at,s.started_at,s.last_seen_at,
+       CASE WHEN s.ended_at GLOB '????-??-?? ??:??:??' THEN replace(s.ended_at,' ','T') || 'Z' ELSE s.ended_at END
+FROM access_sessions s
+LEFT JOIN users u ON u.id=s.user_id
+LEFT JOIN projects p ON p.id=s.project_id
+LEFT JOIN endpoints e ON e.id=s.endpoint_id
+LEFT JOIN devices d ON d.id=e.device_id;
+
+CREATE INDEX idx_access_logs_started ON access_logs(started_at DESC);
+
+CREATE TRIGGER trg_access_sessions_log_insert
+AFTER INSERT ON access_sessions
+BEGIN
+  INSERT INTO access_logs(id,user_id,username,project_id,project_name,endpoint_id,endpoint_name,device_name,mode,source_ip,status,accessed_at,expires_at,started_at,last_seen_at,ended_at)
+  SELECT NEW.id,NEW.user_id,COALESCE(u.username,''),NEW.project_id,COALESCE(p.name,''),NEW.endpoint_id,COALESCE(e.name,''),COALESCE(d.name,''),
+         NEW.mode,NEW.source_ip,NEW.status,NEW.grant_exchanged_at,NEW.expires_at,NEW.started_at,NEW.last_seen_at,NEW.ended_at
+  FROM projects p
+  JOIN endpoints e ON e.id=NEW.endpoint_id
+  JOIN devices d ON d.id=e.device_id
+  LEFT JOIN users u ON u.id=NEW.user_id
+  WHERE p.id=NEW.project_id;
+END;
+
+CREATE TRIGGER trg_access_sessions_log_update
+AFTER UPDATE OF grant_exchanged_at,status,expires_at,last_seen_at,ended_at ON access_sessions
+BEGIN
+  UPDATE access_logs
+  SET status=NEW.status,
+      accessed_at=CASE WHEN NEW.grant_exchanged_at IS NULL THEN accessed_at ELSE COALESCE(accessed_at,NEW.grant_exchanged_at) END,
+      expires_at=NEW.expires_at,
+      last_seen_at=NEW.last_seen_at,
+      ended_at=NEW.ended_at
+  WHERE id=NEW.id;
+END;
 `}

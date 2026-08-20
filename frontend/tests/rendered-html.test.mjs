@@ -102,9 +102,19 @@ test("keeps UI clocks local and limits necessary background polling", async () =
   assert.doesNotMatch(page, /setInterval\([\s\S]{0,200}(?:api\.|onRefresh|poll\()/);
 });
 
+test("separates access history from platform operation audit", async () => {
+  const [page, api] = await Promise.all([readFile(pageURL, "utf8"), readFile(apiURL, "utf8")]);
+  contains(page, ["访问日志", "操作日志", "尚未建立连接", "WebSSH", "记录访问目标与会话时间，不记录设备凭据或页面内容", "记录登录、配置、扫描及端口转发等管理操作", "accessLogStatus", "accessedAt", "lastSeenAt", "endedAt", "/api/v1/access-logs/export"]);
+  contains(api, ["APIAccessLog", "/api/v1/access-logs?limit=200", "category=operation"]);
+});
+
 test("creates projects by binding an existing Client and scopes CIDRs to discovery", async () => {
   const page = await readFile(pageURL, "utf8");
-  contains(page, ["项目名称", "负责人", "接入节点", "选择 Client 或手动输入 ID", "扫描内网 IP 段", "UnifiedSelect", "unified-select-menu", "ClientCombobox", "client-combobox-menu", "没有匹配的 Client，可直接输入 ID", "MultiChoiceField", 'className="project-table"']);
+  contains(page, ["项目名称", "负责人", "接入节点", "选择 Client 或手动输入 ID", "扫描内网 IP 段（可选）", "可留空后续设置", "每行一个", "CIDR（10.10.0.0/24）", "单 IP（10.10.0.1）", "parseIPv4Networks", "isValidIPv4Network", "UnifiedSelect", "unified-select-menu", "ClientCombobox", "client-combobox-menu", "没有匹配的 Client，可直接输入 ID", "MultiChoiceField", 'className="project-table"']);
+  const createProject = page.slice(page.indexOf("function CreateProjectModal"));
+  const projectSettings = page.slice(page.indexOf("function ProjectSettingsModal"), page.indexOf("function CreateProjectModal"));
+  assert.doesNotMatch(createProject, /name="networks"\s+required/);
+  assert.doesNotMatch(projectSettings, /name="networks"\s+required/);
   assert.equal((page.match(/<select/g) || []).length, 0, "native select elements must not remain");
   assert.doesNotMatch(page, /project-client-select|client-combobox-select|client-combobox-chevron|<select[^>]*multiple|size=\{Math\.min|<datalist|showPicker/);
   assert.doesNotMatch(page, /关联规则|GatewayBootstrapModal|网关接入方式|客户端运行环境|范围外.*不能访问|配置后才允许发现和远程访问/);

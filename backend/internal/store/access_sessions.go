@@ -250,6 +250,37 @@ ORDER BY s.last_seen_at DESC`, now, idleCutoff.UTC().Format(time.RFC3339Nano), n
 	return result, rows.Err()
 }
 
+func (s *Store) ListAccessLogs(ctx context.Context, search string, limit, offset int) ([]AccessLog, error) {
+	if limit < 1 || limit > 1000 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	search = strings.TrimSpace(search)
+	pattern := "%" + search + "%"
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id,user_id,username,project_id,project_name,endpoint_id,endpoint_name,device_name,
+       mode,source_ip,status,accessed_at,expires_at,started_at,last_seen_at,ended_at
+FROM access_logs
+WHERE ?='' OR username LIKE ? OR project_name LIKE ? OR device_name LIKE ? OR endpoint_name LIKE ?
+  OR mode LIKE ? OR source_ip LIKE ? OR status LIKE ? OR id LIKE ?
+ORDER BY started_at DESC LIMIT ? OFFSET ?`, search, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []AccessLog{}
+	for rows.Next() {
+		item, scanErr := scanAccessLog(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) RevokeAccessSession(ctx context.Context, sessionID string, audit AuditInput) error {
 	auditID, err := id.New()
 	if err != nil {
@@ -329,4 +360,49 @@ func scanAccessSession(scanner rowScanner) (AccessSession, error) {
 		session.EndedAt = &value
 	}
 	return session, nil
+}
+
+func scanAccessLog(scanner rowScanner) (AccessLog, error) {
+	var item AccessLog
+	var userID, accessedAt, endedAt sql.NullString
+	var expiresAt, startedAt, lastSeenAt string
+	if err := scanner.Scan(
+		&item.ID, &userID, &item.Username, &item.ProjectID, &item.ProjectName,
+		&item.EndpointID, &item.EndpointName, &item.DeviceName, &item.Mode,
+		&item.SourceIP, &item.Status, &accessedAt, &expiresAt, &startedAt,
+		&lastSeenAt, &endedAt,
+	); err != nil {
+		return AccessLog{}, err
+	}
+	if userID.Valid {
+		item.UserID = &userID.String
+	}
+	var err error
+	item.ExpiresAt, err = time.Parse(time.RFC3339Nano, expiresAt)
+	if err != nil {
+		return AccessLog{}, err
+	}
+	item.StartedAt, err = time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		return AccessLog{}, err
+	}
+	item.LastSeenAt, err = time.Parse(time.RFC3339Nano, lastSeenAt)
+	if err != nil {
+		return AccessLog{}, err
+	}
+	if accessedAt.Valid {
+		value, parseErr := time.Parse(time.RFC3339Nano, accessedAt.String)
+		if parseErr != nil {
+			return AccessLog{}, parseErr
+		}
+		item.AccessedAt = &value
+	}
+	if endedAt.Valid {
+		value, parseErr := time.Parse(time.RFC3339Nano, endedAt.String)
+		if parseErr != nil {
+			return AccessLog{}, parseErr
+		}
+		item.EndedAt = &value
+	}
+	return item, nil
 }

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func (s *Store) ListAuditLogs(ctx context.Context, search string, limit, offset int) ([]AuditLog, error) {
+func (s *Store) ListAuditLogs(ctx context.Context, search, category string, limit, offset int) ([]AuditLog, error) {
 	if limit < 1 || limit > 1000 {
 		limit = 100
 	}
@@ -14,11 +14,13 @@ func (s *Store) ListAuditLogs(ctx context.Context, search string, limit, offset 
 		offset = 0
 	}
 	pattern := "%" + search + "%"
+	operationOnly := category == "operation"
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id,actor,action,resource_type,resource_id,result,request_id,source_ip,metadata_json,created_at
 FROM audit_logs
-WHERE ?='' OR actor LIKE ? OR action LIKE ? OR resource_type LIKE ? OR resource_id LIKE ? OR request_id LIKE ?
-ORDER BY created_at DESC LIMIT ? OFFSET ?`, search, pattern, pattern, pattern, pattern, pattern, limit, offset)
+WHERE (? = 0 OR (resource_type <> 'access_session' AND action NOT LIKE 'access_session.%'))
+  AND (?='' OR actor LIKE ? OR action LIKE ? OR resource_type LIKE ? OR resource_id LIKE ? OR request_id LIKE ?)
+ORDER BY created_at DESC LIMIT ? OFFSET ?`, operationOnly, search, pattern, pattern, pattern, pattern, pattern, limit, offset)
 	if err != nil {
 		return nil, err
 	}
