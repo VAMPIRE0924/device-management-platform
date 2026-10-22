@@ -38,10 +38,11 @@ type Manager struct {
 	timeout     time.Duration
 	mu          sync.Mutex
 	cancels     map[string]context.CancelFunc
+	finished    map[string]chan struct{}
 }
 
 func NewManager(store storage, nodes nodeRoutes) *Manager {
-	return &Manager{store: store, nodes: nodes, concurrency: 32, timeout: 1200 * time.Millisecond, cancels: map[string]context.CancelFunc{}}
+	return &Manager{store: store, nodes: nodes, concurrency: 256, timeout: 1200 * time.Millisecond, cancels: map[string]context.CancelFunc{}, finished: map[string]chan struct{}{}}
 }
 
 func (m *Manager) Start(parent context.Context, job store.DiscoveryJob, route store.DiscoveryRoute) error {
@@ -66,6 +67,7 @@ func (m *Manager) Start(parent context.Context, job store.DiscoveryJob, route st
 		return errors.New("discovery job is already running")
 	}
 	m.cancels[job.ID] = cancel
+	m.finished[job.ID] = make(chan struct{})
 	m.mu.Unlock()
 	go m.run(ctx, job, route, totalHosts*len(job.Ports))
 	return nil
@@ -74,9 +76,13 @@ func (m *Manager) Start(parent context.Context, job store.DiscoveryJob, route st
 func (m *Manager) Cancel(jobID string) bool {
 	m.mu.Lock()
 	cancel, exists := m.cancels[jobID]
+	finished := m.finished[jobID]
 	m.mu.Unlock()
 	if exists {
 		cancel()
+		// Resource deletion must wait until no worker can restart its tunnel
+		// or write another result for the project.
+		<-finished
 	}
 	return exists
 }
@@ -146,6 +152,8 @@ func (m *Manager) run(ctx context.Context, job store.DiscoveryJob, route store.D
 	defer func() {
 		m.mu.Lock()
 		delete(m.cancels, job.ID)
+		close(m.finished[job.ID])
+		delete(m.finished, job.ID)
 		m.mu.Unlock()
 	}()
 	if err := m.store.SetDiscoveryJobState(ctx, job.ID, "running", 0); err != nil {

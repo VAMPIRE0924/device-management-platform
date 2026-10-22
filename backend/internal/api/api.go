@@ -36,6 +36,7 @@ import (
 )
 
 type storage interface {
+	RevokeResourceSessions(context.Context, string, string) ([]string, error)
 	Ping(context.Context) error
 	SchemaVersion(context.Context) (int, error)
 	ListNodes(context.Context) ([]store.Node, error)
@@ -172,6 +173,7 @@ type authSessionToucher interface {
 }
 
 type server struct {
+	resourceMu         sync.Mutex
 	store              storage
 	nodes              nodeControl
 	discovery          discoveryControl
@@ -1073,6 +1075,8 @@ func (s *server) updateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) deleteProject(w http.ResponseWriter, r *http.Request) {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
 	if !requireSystemAdmin(w, r) {
 		return
 	}
@@ -1086,25 +1090,8 @@ func (s *server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "database_error", "无法读取待删除项目", nil)
 		return
 	}
-	forwards, err := s.store.ListPortForwards(r.Context(), projectID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "database_error", "无法检查项目端口转发", nil)
+	if !s.closeResourceSessions(w, r, projectID, "") {
 		return
-	}
-	if len(forwards) > 0 {
-		writeError(w, r, http.StatusConflict, "project_in_use", "项目仍有端口转发，请先在项目的端口转发页删除并释放节点端口", nil)
-		return
-	}
-	sessions, err := s.store.ListActiveAccessSessions(r.Context(), time.Now().UTC().Add(-s.accessSessionIdleTTL()))
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "database_error", "无法检查项目活动访问会话", nil)
-		return
-	}
-	for _, session := range sessions {
-		if session.ProjectID == projectID {
-			writeError(w, r, http.StatusConflict, "project_in_use", "项目仍有活动访问会话，请先在运行监控中终止会话", nil)
-			return
-		}
 	}
 	jobs, err := s.store.ListDiscoveryJobs(r.Context(), projectID)
 	if err != nil {
@@ -1113,7 +1100,23 @@ func (s *server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, job := range jobs {
 		if job.Status == "queued" || job.Status == "running" {
-			writeError(w, r, http.StatusConflict, "project_in_use", "项目仍有正在排队或运行的扫描任务，请先取消扫描", nil)
+			if s.discovery != nil {
+				s.discovery.Cancel(job.ID)
+			}
+			if err := s.store.SetDiscoveryJobState(r.Context(), job.ID, "canceled", job.Progress); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "discovery_cancel_failed", "取消项目扫描失败", nil)
+				return
+			}
+		}
+	}
+	project, err := s.store.ProjectByID(r.Context(), projectID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "database_error", "读取项目失败", nil)
+		return
+	}
+	if s.nodes != nil && project.ClientID != nil {
+		if err := s.nodes.SetManagedTunnel(r.Context(), project.NodeID, *project.ClientID, false); err != nil {
+			writeError(w, r, http.StatusBadGateway, "tunnel_stop_failed", "关闭项目 SOCKS 隧道失败，项目已保留", nil)
 			return
 		}
 	}
@@ -1265,6 +1268,8 @@ func (s *server) createDeviceBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
 	var input store.UpdateDeviceInput
 	if !decodeJSON(w, r, &input) {
 		return
@@ -1290,6 +1295,34 @@ func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	rollbacks := []func(){}
 	var err error
+	devices, err := s.store.ListDevices(r.Context(), r.PathValue("projectID"))
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "database_error", "读取设备失败", nil)
+		return
+	}
+	var current *store.Device
+	for i := range devices {
+		if devices[i].ID == r.PathValue("deviceID") {
+			current = &devices[i]
+			break
+		}
+	}
+	if current == nil {
+		writeError(w, r, http.StatusNotFound, "device_not_found", "设备不存在", nil)
+		return
+	}
+	if input.Endpoints != nil {
+		owned := make(map[string]bool)
+		for _, endpoint := range current.Endpoints {
+			owned[endpoint.ID] = true
+		}
+		for _, endpoint := range *input.Endpoints {
+			if endpoint.ID != "" && !owned[endpoint.ID] {
+				writeError(w, r, http.StatusUnprocessableEntity, "invalid_endpoint", "服务不属于当前设备", nil)
+				return
+			}
+		}
+	}
 	if input.Endpoints != nil {
 		rollbacks, err = s.prepareSSHCredentials(r.Context(), *input.Endpoints)
 		if err != nil {
@@ -1297,8 +1330,13 @@ func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !s.closeResourceSessions(w, r, r.PathValue("projectID"), r.PathValue("deviceID")) {
+		runRollbacks(rollbacks)
+		return
+	}
 	device, err := s.store.UpdateDevice(r.Context(), r.PathValue("projectID"), r.PathValue("deviceID"), input, auditFromRequest(r, "device.update", "device"))
 	if errors.Is(err, store.ErrNotFound) {
+		runRollbacks(rollbacks)
 		writeError(w, r, http.StatusNotFound, "device_not_found", "设备不存在", nil)
 		return
 	}
@@ -1387,7 +1425,69 @@ func (s *server) prepareSSHCredentials(ctx context.Context, endpoints []store.Cr
 	return rollbacks, nil
 }
 
+func (s *server) closeResourceSessions(w http.ResponseWriter, r *http.Request, projectID, deviceID string) bool {
+	forwards, err := s.store.ListPortForwards(r.Context(), projectID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "database_error", "读取关联转发失败", nil)
+		return false
+	}
+	for _, forward := range forwards {
+		route, err := s.store.EndpointRoute(r.Context(), forward.EndpointID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "database_error", "读取转发目标失败", nil)
+			return false
+		}
+		if deviceID == "" || route.DeviceID == deviceID {
+			if !s.removeResourceForward(w, r, forward) {
+				return false
+			}
+		}
+	}
+	ids, err := s.store.RevokeResourceSessions(r.Context(), projectID, deviceID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "session_revoke_failed", "终止资源访问会话失败", nil)
+		return false
+	}
+	for _, sessionID := range ids {
+		for _, revoker := range s.sessionRevokers {
+			revoker.Revoke(sessionID)
+		}
+	}
+	for _, sessionID := range ids {
+		audit := auditFromRequest(r, "access_session.revoke", "access_session")
+		audit.ResourceID = sessionID
+		if err := s.store.AppendAudit(context.WithoutCancel(r.Context()), audit); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "audit_failed", "会话已终止，记录审计失败", nil)
+			return false
+		}
+	}
+	return true
+}
+
+func (s *server) removeResourceForward(w http.ResponseWriter, r *http.Request, forward store.PortForward) bool {
+	if forward.NodeTaskID != nil {
+		if s.nodes == nil || forward.NodeTaskType != "portForward" {
+			writeError(w, r, http.StatusConflict, "invalid_task_reference", "无法安全删除关联节点转发", nil)
+			return false
+		}
+		if err := s.nodes.DeletePortForward(r.Context(), forward.NodeID, *forward.NodeTaskID); err != nil {
+			writeError(w, r, http.StatusBadGateway, "node_port_forward_failed", "删除关联节点转发失败，资源已保留", nil)
+			return false
+		}
+	}
+	if err := s.store.DeletePortForward(r.Context(), forward.ID, auditFromRequest(r, "port_forward.delete", "port_forward")); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "database_error", "删除关联转发记录失败", nil)
+		return false
+	}
+	return true
+}
+
 func (s *server) deleteDevice(w http.ResponseWriter, r *http.Request) {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
+	if !s.closeResourceSessions(w, r, r.PathValue("projectID"), r.PathValue("deviceID")) {
+		return
+	}
 	err := s.store.DeleteDevice(r.Context(), r.PathValue("projectID"), r.PathValue("deviceID"), auditFromRequest(r, "device.delete", "device"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, r, http.StatusNotFound, "device_not_found", "设备不存在", nil)
@@ -1401,6 +1501,8 @@ func (s *server) deleteDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) verifyDevice(w http.ResponseWriter, r *http.Request) {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
 	if s.discovery == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "discovery_unavailable", "设备检测服务尚未启用", nil)
 		return
@@ -1505,6 +1607,8 @@ func (s *server) launchWebAccessSession(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Request, input createAccessSessionRequest) (createdAccessSession, bool) {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
 	if s.nodes == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "node_adapter_unavailable", "节点适配器尚未启用", nil)
 		return createdAccessSession{}, false
@@ -1748,6 +1852,8 @@ type createPortForwardRequest struct {
 }
 
 func (s *server) createPortForward(w http.ResponseWriter, r *http.Request) {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
 	if s.nodes == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "node_adapter_unavailable", "节点适配器尚未启用", nil)
 		return
@@ -1906,6 +2012,8 @@ func (s *server) updateProjectScanPorts(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *server) createDiscoveryJob(w http.ResponseWriter, r *http.Request) {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
 	if s.discovery == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "discovery_unavailable", "自动发现 Worker 尚未启用", nil)
 		return
