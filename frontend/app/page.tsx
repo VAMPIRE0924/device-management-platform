@@ -1655,6 +1655,24 @@ function OnboardingSteps({ active }: { active: 1 | 2 | 3 }) {
 }
 
 export default function Home() {
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const navigation = document.getElementById("main-navigation");
+    navigation?.querySelector<HTMLButtonElement>("button")?.focus();
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileMenuOpen(false);
+      if (event.key !== "Tab") return;
+      const buttons = navigation?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
+      if (!buttons?.length) return;
+      const first = buttons[0], last = buttons[buttons.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => { document.removeEventListener("keydown", handleKey); previous?.focus(); };
+  }, [mobileMenuOpen]);
   const [view, setView] = useState<View>("overview");
   const [modal, setModal] = useState<Modal>(null);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -2573,12 +2591,15 @@ export default function Home() {
   return (
     <div className="showcase">
       <header className="showcase-hero">
+        <button type="button" className="mobile-menu-toggle" aria-label={mobileMenuOpen ? "关闭导航菜单" : "打开导航菜单"} aria-expanded={mobileMenuOpen} aria-controls="main-navigation" onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>☰</button>
         <h1>
           <span>I5CLOUD</span> 远程管理平台
         </h1>
       </header>
-      <div className="app-shell">
-        <aside className="sidebar">
+      <div className={`app-shell ${mobileMenuOpen ? "mobile-nav-open" : ""}`}>
+        {mobileMenuOpen && <button className="mobile-menu-backdrop" aria-label="关闭导航菜单" onClick={() => setMobileMenuOpen(false)} />}
+        <aside id="main-navigation" className={`sidebar ${mobileMenuOpen ? "mobile-open" : ""}`}>
+          <button type="button" className="mobile-menu-close" aria-label="关闭导航菜单" onClick={() => setMobileMenuOpen(false)}>×</button>
           <div className="brand">
             <div className="brand-mark">I5</div>
             <div>
@@ -2600,7 +2621,7 @@ export default function Home() {
                     ? "active"
                     : ""
                 }
-                onClick={() => setView(item.id)}
+                onClick={() => { setView(item.id); setMobileMenuOpen(false); }}
               >
                 <span className="nav-icon">{item.icon}</span>
                 {item.label}
@@ -2614,7 +2635,7 @@ export default function Home() {
               title="账户安全与修改密码"
               aria-label="打开账户安全设置"
               disabled={!currentUser || currentUser.bootstrap}
-              onClick={() => setModal("change-password")}
+              onClick={() => { setModal("change-password"); setMobileMenuOpen(false); }}
             >
               <span className="account-avatar">
                 {currentUser?.displayName?.slice(0, 1) || "I"}
@@ -6964,7 +6985,7 @@ function DiscoveryView({
               已验证服务 <b>{serviceCount}</b>
             </span>
             <span>
-              并发 <b>32</b>
+              并发 <b>256</b>
             </span>
           </div>
         </div>

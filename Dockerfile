@@ -7,7 +7,7 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build:spa
 
-FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS build
 ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH
@@ -32,7 +32,8 @@ LABEL org.opencontainers.image.title="Device Management Platform" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.source="https://github.com/VAMPIRE0924/device-management-platform" \
       org.opencontainers.image.licenses="NOASSERTION"
-RUN apk add --no-cache ca-certificates su-exec tzdata && \
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates su-exec tzdata && \
     addgroup -S -g 10001 platform && \
     adduser -S -D -H -u 10001 -G platform platform && \
     install -d -o platform -g platform -m 0750 /data
