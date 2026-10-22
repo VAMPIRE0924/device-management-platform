@@ -32,7 +32,8 @@ LABEL org.opencontainers.image.title="Device Management Platform" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.source="https://github.com/VAMPIRE0924/device-management-platform" \
       org.opencontainers.image.licenses="NOASSERTION"
-RUN apk add --no-cache ca-certificates su-exec tzdata && \
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates su-exec tzdata && \
     addgroup -S -g 10001 platform && \
     adduser -S -D -H -u 10001 -G platform platform && \
     install -d -o platform -g platform -m 0750 /data
