@@ -250,6 +250,28 @@ ORDER BY s.last_seen_at DESC`, now, idleCutoff.UTC().Format(time.RFC3339Nano), n
 	return result, rows.Err()
 }
 
+// RevokeResourceSessions includes idle and authentication-expired sessions too:
+// these rows can still hold resource references until the lifecycle sweep runs.
+func (s *Store) RevokeResourceSessions(ctx context.Context, projectID, deviceID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `UPDATE access_sessions SET status='revoked', ended_at=?
+WHERE project_id=? AND status='active'
+AND (?='' OR endpoint_id IN (SELECT id FROM endpoints WHERE device_id=?))
+RETURNING id`, time.Now().UTC().Format(time.RFC3339Nano), projectID, deviceID, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, sessionID)
+	}
+	return ids, rows.Err()
+}
+
 func (s *Store) ListAccessLogs(ctx context.Context, search string, limit, offset int) ([]AccessLog, error) {
 	if limit < 1 || limit > 1000 {
 		limit = 100

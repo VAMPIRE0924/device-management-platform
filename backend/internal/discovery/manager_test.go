@@ -48,6 +48,44 @@ func (f *fakeDiscoveryStore) SaveDiscoveryResult(_ context.Context, _ string, re
 
 type fakeDiscoveryNodes struct{ address string }
 
+type cancelingDiscoveryNodes struct{ entered, exited chan struct{} }
+
+func (n cancelingDiscoveryNodes) SetManagedTunnel(ctx context.Context, _ string, _ int, _ bool) error {
+	close(n.entered)
+	<-ctx.Done()
+	close(n.exited)
+	return ctx.Err()
+}
+func (n cancelingDiscoveryNodes) SOCKSRoute(context.Context, string, int) (nodeadapter.SOCKSRoute, error) {
+	return nodeadapter.SOCKSRoute{}, fmt.Errorf("unexpected route lookup after cancellation")
+}
+func TestCancelWaitsForTunnelOperationToExit(t *testing.T) {
+	state := &fakeDiscoveryStore{done: make(chan struct{})}
+	nodes := cancelingDiscoveryNodes{entered: make(chan struct{}), exited: make(chan struct{})}
+	manager := NewManager(state, nodes)
+	if err := manager.Start(t.Context(), store.DiscoveryJob{ID: "cancel", Networks: []string{"10.0.0.0/24"}, Ports: []store.DiscoveryPort{{Port: 80, Protocol: "http"}}}, store.DiscoveryRoute{NodeID: "node", ClientID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-nodes.entered:
+	case <-time.After(time.Second):
+		t.Fatal("tunnel operation not started")
+	}
+	if !manager.Cancel("cancel") {
+		t.Fatal("job not canceled")
+	}
+	select {
+	case <-nodes.exited:
+	default:
+		t.Fatal("cancel returned before tunnel operation exited")
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.cancels) != 0 || len(manager.finished) != 0 {
+		t.Fatal("canceled workers remain registered")
+	}
+}
+
 func (f fakeDiscoveryNodes) SetManagedTunnel(context.Context, string, int, bool) error { return nil }
 func (f fakeDiscoveryNodes) SOCKSRoute(context.Context, string, int) (nodeadapter.SOCKSRoute, error) {
 	return nodeadapter.SOCKSRoute{Address: f.address}, nil

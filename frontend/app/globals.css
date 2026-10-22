@@ -500,6 +500,7 @@ code {
   position: relative;
   z-index: 3;
 }
+.mobile-menu-toggle, .mobile-menu-backdrop, .mobile-menu-close { display: none; }
 .sidebar {
   height: 100%;
   min-height: 0;
@@ -5865,6 +5866,15 @@ main {
   color: #087f75;
 }
 @media (max-width: 1100px) {
+  .mobile-menu-toggle { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 42px; height: 42px; color: white; background: #087f7a; border: 0; border-radius: 8px; font-size: 24px; }
+  .showcase-hero { display: flex; align-items: center; gap: 12px; }
+  .showcase-hero h1 { min-width: 0; }
+  .app-shell.mobile-nav-open { z-index: 40; }
+  .mobile-menu-backdrop { display: block; position: fixed; inset: 0; z-index: 99; background: #001a3380; border: 0; }
+  .sidebar.mobile-open { display: flex; position: fixed; inset: 0 auto 0 0; width: min(300px, 85vw); height: 100dvh; overflow-y: auto; z-index: 100; }
+  .sidebar.mobile-open .mobile-menu-close { display: block; align-self: flex-end; margin: 10px; width: 40px; height: 40px; background: transparent; border: 1px solid #ffffff80; border-radius: 8px; color: white; font-size: 26px; flex-shrink: 0; }
+  .sidebar.mobile-open nav button { font-size: 14px; justify-content: flex-start; }
+  .sidebar.mobile-open .sidebar-account { display: flex; margin-top: auto; flex-shrink: 0; }
   .discovery-device-head {
     grid-template-columns: 1fr 1fr;
   }
