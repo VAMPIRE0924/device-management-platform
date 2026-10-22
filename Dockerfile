@@ -7,7 +7,7 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build:spa
 
-FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS build
 ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH

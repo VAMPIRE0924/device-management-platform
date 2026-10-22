@@ -36,6 +36,7 @@ type fakeNodeControl struct {
 	createdClients   int
 	deletedClientIDs []int
 	deleteClientErr  error
+	deleteForwardErr error
 }
 
 type fakeDiscoveryControl struct{}
@@ -113,7 +114,9 @@ func (f *fakeNodeControl) CreatePortForward(_ context.Context, _ string, clientI
 
 func (f *fakeNodeControl) SetPortForward(context.Context, string, int, bool) error { return nil }
 
-func (f *fakeNodeControl) DeletePortForward(context.Context, string, int) error { return nil }
+func (f *fakeNodeControl) DeletePortForward(context.Context, string, int) error {
+	return f.deleteForwardErr
+}
 
 func (f *fakeNodeControl) CreateClient(context.Context, string, string, string, string, string) (nodeadapter.Client, error) {
 	f.createdClients++
@@ -1123,9 +1126,23 @@ func TestCreateNodeAndProject(t *testing.T) {
 	if activeSessions.Code != http.StatusOK || !bytes.Contains(activeSessions.Body.Bytes(), []byte(sessionResult.SessionID)) {
 		t.Fatalf("active sessions status = %d: %s", activeSessions.Code, activeSessions.Body.String())
 	}
-	revokeSession := request(t, handler, http.MethodDelete, "/api/v1/access-sessions/"+sessionResult.SessionID, nil, true)
-	if revokeSession.Code != http.StatusNoContent {
-		t.Fatalf("revoke session status = %d: %s", revokeSession.Code, revokeSession.Body.String())
+	invalidUpdate := request(t, handler, http.MethodPatch, "/api/v1/projects/"+project.ID+"/devices/"+device.ID, map[string]any{
+		"name": device.Name, "endpoints": []map[string]any{{"id": "foreign-endpoint", "name": "Web", "protocol": "http", "targetPort": 80}},
+	}, true)
+	if invalidUpdate.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("foreign endpoint accepted: %d %s", invalidUpdate.Code, invalidUpdate.Body.String())
+	}
+	stillActive := request(t, handler, http.MethodGet, "/api/v1/access-sessions", nil, true)
+	if !bytes.Contains(stillActive.Body.Bytes(), []byte(sessionResult.SessionID)) {
+		t.Fatal("invalid update revoked a valid session")
+	}
+	updateWithSession := request(t, handler, http.MethodPatch, "/api/v1/projects/"+project.ID+"/devices/"+device.ID, map[string]any{"name": device.Name, "host": device.Host}, true)
+	if updateWithSession.Code != http.StatusOK {
+		t.Fatalf("update device with active session = %d: %s", updateWithSession.Code, updateWithSession.Body.String())
+	}
+	activeAfterUpdate := request(t, handler, http.MethodGet, "/api/v1/access-sessions", nil, true)
+	if activeAfterUpdate.Code != http.StatusOK || bytes.Contains(activeAfterUpdate.Body.Bytes(), []byte(sessionResult.SessionID)) {
+		t.Fatalf("session survived device update: %d %s", activeAfterUpdate.Code, activeAfterUpdate.Body.String())
 	}
 	accessLogs := request(t, handler, http.MethodGet, "/api/v1/access-logs?search="+url.QueryEscape(sessionResult.SessionID), nil, true)
 	if accessLogs.Code != http.StatusOK || !bytes.Contains(accessLogs.Body.Bytes(), []byte(sessionResult.SessionID)) || !bytes.Contains(accessLogs.Body.Bytes(), []byte("OpenWrt")) || !bytes.Contains(accessLogs.Body.Bytes(), []byte("LuCI")) || !bytes.Contains(accessLogs.Body.Bytes(), []byte(`"status":"revoked"`)) {
@@ -1395,7 +1412,7 @@ func TestProjectDeletionLifecycle(t *testing.T) {
 	}
 }
 
-func TestProjectDeletionBlocksDependenciesAndNodeFailure(t *testing.T) {
+func TestProjectDeletionAutomaticallyRemovesDependencies(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "project-delete-conflict.db"))
 	if err != nil {
@@ -1438,15 +1455,22 @@ func TestProjectDeletionBlocksDependenciesAndNodeFailure(t *testing.T) {
 	if forwardResponse.Code != http.StatusCreated || json.Unmarshal(forwardResponse.Body.Bytes(), &forward) != nil {
 		t.Fatalf("create forward = %d: %s", forwardResponse.Code, forwardResponse.Body.String())
 	}
-	blocked := request(t, handler, http.MethodDelete, "/api/v1/projects/"+project.ID, nil, true)
-	if blocked.Code != http.StatusConflict || !bytes.Contains(blocked.Body.Bytes(), []byte("端口转发")) {
-		t.Fatalf("delete with forward = %d: %s", blocked.Code, blocked.Body.String())
+	control.deleteForwardErr = errors.New("node unavailable")
+	if response := request(t, handler, http.MethodDelete, "/api/v1/projects/"+project.ID, nil, true); response.Code != http.StatusBadGateway {
+		t.Fatalf("node failure must retain project: %d %s", response.Code, response.Body.String())
 	}
-	if response := request(t, handler, http.MethodDelete, "/api/v1/port-forwards/"+forward.ID, nil, true); response.Code != http.StatusNoContent {
-		t.Fatalf("delete forward = %d: %s", response.Code, response.Body.String())
+	if _, err := db.ProjectByID(t.Context(), project.ID); err != nil {
+		t.Fatalf("project lost on node failure: %v", err)
 	}
+	if _, err := db.PortForwardByID(t.Context(), forward.ID); err != nil {
+		t.Fatalf("forward lost on node failure: %v", err)
+	}
+	control.deleteForwardErr = nil
 	if response := request(t, handler, http.MethodDelete, "/api/v1/projects/"+project.ID, nil, true); response.Code != http.StatusNoContent {
 		t.Fatalf("delete project after cleanup = %d: %s", response.Code, response.Body.String())
+	}
+	if _, err := db.PortForwardByID(t.Context(), forward.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("forward survived project deletion: %v", err)
 	}
 
 }

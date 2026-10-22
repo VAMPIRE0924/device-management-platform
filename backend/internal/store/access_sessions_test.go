@@ -141,6 +141,24 @@ DELETE FROM schema_migrations WHERE version=28;
 	if err != nil || len(missing) != 0 {
 		t.Fatalf("filtered access history = %#v, err=%v", missing, err)
 	}
+	thirdInput := input
+	thirdInput.TokenHash = "third-route"
+	thirdInput.RouteLabel = "web-abcdefab"
+	thirdInput.GrantHash = "third-grant"
+	third, err := db.CreateAccessSession(ctx, thirdInput, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := db.RevokeResourceSessions(ctx, project.ID, "another-device"); err != nil || len(ids) != 0 {
+		t.Fatalf("unrelated device revoked sessions: %v, %v", ids, err)
+	}
+	ids, err := db.RevokeResourceSessions(ctx, project.ID, device.ID)
+	if err != nil || len(ids) != 1 || ids[0] != third.ID {
+		t.Fatalf("resource revocation: %v, %v", ids, err)
+	}
+	if _, _, err := db.ExchangeAccessGrant(ctx, thirdInput.TokenHash, thirdInput.GrantHash, now.Add(-15*time.Minute)); err != ErrNotFound {
+		t.Fatalf("revoked resource grant remained usable: %v", err)
+	}
 	cleaned, err := db.CleanupAuthSessions(ctx, now.Add(2*time.Hour))
 	if err != nil || cleaned != 1 {
 		t.Fatalf("cleanup auth sessions = %d, err=%v", cleaned, err)
@@ -150,14 +168,14 @@ DELETE FROM schema_migrations WHERE version=28;
 		t.Fatalf("access sessions after auth cleanup = %d, err=%v", remainingSessions, err)
 	}
 	persisted, err := db.ListAccessLogs(ctx, "project", 100, 0)
-	if err != nil || len(persisted) != 2 {
+	if err != nil || len(persisted) != 3 {
 		t.Fatalf("access logs were lost with auth session cleanup: %#v, err=%v", persisted, err)
 	}
 	if err := db.DeleteProject(ctx, project.ID, audit); err != nil {
 		t.Fatalf("delete project after sessions ended: %v", err)
 	}
 	persisted, err = db.ListAccessLogs(ctx, "project", 100, 0)
-	if err != nil || len(persisted) != 2 || persisted[0].ProjectName != "project" {
+	if err != nil || len(persisted) != 3 || persisted[0].ProjectName != "project" {
 		t.Fatalf("access log snapshots were lost with project deletion: %#v, err=%v", persisted, err)
 	}
 }
