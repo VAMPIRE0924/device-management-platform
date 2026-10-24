@@ -6,6 +6,7 @@ conf/device-management-platform.conf
 secrets/*
 
 # Private local project documentation.
+AGENTS.md
 /docs/
 /scripts/verify-docs.sh
 
