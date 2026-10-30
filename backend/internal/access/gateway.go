@@ -309,6 +309,12 @@ func resolveAuthorizedAccess(w http.ResponseWriter, r *http.Request, sessions se
 }
 
 func (g *WebGateway) proxy(w http.ResponseWriter, r *http.Request, token, requestPath string, session store.AccessSession, route store.EndpointRoute, socksRoute nodeadapter.SOCKSRoute) {
+	// HTTP/1 otherwise drains and closes the inbound body when the first
+	// response chunk is written. Transport may still be reading that body
+	// (including its final EOF check), which would abort the upstream stream.
+	// HTTP/2 already permits concurrent request reads and response writes.
+	_ = http.NewResponseController(w).EnableFullDuplex()
+
 	stickyHTTPS := false
 	if cookie, err := r.Cookie(upstreamSchemeCookie); err == nil && cookie.Value == "https" {
 		stickyHTTPS = true

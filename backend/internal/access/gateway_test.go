@@ -467,6 +467,43 @@ func TestWebGatewayPreservesAllUpstreamBodiesWithoutInjection(t *testing.T) {
 }
 
 func TestWebGatewayStreamsOpaqueHTMLWithoutWaitingForEOF(t *testing.T) {
+	for _, delayEOF := range []bool{false, true} {
+		name := "normal"
+		if delayEOF {
+			name = "response_before_request_EOF_check"
+		}
+		t.Run(name, func(t *testing.T) { testWebGatewayStreamsOpaqueHTML(t, delayEOF) })
+	}
+}
+
+// gatedRequestEOFBody pauses Transport's final EOF check after all request
+// bytes have been read, until the browser has received the first response chunk.
+type gatedRequestEOFBody struct {
+	io.ReadCloser
+	remaining int64
+	release   <-chan struct{}
+	result    chan<- error
+}
+
+func (b *gatedRequestEOFBody) Read(p []byte) (int, error) {
+	atEOF := b.remaining == 0
+	if atEOF {
+		<-b.release
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.remaining -= int64(n)
+	if atEOF {
+		b.result <- err
+	}
+	return n, err
+}
+
+func testWebGatewayStreamsOpaqueHTML(t *testing.T, delayRequestEOF bool) {
+	eofGate := make(chan struct{})
+	var eofOnce sync.Once
+	releaseEOF := func() { eofOnce.Do(func() { close(eofGate) }) }
+	eofResult := make(chan error, 1)
+
 	const firstChunk = "package operation started\n"
 	const secondChunk = "package operation completed\n"
 	firstWritten := make(chan struct{})
@@ -490,20 +527,34 @@ func TestWebGatewayStreamsOpaqueHTMLWithoutWaitingForEOF(t *testing.T) {
 	host, portText, _ := net.SplitHostPort(upstreamAddress)
 	port, _ := strconv.Atoi(portText)
 	token := testWebRoute(t)
+	route := store.EndpointRoute{Protocol: "http", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1}
+	socksRoute := nodeadapter.SOCKSRoute{Address: socksAddress, Username: "proxy-user", Password: "proxy-pass"}
 	gateway := NewWebGateway(
 		fakeSessionResolver{
 			session: store.AccessSession{Mode: "web"},
-			route:   store.EndpointRoute{Protocol: "http", TargetPort: port, AccessType: "web_proxy", Host: host, NodeID: "node-1", ClientID: 1},
+			route:   route,
 		},
-		fakeRouteResolver{route: nodeadapter.SOCKSRoute{Address: socksAddress, Username: "proxy-user", Password: "proxy-pass"}},
+		fakeRouteResolver{route: socksRoute},
 	)
+	if delayRequestEOF {
+		// Force the request bytes onto the wire before Transport checks for EOF.
+		// This makes the response/body-read overlap deterministic.
+		gateway.proxyTransport(token, "", route, socksRoute).WriteBufferSize = 1
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/access/web/{token}/{path...}", gateway)
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if delayRequestEOF {
+			r.Body = &gatedRequestEOFBody{ReadCloser: r.Body, remaining: r.ContentLength, release: eofGate, result: eofResult}
+		}
 		mux.ServeHTTP(w, WithSessionSubdomainAccess(r))
 	}))
 	defer gatewayServer.Close()
 	defer release()
+	defer releaseEOF()
+	defer gateway.proxyTransport(token, "", route, socksRoute).CloseIdleConnections()
+	client := gatewayServer.Client()
+	client.Timeout = 5 * time.Second
 
 	type firstReadResult struct {
 		response *http.Response
@@ -520,7 +571,7 @@ func TestWebGatewayStreamsOpaqueHTMLWithoutWaitingForEOF(t *testing.T) {
 		authorizeGatewayRequest(request)
 		request.Header.Set("Sec-Fetch-Dest", "empty")
 		request.Header.Set("Sec-Fetch-Mode", "cors")
-		response, err := gatewayServer.Client().Do(request)
+		response, err := client.Do(request)
 		if err != nil {
 			result <- firstReadResult{err: err}
 			return
@@ -539,9 +590,13 @@ func TestWebGatewayStreamsOpaqueHTMLWithoutWaitingForEOF(t *testing.T) {
 	select {
 	case first = <-result:
 	case <-time.After(time.Second):
+		releaseEOF()
 		release()
 		<-result
 		t.Fatal("gateway waited for the upstream HTML response to finish before forwarding data")
+	}
+	if first.response != nil {
+		defer first.response.Body.Close()
 	}
 	if first.err != nil {
 		t.Fatal(first.err)
@@ -549,12 +604,22 @@ func TestWebGatewayStreamsOpaqueHTMLWithoutWaitingForEOF(t *testing.T) {
 	if first.response.StatusCode != http.StatusOK || first.chunk != firstChunk {
 		t.Fatalf("first streamed chunk changed: status=%d chunk=%q", first.response.StatusCode, first.chunk)
 	}
+	if delayRequestEOF {
+		releaseEOF()
+		select {
+		case err := <-eofResult:
+			if !errors.Is(err, io.EOF) {
+				t.Errorf("request EOF read = %v, want EOF", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("request EOF read did not finish")
+		}
+	}
 	release()
 	rest, err := io.ReadAll(first.response.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = first.response.Body.Close()
 	if string(rest) != secondChunk {
 		t.Fatalf("remaining streamed body changed: %q", rest)
 	}
