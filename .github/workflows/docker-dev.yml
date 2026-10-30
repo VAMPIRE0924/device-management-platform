@@ -14,6 +14,12 @@ concurrency:
 
 jobs:
   publish:
+    # History rewrites and maintenance-only commits must not overwrite images.
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/dev' &&
+      github.event.forced == false &&
+      !contains(github.event.head_commit.message, '[skip publish]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

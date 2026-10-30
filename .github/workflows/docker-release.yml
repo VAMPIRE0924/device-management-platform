@@ -1,10 +1,13 @@
 name: Publish formal release
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      confirm_publish:
+        description: Publish the current main version to Docker Hub and GitHub Releases
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: write
@@ -15,6 +18,8 @@ concurrency:
 
 jobs:
   publish:
+    # Updating main or rewriting history never authorizes publication.
+    if: github.ref == 'refs/heads/main' && inputs.confirm_publish == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
