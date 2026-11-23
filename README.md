@@ -106,7 +106,7 @@ docker build \
   -t device-management-platform:v2.1.1 .
 ```
 
-开发环境使用 Go 1.27.3、Node.js 22 和 Docker。完整检查入口：
+开发环境使用 Go 1.27.4、Node.js 22 和 Docker。完整检查入口：
 
 ```bash
 cd frontend && npm ci && cd ..

@@ -7570,7 +7570,7 @@ function ProjectClientPicker({nodeId, ids, onChange}: {nodeId: string; ids: numb
  const [clients,setClients]=useState<APINodeClient[]>([]);
  const [error,setError]=useState("");
  useEffect(()=>{
- let current=true;setClients([]);setError("");
+ let current=true;
  if(nodeId) api.nodeClients(nodeId).then(items=>{if(current)setClients(items)}).catch(()=>{if(current)setError("读取节点 Client 失败")});
  return ()=>{current=false};
  },[nodeId]);
@@ -8146,7 +8146,7 @@ function CreateProjectModal({
                 ))}
             </UnifiedSelect>
           </label>
-          <ProjectClientPicker nodeId={nodeId} ids={ids} onChange={setIds}/>
+          <ProjectClientPicker key={nodeId} nodeId={nodeId} ids={ids} onChange={setIds}/>
           <label className="full">
             <span className="field-label-help">
               扫描内网 IP 段（可选）{" "}
