@@ -7574,7 +7574,6 @@ function ProjectClientPicker({ nodeId, ids, onChange }: {
   const [clients, setClients] = useState<APINodeClient[]>([]);
   const [loadError, setLoadError] = useState("");
   const [draft, setDraft] = useState("");
-  const [inputError, setInputError] = useState("");
 
   useEffect(() => {
     let current = true;
@@ -7591,45 +7590,118 @@ function ProjectClientPicker({ nodeId, ids, onChange }: {
     return "#" + id + (client?.remark ? " · " + client.remark : "");
   }
 
-  function addId() {
-    const value = draft.trim();
-    const id = Number(value);
-    if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(id)) {
-      setInputError("请输入正整数 Client ID");
-      return;
-    }
+  const listID = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const query = draft.trim().toLowerCase();
+  const visibleClients = clients.filter((client) => {
+    if (!query) return true;
+    return (
+      String(client.id).includes(query) ||
+      (client.remark || "").toLowerCase().includes(query)
+    );
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (
+        !rootRef.current?.contains(event.target as Node) &&
+        !menuRef.current?.contains(event.target as Node)
+      )
+        setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [open]);
+
+  function addId(id: number) {
     if (!ids.includes(id)) onChange([...ids, id]);
     setDraft("");
-    setInputError("");
+    setOpen(false);
   }
 
   return (
-    <div className="form-field full">
+    <div className="form-field full project-client-field">
       <span>Client</span>
-      <MultiChoiceField
-        label="Client"
-        options={clients.map(item => title(item.id))}
-        selected={ids.map(title)}
-        onChange={items => onChange(items.map(item => Number(item.slice(1).split(" ")[0])))}
-      />
-      <div style={{ display: "flex", gap: 8 }}>
-        <input
-          aria-label="手动输入 Client ID"
-          placeholder="手动输入 Client ID，回车添加"
-          disabled={!nodeId}
-          inputMode="numeric"
-          value={draft}
-          onChange={event => { setDraft(event.target.value); setInputError(""); }}
-          onKeyDown={event => {
-            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              addId();
+      <div className="client-combobox" ref={rootRef}>
+      <input
+        ref={inputRef}
+        name="pendingClientId"
+        type="text"
+        inputMode="numeric"
+        pattern="[1-9][0-9]*"
+        role="combobox"
+        aria-label="选择或输入 Client ID"
+        aria-autocomplete="list"
+        aria-controls={listID}
+        aria-expanded={open}
+        value={draft}
+        disabled={!nodeId}
+        placeholder={nodeId ? "选择 Client 或手动输入 ID" : "请先选择接入节点"}
+        onClick={() => setOpen(true)}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            if (/^[1-9][0-9]*$/.test(query) && Number.isSafeInteger(Number(query))) {
+              addId(Number(query));
+            } else if (visibleClients.length === 1) {
+              addId(visibleClients[0].id);
             }
-          }}
-        />
-        <button type="button" className="btn secondary" disabled={!nodeId || !draft.trim()} onClick={addId}>添加</button>
+          }
+          if (event.key === "Escape") setOpen(false);
+          if (event.key === "ArrowDown") setOpen(true);
+        }}
+        onChange={(event) => {
+          setDraft(event.currentTarget.value);
+          setOpen(true);
+        }}
+      />
+      {open && (
+        <FloatingMenu
+          anchorRef={inputRef}
+          menuRef={menuRef}
+          className="client-combobox-menu"
+          id={listID}
+        >
+          {visibleClients.length > 0 ? (
+            visibleClients.map((client) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={ids.includes(client.id)}
+                key={client.id}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  addId(client.id);
+                }}
+              >
+                <strong>#{client.id}</strong>
+                <span>{client.remark || `Client ${client.id}`}</span>
+                <small className={client.connected ? "online" : "offline"}>
+                  {client.connected ? "已连接" : "离线"}
+                </small>
+              </button>
+            ))
+          ) : (
+            <p>没有匹配的 Client，可手动输入 Client ID 后按回车</p>
+          )}
+        </FloatingMenu>
+      )}
       </div>
-      {inputError && <small role="alert">{inputError}</small>}
+      {ids.length > 0 && (
+        <div className="multi-choice-tags" aria-label="已选 Client">
+          {ids.map(id => (
+            <span key={id}>
+              {title(id)}
+              <button type="button" aria-label={`移除 Client ${id}`} onClick={() => onChange(ids.filter(item => item !== id))}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
       {loadError && <small>{loadError}</small>}
     </div>
   );
@@ -7658,6 +7730,13 @@ function ProjectSettingsModal({
         onSubmit={async (event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
+          const pending = String(form.get("pendingClientId") || "").trim();
+          if (pending && (!/^[1-9][0-9]*$/.test(pending) || !Number.isSafeInteger(Number(pending)))) {
+            setError("请输入有效的 Client ID");
+            return;
+          }
+          const selectedIds = pending ? [...new Set([...ids, Number(pending)])] : ids;
+
           setSubmitting(true);
           setError("");
           try {
@@ -7672,7 +7751,7 @@ function ProjectSettingsModal({
               return;
             }
             await onSave({
-              ...project, clientIds:ids, clientId:ids[0] || 0,
+              ...project, clientIds:selectedIds, clientId:selectedIds[0] || 0,
               name: String(form.get("name") || project.name),
               owner: String(form.get("owner") || project.owner),
               networks,
@@ -8111,6 +8190,13 @@ function CreateProjectModal({
         onSubmit={async (event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
+          const pending = String(form.get("pendingClientId") || "").trim();
+          if (pending && (!/^[1-9][0-9]*$/.test(pending) || !Number.isSafeInteger(Number(pending)))) {
+            setError("请输入有效的 Client ID");
+            return;
+          }
+          const selectedIds = pending ? [...new Set([...ids, Number(pending)])] : ids;
+
 
           const networks = parseIPv4Networks(
             String(form.get("networks") || ""),
@@ -8119,7 +8205,7 @@ function CreateProjectModal({
             setError("请选择接入节点");
             return;
           }
-          if (!ids.length) {
+          if (!selectedIds.length) {
             setError("请至少选择一个 Client");
             return;
           }
@@ -8136,7 +8222,7 @@ function CreateProjectModal({
               name: String(form.get("name") || "").trim(),
               ownerName: String(form.get("ownerName") || ""),
               nodeId,
-              clientIds:ids,
+              clientIds:selectedIds,
               networks,
             });
           } catch (reason) {
