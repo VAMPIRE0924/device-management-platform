@@ -302,6 +302,7 @@ export type APIProject = {
   nodeId: string;
   ownerName: string;
   clientId: number | null;
+  clientIds: number[];
   networks: string[];
 };
 
@@ -587,8 +588,8 @@ export const api = {
   async managedTunnels(nodeId: string, fresh = false) { return (await request<{ items: APIManagedTunnel[] }>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/managed-tunnels`, {}, { fresh })).items; },
   async projectScanPorts(projectId: string) { return (await request<{ items: APIDiscoveryPort[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/scan-ports`)).items; },
   async updateProjectScanPorts(projectId: string, ports: APIDiscoveryPort[]) { return (await request<{ items: APIDiscoveryPort[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/scan-ports`, { method: "PUT", body: JSON.stringify({ ports }) })).items; },
-  async createDiscoveryJob(projectId: string, networks: string[], ports: APIDiscoveryPort[]) {
-    return request<APIDiscoveryJob>(`/api/v1/projects/${encodeURIComponent(projectId)}/discovery-jobs`, { method: "POST", body: JSON.stringify({ networks, ports }) });
+  async createDiscoveryJob(projectId: string, networks: string[], ports: APIDiscoveryPort[], clientId: number) {
+    return request<APIDiscoveryJob>(`/api/v1/projects/${encodeURIComponent(projectId)}/discovery-jobs`, { method: "POST", body: JSON.stringify({ networks, ports, clientId }) });
   },
   async discoveryJob(jobId: string) {
     return request<{ job: APIDiscoveryJob; results: APIDiscoveryResult[] }>(`/api/v1/discovery-jobs/${encodeURIComponent(jobId)}`, {}, { cache: false, fresh: true });

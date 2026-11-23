@@ -1,6 +1,6 @@
 package store
 
-const schemaVersion = 28
+const schemaVersion = 29
 
 var migrations = []string{`
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -430,4 +430,30 @@ BEGIN
       ended_at=NEW.ended_at
   WHERE id=NEW.id;
 END;
+`, `
+CREATE TABLE project_clients(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,node_id TEXT NOT NULL,client_id INTEGER NOT NULL CHECK(client_id>0),PRIMARY KEY(project_id,client_id), UNIQUE(node_id,client_id));
+INSERT INTO project_clients SELECT id,node_id,client_id FROM projects WHERE client_id>0;
+CREATE TABLE devices_new (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  host TEXT NOT NULL,
+  name TEXT NOT NULL,
+  device_type TEXT NOT NULL DEFAULT 'other',
+  vendor TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','discovery','import')),
+  status TEXT NOT NULL DEFAULT 'unknown',
+  last_seen_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  client_id INTEGER NOT NULL DEFAULT 0, UNIQUE(project_id, client_id, host)
+);
+
+INSERT INTO devices_new SELECT d.*,coalesce(p.client_id,0) FROM devices d JOIN projects p ON p.id=d.project_id;
+PRAGMA legacy_alter_table=ON;
+DROP TABLE devices;
+ALTER TABLE devices_new RENAME TO devices;
+PRAGMA legacy_alter_table=OFF;
+CREATE INDEX idx_devices_project ON devices(project_id);
+ALTER TABLE discovery_jobs ADD COLUMN client_id INTEGER NOT NULL DEFAULT 0;
+UPDATE discovery_jobs SET client_id=coalesce((SELECT client_id FROM projects WHERE id=project_id),0);
 `}

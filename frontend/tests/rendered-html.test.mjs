@@ -110,7 +110,7 @@ test("separates access history from platform operation audit", async () => {
 
 test("creates projects by binding an existing Client and scopes CIDRs to discovery", async () => {
   const page = await readFile(pageURL, "utf8");
-  contains(page, ["项目名称", "负责人", "接入节点", "选择 Client 或手动输入 ID", "扫描内网 IP 段（可选）", "可留空后续设置", "每行一个", "CIDR（10.10.0.0/24）", "单 IP（10.10.0.1）", "parseIPv4Networks", "isValidIPv4Network", "UnifiedSelect", "unified-select-menu", "ClientCombobox", "client-combobox-menu", "没有匹配的 Client，可直接输入 ID", "MultiChoiceField", 'className="project-table"']);
+  contains(page, ["项目名称", "负责人", "接入节点", "ProjectClientPicker", "扫描内网 IP 段（可选）", "可留空后续设置", "每行一个", "CIDR（10.10.0.0/24）", "单 IP（10.10.0.1）", "parseIPv4Networks", "isValidIPv4Network", "UnifiedSelect", "unified-select-menu", "clientIds", "MultiChoiceField", 'className="project-table"']);
   const createProject = page.slice(page.indexOf("function CreateProjectModal"));
   const projectSettings = page.slice(page.indexOf("function ProjectSettingsModal"), page.indexOf("function CreateProjectModal"));
   assert.doesNotMatch(createProject, /name="networks"\s+required/);

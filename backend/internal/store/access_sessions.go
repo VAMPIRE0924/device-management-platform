@@ -17,7 +17,7 @@ func (s *Store) EndpointRoute(ctx context.Context, endpointID string) (EndpointR
 	var clientID sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
 	SELECT e.id,e.name,e.protocol,e.target_port,e.access_type,e.tls_server_name,e.ssh_credential_ref,e.ssh_auth_method,e.ssh_username,e.ssh_key_path,e.ssh_host_key_fingerprint,
-       d.id,d.name,d.host,p.id,p.name,p.node_id,p.client_id
+       d.id,d.name,d.host,p.id,p.name,p.node_id,(SELECT client_id FROM project_clients WHERE project_id=p.id AND client_id=d.client_id)
 FROM endpoints e
 JOIN devices d ON d.id = e.device_id
 JOIN projects p ON p.id = d.project_id
@@ -112,7 +112,7 @@ func (s *Store) ResolveAccessGrant(ctx context.Context, tokenHash, grantHash str
 	defer tx.Rollback()
 	err = tx.QueryRowContext(ctx, `
 SELECT s.id,s.user_id,s.auth_session_id,s.project_id,s.endpoint_id,e.name,d.name,s.route_label,s.mode,s.source_ip,s.status,s.expires_at,s.started_at,s.last_seen_at,s.ended_at,
-       e.protocol,e.target_port,e.access_type,e.tls_server_name,e.ssh_credential_ref,e.ssh_auth_method,e.ssh_username,e.ssh_key_path,e.ssh_host_key_fingerprint,d.id,d.host,p.name,p.node_id,p.client_id
+       e.protocol,e.target_port,e.access_type,e.tls_server_name,e.ssh_credential_ref,e.ssh_auth_method,e.ssh_username,e.ssh_key_path,e.ssh_host_key_fingerprint,d.id,d.host,p.name,p.node_id,(SELECT client_id FROM project_clients WHERE project_id=p.id AND client_id=d.client_id)
 FROM access_sessions s
 JOIN auth_sessions a ON a.id = s.auth_session_id AND a.user_id = s.user_id
 JOIN users u ON u.id = a.user_id AND u.enabled = 1

@@ -57,14 +57,14 @@ func (s *Store) ImportDiscoveryDevice(ctx context.Context, jobID string, input C
 	}
 	defer tx.Rollback()
 	var deviceID string
-	err = tx.QueryRowContext(ctx, `SELECT id FROM devices WHERE project_id = ? AND host = ?`, job.ProjectID, input.Host).Scan(&deviceID)
+	err = tx.QueryRowContext(ctx, `SELECT id FROM devices WHERE project_id = ? AND client_id=(SELECT client_id FROM discovery_jobs WHERE id=?) AND host = ?`, job.ProjectID, jobID, input.Host).Scan(&deviceID)
 	if errors.Is(err, sql.ErrNoRows) {
 		deviceID, err = id.New()
 		if err != nil {
 			return Device{}, err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO devices(id,project_id,host,name,device_type,vendor,source,status,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-			deviceID, job.ProjectID, input.Host, input.Name, input.DeviceType, input.Vendor, "discovery", "online", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		_, err = tx.ExecContext(ctx, `INSERT INTO devices(id,project_id,client_id,host,name,device_type,vendor,source,status,last_seen_at,created_at,updated_at) VALUES(?,?,(SELECT client_id FROM discovery_jobs WHERE id=?),?,?,?,?,?,?,?,?,?)`,
+			deviceID, job.ProjectID, jobID, input.Host, input.Name, input.DeviceType, input.Vendor, "discovery", "online", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	} else if err == nil {
 		_, err = tx.ExecContext(ctx, `UPDATE devices SET name = ?,device_type = ?,vendor = ?,status = 'online',last_seen_at = ?,updated_at = ? WHERE id = ?`,
 			input.Name, input.DeviceType, input.Vendor, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), deviceID)
@@ -128,7 +128,7 @@ ON CONFLICT(device_id,protocol,target_port) DO UPDATE SET
 	return Device{}, ErrNotFound
 }
 
-func (s *Store) CreateDiscoveryJob(ctx context.Context, projectID string, networks []string, ports []DiscoveryPort, audit AuditInput) (DiscoveryJob, error) {
+func (s *Store) CreateDiscoveryJob(ctx context.Context, projectID string, networks []string, ports []DiscoveryPort, audit AuditInput, clients ...int) (DiscoveryJob, error) {
 	jobID, err := id.New()
 	if err != nil {
 		return DiscoveryJob{}, err
@@ -151,7 +151,15 @@ func (s *Store) CreateDiscoveryJob(ctx context.Context, projectID string, networ
 		return DiscoveryJob{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO discovery_jobs(id,project_id,networks_json,ports_json,status,progress,created_at) VALUES(?,?,?,?,?,?,?)`, jobID, projectID, string(networksJSON), string(portsJSON), "queued", 0, now.Format(time.RFC3339Nano))
+	var client int
+	if len(clients) > 0 {
+		client = clients[0]
+	}
+	err = tx.QueryRowContext(ctx, "SELECT client_id FROM project_clients WHERE project_id=? AND (client_id=? OR (?=0 AND (SELECT count(*) FROM project_clients WHERE project_id=?)=1))", projectID, client, client, projectID).Scan(&client)
+	if err != nil {
+		return DiscoveryJob{}, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO discovery_jobs(id,project_id,client_id,networks_json,ports_json,status,progress,created_at) VALUES(?,?,?,?,?,?,?,?)`, jobID, projectID, client, string(networksJSON), string(portsJSON), "queued", 0, now.Format(time.RFC3339Nano))
 	if err != nil {
 		return DiscoveryJob{}, err
 	}

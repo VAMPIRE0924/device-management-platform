@@ -14,7 +14,7 @@ import (
 
 func (s *Store) ListPortForwards(ctx context.Context, projectID string) ([]PortForward, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,p.client_id,d.host,e.target_port,f.server_port,f.node_task_type,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
+SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,d.client_id,d.host,e.target_port,f.server_port,f.node_task_type,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
 FROM port_forwards f
 JOIN endpoints e ON e.id = f.endpoint_id
 JOIN devices d ON d.id = e.device_id
@@ -119,7 +119,7 @@ func (s *Store) ActivatePortForward(ctx context.Context, forwardID, nodeTaskType
 
 func (s *Store) PortForwardByID(ctx context.Context, forwardID string) (PortForward, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,p.client_id,d.host,e.target_port,f.server_port,f.node_task_type,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
+SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,d.client_id,d.host,e.target_port,f.server_port,f.node_task_type,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
 FROM port_forwards f
 JOIN endpoints e ON e.id = f.endpoint_id
 JOIN devices d ON d.id = e.device_id
@@ -134,7 +134,7 @@ WHERE f.id = ?`, forwardID)
 
 func (s *Store) ListExpiredPortForwards(ctx context.Context, now time.Time) ([]PortForward, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,p.client_id,d.host,e.target_port,f.server_port,f.node_task_type,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
+SELECT f.id,p.id,f.endpoint_id,e.name,d.name,p.node_id,d.client_id,d.host,e.target_port,f.server_port,f.node_task_type,f.node_task_id,f.status,f.expires_at,f.created_at,f.updated_at
 FROM port_forwards f
 JOIN endpoints e ON e.id = f.endpoint_id
 JOIN devices d ON d.id = e.device_id

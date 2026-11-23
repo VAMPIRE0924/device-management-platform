@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -11,7 +12,7 @@ import (
 )
 
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,code,name,node_id,owner_name,client_id,created_at,updated_at FROM projects ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,code,name,node_id,owner_name,client_id,(SELECT json_group_array(client_id) FROM project_clients WHERE project_id=projects.id),created_at,updated_at FROM projects ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +44,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 func (s *Store) ProjectByID(ctx context.Context, projectID string) (Project, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,code,name,node_id,owner_name,client_id,created_at,updated_at FROM projects WHERE id = ?`, projectID)
+	row := s.db.QueryRowContext(ctx, `SELECT id,code,name,node_id,owner_name,client_id,(SELECT json_group_array(client_id) FROM project_clients WHERE project_id=projects.id),created_at,updated_at FROM projects WHERE id = ?`, projectID)
 	project, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Project{}, ErrNotFound
@@ -75,6 +76,13 @@ func (s *Store) CreateProject(ctx context.Context, code string, input CreateProj
 	if err != nil {
 		return Project{}, fmt.Errorf("insert project: %w", err)
 	}
+	ids := input.ClientIDs
+	if ids == nil && input.ClientID != nil {
+		ids = []int{*input.ClientID}
+	}
+	if err := replaceProjectClients(ctx, tx, projectID, ids); err != nil {
+		return Project{}, err
+	}
 	for _, cidr := range input.Networks {
 		networkID, err := id.New()
 		if err != nil {
@@ -96,7 +104,7 @@ func (s *Store) CreateProject(ctx context.Context, code string, input CreateProj
 	if err := tx.Commit(); err != nil {
 		return Project{}, err
 	}
-	return Project{ID: projectID, Code: code, Name: input.Name, NodeID: input.NodeID, OwnerName: input.OwnerName, ClientID: input.ClientID, Networks: input.Networks, CreatedAt: now, UpdatedAt: now}, nil
+	return Project{ID: projectID, Code: code, Name: input.Name, NodeID: input.NodeID, OwnerName: input.OwnerName, ClientIDs: ids, ClientID: input.ClientID, Networks: input.Networks, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (s *Store) projectNetworks(ctx context.Context, projectID string) ([]string, error) {
@@ -135,6 +143,11 @@ func (s *Store) UpdateProject(ctx context.Context, projectID string, input Updat
 	count, _ := result.RowsAffected()
 	if count != 1 {
 		return Project{}, ErrNotFound
+	}
+	if input.ClientIDs != nil {
+		if err := replaceProjectClients(ctx, tx, projectID, input.ClientIDs); err != nil {
+			return Project{}, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM project_networks WHERE project_id = ?`, projectID); err != nil {
 		return Project{}, err
@@ -208,8 +221,11 @@ SELECT
 func scanProject(scanner rowScanner) (Project, error) {
 	var project Project
 	var clientID sql.NullInt64
-	var createdAt, updatedAt string
-	if err := scanner.Scan(&project.ID, &project.Code, &project.Name, &project.NodeID, &project.OwnerName, &clientID, &createdAt, &updatedAt); err != nil {
+	var ids, createdAt, updatedAt string
+	if err := scanner.Scan(&project.ID, &project.Code, &project.Name, &project.NodeID, &project.OwnerName, &clientID, &ids, &createdAt, &updatedAt); err != nil {
+		return Project{}, err
+	}
+	if err := json.Unmarshal([]byte(ids), &project.ClientIDs); err != nil {
 		return Project{}, err
 	}
 	if clientID.Valid {
@@ -226,4 +242,21 @@ func scanProject(scanner rowScanner) (Project, error) {
 		return Project{}, err
 	}
 	return project, nil
+}
+
+func replaceProjectClients(ctx context.Context, tx *sql.Tx, project string, ids []int) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM project_clients WHERE project_id=?", project); err != nil {
+		return err
+	}
+	var first *int
+	for i, id := range ids {
+		if i == 0 {
+			first = &ids[i]
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO project_clients SELECT id,node_id,? FROM projects WHERE id=?", id, project); err != nil {
+			return err
+		}
+	}
+	_, err := tx.ExecContext(ctx, "UPDATE projects SET client_id=? WHERE id=?", first, project)
+	return err
 }

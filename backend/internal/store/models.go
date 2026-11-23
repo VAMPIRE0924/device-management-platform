@@ -33,6 +33,7 @@ type UpdateNodeInput struct {
 }
 
 type Project struct {
+	ClientIDs []int     `json:"clientIds"`
 	ID        string    `json:"id"`
 	Code      string    `json:"code"`
 	Name      string    `json:"name"`
@@ -45,6 +46,7 @@ type Project struct {
 }
 
 type CreateProjectInput struct {
+	ClientIDs []int    `json:"clientIds"`
 	Name      string   `json:"name"`
 	NodeID    string   `json:"nodeId"`
 	OwnerName string   `json:"ownerName"`
@@ -87,6 +89,7 @@ type SSHCredentialInput struct {
 }
 
 type Device struct {
+	ClientID   int              `json:"clientId"`
 	ID         string           `json:"id"`
 	ProjectID  string           `json:"projectId"`
 	Host       string           `json:"host"`
@@ -117,6 +120,7 @@ type CreateEndpointInput struct {
 }
 
 type CreateDeviceInput struct {
+	ClientID   int                   `json:"clientId"`
 	Host       string                `json:"host"`
 	Name       string                `json:"name"`
 	DeviceType string                `json:"deviceType"`
@@ -134,6 +138,7 @@ type UpdateDeviceInput struct {
 }
 
 type UpdateProjectInput struct {
+	ClientIDs []int    `json:"clientIds"`
 	Name      string   `json:"name"`
 	OwnerName string   `json:"ownerName"`
 	Networks  []string `json:"networks"`

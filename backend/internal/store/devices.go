@@ -25,7 +25,7 @@ func (s *Store) ListDevices(ctx context.Context, projectID string) ([]Device, er
 	if _, err := s.ProjectNetworks(ctx, projectID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,project_id,host,name,device_type,vendor,source,status,last_seen_at,created_at,updated_at FROM devices WHERE project_id = ? ORDER BY created_at DESC`, projectID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,project_id,client_id,host,name,device_type,vendor,source,status,last_seen_at,created_at,updated_at FROM devices WHERE project_id = ? ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +34,7 @@ func (s *Store) ListDevices(ctx context.Context, projectID string) ([]Device, er
 		var device Device
 		var lastSeenAt sql.NullString
 		var createdAt, updatedAt string
-		if err := rows.Scan(&device.ID, &device.ProjectID, &device.Host, &device.Name, &device.DeviceType, &device.Vendor, &device.Source, &device.Status, &lastSeenAt, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&device.ID, &device.ProjectID, &device.ClientID, &device.Host, &device.Name, &device.DeviceType, &device.Vendor, &device.Source, &device.Status, &lastSeenAt, &createdAt, &updatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -192,8 +192,12 @@ func insertDeviceTx(ctx context.Context, tx *sql.Tx, projectID string, input Cre
 	if err != nil {
 		return Device{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO devices(id,project_id,host,name,device_type,vendor,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-		deviceID, projectID, input.Host, input.Name, input.DeviceType, input.Vendor, input.Source, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	err = tx.QueryRowContext(ctx, "SELECT client_id FROM project_clients WHERE project_id=? AND (client_id=? OR (?=0 AND (SELECT count(*) FROM project_clients WHERE project_id=?)=1))", projectID, input.ClientID, input.ClientID, projectID).Scan(&input.ClientID)
+	if err != nil {
+		return Device{}, fmt.Errorf("请选择项目已绑定的 Client: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO devices(id,project_id,client_id,host,name,device_type,vendor,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		deviceID, projectID, input.ClientID, input.Host, input.Name, input.DeviceType, input.Vendor, input.Source, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return Device{}, fmt.Errorf("insert device: %w", err)
 	}
@@ -218,7 +222,7 @@ func insertDeviceTx(ctx context.Context, tx *sql.Tx, projectID string, input Cre
 	if err := insertAudit(ctx, tx, auditID, audit, now); err != nil {
 		return Device{}, err
 	}
-	return Device{ID: deviceID, ProjectID: projectID, Host: input.Host, Name: input.Name, DeviceType: input.DeviceType, Vendor: input.Vendor, Source: input.Source, Status: "unknown", Endpoints: endpoints, CreatedAt: now, UpdatedAt: now}, nil
+	return Device{ClientID: input.ClientID, ID: deviceID, ProjectID: projectID, Host: input.Host, Name: input.Name, DeviceType: input.DeviceType, Vendor: input.Vendor, Source: input.Source, Status: "unknown", Endpoints: endpoints, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (s *Store) deviceEndpoints(ctx context.Context, deviceID string) ([]DeviceEndpoint, error) {

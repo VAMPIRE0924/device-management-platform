@@ -226,6 +226,7 @@ type ProjectView = {
   node: string;
   clientStatus: string;
   clientId: number;
+  clientIds: number[];
   devices: number;
   web: number;
   owner: string;
@@ -237,7 +238,7 @@ const EMPTY_PROJECT: ProjectView = {
   code: "",
   node: "",
   clientStatus: "离线",
-  clientId: 0,
+  clientId: 0, clientIds: [],
   devices: 0,
   web: 0,
   owner: "",
@@ -428,7 +429,7 @@ const mapProject = (project: APIProject, allNodes: APINode[]): ProjectView => ({
   node:
     allNodes.find((node) => node.id === project.nodeId)?.name || "未分配节点",
   clientStatus: "离线",
-  clientId: project.clientId || 0,
+  clientId: project.clientId || 0, clientIds: project.clientIds || (project.clientId ? [project.clientId] : []),
   devices: 0,
   web: 0,
   owner: project.ownerName,
@@ -2212,6 +2213,7 @@ export default function Home() {
     }
     try {
       const created = await api.createDevice(activeProject.id, {
+ clientId:Number(form.get("deviceClientId")),
         host,
         name,
         deviceType: String(form.get("type") || "其他设备"),
@@ -3084,7 +3086,7 @@ export default function Home() {
                     [activeProject.code]: ignored,
                   }))
                 }
-                onStart={async (ports) => {
+                onStart={async (ports,clientId) => {
                   if (!activeProject.id) {
                     setToast("项目尚未写入后台，无法执行自动发现");
                     return;
@@ -3103,7 +3105,7 @@ export default function Home() {
                     const job = await api.createDiscoveryJob(
                       activeProject.id,
                       activeProject.networks,
-                      ports,
+                      ports,clientId,
                     );
                     setScanJobId(job.id);
                     setScanActive(true);
@@ -3204,7 +3206,7 @@ export default function Home() {
         </main>
 
         {modal === "add-device" && (
-          <AddDeviceModal onClose={() => setModal(null)} onSubmit={addDevice} />
+          <AddDeviceModal clientIds={activeProject.clientIds} onClose={() => setModal(null)} onSubmit={addDevice} />
         )}
         {modal === "manage-device" && (
           <ManageDeviceModal
@@ -3332,7 +3334,7 @@ export default function Home() {
               if (!project.id) throw new Error("项目尚未写入后台");
               const updated = await api.updateProject(project.id, {
                 name: project.name,
-                ownerName: project.owner,
+                ownerName: project.owner, clientIds: project.clientIds,
                 networks: project.networks,
               });
               const savedProject = {
@@ -3361,7 +3363,7 @@ export default function Home() {
               await loadPlatform(currentUser!);
               setView("projects");
               setToast(
-                `${created.name}项目已绑定 Client ID ${created.clientId}`,
+                `${created.name}项目已绑定 Client ${created.clientIds.join("、")}`,
               );
             }}
           />
@@ -3602,7 +3604,7 @@ function SocksView({
   const rows = tunnels.map((tunnel) => {
     const project = projects.find(
       (item) =>
-        item.nodeId === tunnel.nodeId && item.clientId === tunnel.clientId,
+        item.nodeId === tunnel.nodeId && item.clientIds.includes(tunnel.clientId),
     );
     const node = nodes.find((item) => item.id === tunnel.nodeId);
     return {
@@ -4911,7 +4913,7 @@ function ProjectAccessSummary({
       <div className="project-access-grid">
         <div className="access-fact">
           <span>关联 Client</span>
-          <strong>Client ID {project.clientId}</strong>
+          <strong>Client {project.clientIds.join("、") || "未绑定"}</strong>
           <small>
             {project.node} · {project.clientStatus}
           </small>
@@ -4922,7 +4924,7 @@ function ProjectAccessSummary({
             <HelpTip text="只供平台远程访问服务使用。普通用户和浏览器不会直接获得地址或认证信息；启停请在 SOCKS隧道页面操作。" />
           </span>
           <div>
-            <strong>Client ID {project.clientId}</strong>
+            <strong>Client {project.clientIds.join("、") || "未绑定"}</strong>
             <Tag tone={socksRunning === true ? "green" : "gray"}>
               {socksRunning === undefined ? "按需检查" : socksRunning ? "运行中" : "已关闭"}
             </Tag>
@@ -6508,11 +6510,13 @@ function DiscoveryView({
   candidates: DiscoveryResult[];
   onCandidatesChange: (items: DiscoveryResult[]) => void;
   onIgnoredChange: (items: number[]) => void;
-  onStart: (ports: APIDiscoveryPort[]) => Promise<void>;
+  onStart: (ports: APIDiscoveryPort[],clientId:number) => Promise<void>;
   onCancel: () => Promise<void>;
   onImport: (index: number, item: DiscoveryResult) => void;
 }) {
-  const [scanPorts, setScanPorts] = useState<EditableDiscoveryPort[]>(() =>
+  const [chosenClient,setChosenClient]=useState(0);
+ const clientId=project.clientIds.length===1? project.clientIds[0]:project.clientIds.includes(chosenClient)?chosenClient:0;
+ const [scanPorts, setScanPorts] = useState<EditableDiscoveryPort[]>(() =>
     DEFAULT_DISCOVERY_PORTS.map((item) => ({ ...item })),
   );
   const [configError, setConfigError] = useState("");
@@ -6667,7 +6671,7 @@ function DiscoveryView({
     setConfigError("");
     setStarting(true);
     try {
-      await onStart(ports);
+      await onStart(ports,clientId);
     } finally {
       setStarting(false);
     }
@@ -6738,12 +6742,13 @@ function DiscoveryView({
             <b>/</b>设备发现
           </div>
           <h1>内网设备发现</h1>
+<label>所属 Client<select value={clientId} disabled={active} onChange={e=>setChosenClient(Number(e.target.value))}><option value={0} disabled>请选择 Client</option>{project.clientIds.map(id=><option key={id} value={id}>#{id}</option>)}</select></label>
           <p>通过项目 SOCKS隧道对项目设置中的内网 IP 段执行协议探测</p>
         </div>
         <button
           className={`btn ${active ? "secondary" : "primary"}`}
           disabled={
-            starting || (!active && (!project.networks.length || portsDirty))
+            starting || (!active && (!clientId || !project.networks.length || portsDirty))
           }
           onClick={() =>
             active ? void onCancel() : void startConfiguredScan()
@@ -7559,6 +7564,17 @@ function ChangePasswordModal({
   );
 }
 
+function ProjectClientPicker({nodeId, ids, onChange}: {nodeId: string; ids: number[]; onChange: (ids:number[])=>void}) {
+ const [clients,setClients]=useState<APINodeClient[]>([]);
+ const [error,setError]=useState("");
+ useEffect(()=>{
+ let current=true;setClients([]);setError("");
+ if(nodeId) api.nodeClients(nodeId).then(items=>{if(current)setClients(items)}).catch(()=>{if(current)setError("读取节点 Client 失败")});
+ return ()=>{current=false};
+ },[nodeId]);
+ const title=(id:number)=>{const client=clients.find(item=>item.id===id);return "#"+id+(client?.remark?" · "+client.remark:"")};
+ return <div className="form-field full"><span>Client</span><MultiChoiceField label="Client" options={clients.map(item=>title(item.id))} selected={ids.map(title)} onChange={items=>onChange(items.map(item=>Number(item.slice(1).split(" ")[0])))}/>{error && <small>{error}</small>}</div>
+}
 function ProjectSettingsModal({
   project,
   userNames,
@@ -7572,6 +7588,7 @@ function ProjectSettingsModal({
   onSave: (project: ProjectView) => Promise<void>;
   onDelete?: () => Promise<void>;
 }) {
+  const [ids,setIds]=useState(project.clientIds);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   return (
@@ -7595,7 +7612,7 @@ function ProjectSettingsModal({
               return;
             }
             await onSave({
-              ...project,
+              ...project, clientIds:ids, clientId:ids[0] || 0,
               name: String(form.get("name") || project.name),
               owner: String(form.get("owner") || project.owner),
               networks,
@@ -7649,14 +7666,7 @@ function ProjectSettingsModal({
             接入节点
             <input className="generated-field" readOnly value={project.node} />
           </label>
-          <label>
-            Client ID
-            <input
-              className="generated-field"
-              readOnly
-              value={project.clientId}
-            />
-          </label>
+          <ProjectClientPicker nodeId={project.nodeId || ""} ids={ids} onChange={setIds}/>
           <label className="full">
             <span className="field-label-help">
               扫描内网 IP 段（可选）{" "}
@@ -8025,33 +8035,15 @@ function CreateProjectModal({
     name: string;
     ownerName: string;
     nodeId: string;
-    clientId: number;
+    clientIds: number[];
     networks: string[];
   }) => Promise<void>;
 }) {
   const [nodeId, setNodeId] = useState("");
-  const [clients, setClients] = useState<APINodeClient[]>([]);
-  const [clientIdInput, setClientIdInput] = useState("");
-  const [loadingClients, setLoadingClients] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const selectNode = async (value: string) => {
-    setNodeId(value);
-    setClients([]);
-    setClientIdInput("");
-    setError("");
-    if (!value) return;
-    setLoadingClients(true);
-    try {
-      setClients(await api.nodeClients(value));
-    } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : "读取节点 Client 失败",
-      );
-    } finally {
-      setLoadingClients(false);
-    }
-  };
+  const [ids,setIds]=useState<number[]>([]);
+  const [submitting,setSubmitting]=useState(false);
+  const [error,setError]=useState("");
+  const selectNode=(value:string)=>{setNodeId(value);setIds([])};
   return (
     <ModalFrame onClose={onClose}>
       <form
@@ -8059,7 +8051,7 @@ function CreateProjectModal({
         onSubmit={async (event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
-          const clientId = Number(form.get("clientId"));
+
           const networks = parseIPv4Networks(
             String(form.get("networks") || ""),
           );
@@ -8067,7 +8059,7 @@ function CreateProjectModal({
             setError("请选择接入节点");
             return;
           }
-          if (!Number.isInteger(clientId) || clientId < 1) {
+          if (!ids.length) {
             setError("请选择 Client 或手动输入合法 Client ID");
             return;
           }
@@ -8084,7 +8076,7 @@ function CreateProjectModal({
               name: String(form.get("name") || "").trim(),
               ownerName: String(form.get("ownerName") || ""),
               nodeId,
-              clientId,
+              clientIds:ids,
               networks,
             });
           } catch (reason) {
@@ -8152,32 +8144,7 @@ function CreateProjectModal({
                 ))}
             </UnifiedSelect>
           </label>
-          <div className="form-field full project-client-field">
-            <span className="field-label-help">
-              Client{" "}
-              <HelpTip text="可以从节点 Client 列表选择，也可以直接输入 Client ID；后台会核对同 ID 的 Client 与 SOCKS 代理。" />
-            </span>
-            <ClientCombobox
-              value={clientIdInput}
-              disabled={!nodeId || loadingClients}
-              placeholder={
-                loadingClients
-                  ? "正在读取 Client…"
-                  : nodeId
-                    ? "选择 Client 或手动输入 ID"
-                    : "请先选择接入节点"
-              }
-              onChange={(event) =>
-                setClientIdInput(event.replace(/\D/g, ""))
-              }
-              clients={clients}
-            />
-            {nodeId && !loadingClients && (
-              <small className="field-hint">
-                共 {clients.length} 个 Client · 支持选择或手动输入 ID
-              </small>
-            )}
-          </div>
+          <ProjectClientPicker nodeId={nodeId} ids={ids} onChange={setIds}/>
           <label className="full">
             <span className="field-label-help">
               扫描内网 IP 段（可选）{" "}
@@ -8210,117 +8177,13 @@ function CreateProjectModal({
           <button
             type="submit"
             className="btn primary"
-            disabled={submitting || loadingClients}
+            disabled={submitting}
           >
             {submitting ? "正在创建…" : "确认创建"}
           </button>
         </div>
       </form>
     </ModalFrame>
-  );
-}
-
-function ClientCombobox({
-  clients,
-  value,
-  placeholder,
-  disabled,
-  onChange,
-}: {
-  clients: APINodeClient[];
-  value: string;
-  placeholder: string;
-  disabled: boolean;
-  onChange: (value: string) => void;
-}) {
-  const listID = useId();
-  const rootRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const [open, setOpen] = useState(false);
-  const query = value.trim().toLowerCase();
-  const visibleClients = clients.filter((client) => {
-    if (!query) return true;
-    return (
-      String(client.id).includes(query) ||
-      (client.remark || "").toLowerCase().includes(query)
-    );
-  });
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: PointerEvent) => {
-      if (
-        !rootRef.current?.contains(event.target as Node) &&
-        !menuRef.current?.contains(event.target as Node)
-      )
-        setOpen(false);
-    };
-    document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
-  }, [open]);
-
-  return (
-    <div className="client-combobox" ref={rootRef}>
-      <input
-        ref={inputRef}
-        name="clientId"
-        type="text"
-        inputMode="numeric"
-        pattern="[1-9][0-9]*"
-        role="combobox"
-        aria-label="选择或输入 Client ID"
-        aria-autocomplete="list"
-        aria-controls={listID}
-        aria-expanded={open}
-        required
-        value={value}
-        disabled={disabled}
-        placeholder={placeholder}
-        onClick={() => setOpen(true)}
-        onFocus={() => setOpen(true)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") setOpen(false);
-          if (event.key === "ArrowDown") setOpen(true);
-        }}
-        onChange={(event) => {
-          onChange(event.currentTarget.value);
-          setOpen(true);
-        }}
-      />
-      {open && (
-        <FloatingMenu
-          anchorRef={inputRef}
-          menuRef={menuRef}
-          className="client-combobox-menu"
-          id={listID}
-        >
-          {visibleClients.length > 0 ? (
-            visibleClients.map((client) => (
-              <button
-                type="button"
-                role="option"
-                aria-selected={value === String(client.id)}
-                key={client.id}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => {
-                  onChange(String(client.id));
-                  setOpen(false);
-                }}
-              >
-                <strong>#{client.id}</strong>
-                <span>{client.remark || `Client ${client.id}`}</span>
-                <small className={client.connected ? "online" : "offline"}>
-                  {client.connected ? "已连接" : "离线"}
-                </small>
-              </button>
-            ))
-          ) : (
-            <p>没有匹配的 Client，可直接输入 ID</p>
-          )}
-        </FloatingMenu>
-      )}
-    </div>
   );
 }
 
@@ -9231,7 +9094,7 @@ function SocksDetailModal({
   if (!tunnel) return null;
   const project = projects.find(
     (item) =>
-      item.nodeId === tunnel.nodeId && item.clientId === tunnel.clientId,
+      item.nodeId === tunnel.nodeId && item.clientIds.includes(tunnel.clientId),
   );
   const node = nodes.find((item) => item.id === tunnel.nodeId);
   const title = project?.name || tunnel.clientName || `Client ${tunnel.clientId}`;
@@ -9490,9 +9353,10 @@ function DeviceModalNav({
 }
 
 function AddDeviceModal({
-  onClose,
+  clientIds,  onClose,
   onSubmit,
 }: {
+ clientIds:number[];
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -9560,6 +9424,7 @@ function AddDeviceModal({
         />
         <div className={`device-panel ${section === "basic" ? "active" : ""}`}>
           <div className="form-grid">
+            <label>所属 Client<select required name="deviceClientId" defaultValue={clientIds.length===1?clientIds[0]:""}><option value="" disabled>请选择 Client</option>{clientIds.map(id=><option key={id} value={id}>#{id}</option>)}</select></label>
             <label className="full">
               设备名称
               <input

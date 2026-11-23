@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,7 +73,7 @@ type storage interface {
 	SetPortForwardStatus(context.Context, string, string, store.AuditInput) error
 	DeletePortForward(context.Context, string, store.AuditInput) error
 	DiscoveryRoute(context.Context, string) (store.DiscoveryRoute, error)
-	CreateDiscoveryJob(context.Context, string, []string, []store.DiscoveryPort, store.AuditInput) (store.DiscoveryJob, error)
+	CreateDiscoveryJob(context.Context, string, []string, []store.DiscoveryPort, store.AuditInput, ...int) (store.DiscoveryJob, error)
 	SetDiscoveryJobState(context.Context, string, string, int) error
 	DiscoveryJob(context.Context, string) (store.DiscoveryJob, error)
 	ListDiscoveryJobs(context.Context, string) ([]store.DiscoveryJob, error)
@@ -971,6 +972,7 @@ func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
 					// Do not disclose the bound Client or CIDR scope.
 					project.OwnerName = ""
 					project.ClientID = nil
+					project.ClientIDs = nil
 					project.Networks = []string{}
 				}
 				filtered = append(filtered, project)
@@ -987,6 +989,11 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Networks = canonicalCIDRs(input.Networks)
+	if len(input.ClientIDs) > 0 {
+		input.ClientID = &input.ClientIDs[0]
+	} else if input.ClientIDs == nil && input.ClientID != nil {
+		input.ClientIDs = []int{*input.ClientID}
+	}
 	fields := validateProject(input)
 	if len(fields) > 0 {
 		writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "项目配置校验失败", fields)
@@ -998,40 +1005,7 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code := fmt.Sprintf("PRJ-%d-%s", time.Now().UTC().Year(), strings.ToUpper(strings.ReplaceAll(codeSuffix[:8], "-", "")))
-	if s.nodes == nil {
-		writeError(w, r, http.StatusServiceUnavailable, "node_adapter_unavailable", "节点适配器尚未启用", nil)
-		return
-	}
-	clients, err := s.nodes.ListClients(r.Context(), input.NodeID)
-	if err != nil {
-		writeError(w, r, http.StatusBadGateway, "client_lookup_failed", "无法校验所选 Client", nil)
-		return
-	}
-	clientFound := false
-	for _, client := range clients {
-		if input.ClientID != nil && client.ID == *input.ClientID {
-			clientFound = true
-			break
-		}
-	}
-	if !clientFound {
-		writeError(w, r, http.StatusUnprocessableEntity, "client_not_found", "所选 Client 不存在于当前节点", map[string]string{"clientId": "Client 不存在"})
-		return
-	}
-	tunnels, err := s.nodes.ListManagedTunnels(r.Context(), input.NodeID)
-	if err != nil {
-		writeError(w, r, http.StatusBadGateway, "tunnel_lookup_failed", "无法校验所选 Client 对应的 SOCKS 代理", nil)
-		return
-	}
-	tunnelFound := false
-	for _, tunnel := range tunnels {
-		if input.ClientID != nil && tunnel.ID == *input.ClientID && tunnel.ClientID == *input.ClientID {
-			tunnelFound = true
-			break
-		}
-	}
-	if !tunnelFound {
-		writeError(w, r, http.StatusUnprocessableEntity, "tunnel_not_found", "所选 Client 没有同 ID 的 SOCKS 代理", map[string]string{"clientId": "Client ID 与 SOCKS 代理 ID 不一致或代理不存在"})
+	if !s.validateClientBindings(w, r, input.NodeID, input.ClientIDs) {
 		return
 	}
 	project, err := s.store.CreateProject(r.Context(), code, input, auditFromRequest(r, "project.create", "project"))
@@ -1065,6 +1039,22 @@ func (s *server) updateProject(w http.ResponseWriter, r *http.Request) {
 	if len(fields) > 0 {
 		writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "项目设置校验失败", fields)
 		return
+	}
+	if input.ClientIDs != nil {
+		old, err := s.store.ProjectByID(r.Context(), projectID)
+		if err != nil {
+			writeError(w, r, 404, "project_not_found", "项目不存在", nil)
+			return
+		}
+		var additions []int
+		for _, id := range input.ClientIDs {
+			if !slices.Contains(old.ClientIDs, id) {
+				additions = append(additions, id)
+			}
+		}
+		if len(additions) > 0 && !s.validateClientBindings(w, r, old.NodeID, additions) {
+			return
+		}
 	}
 	project, err := s.store.UpdateProject(r.Context(), projectID, input, auditFromRequest(r, "project.update", "project"))
 	if err != nil {
@@ -1537,6 +1527,12 @@ func (s *server) verifyDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "gateway_not_bound", "项目尚未绑定可用 SOCKS隧道", nil)
 		return
 	}
+	p, err := s.store.ProjectByID(r.Context(), projectID)
+	if err != nil || !slices.Contains(p.ClientIDs, device.ClientID) {
+		writeError(w, r, 409, "client_unbound", "设备所属 Client 已解绑", nil)
+		return
+	}
+	route.ClientID = device.ClientID
 	ports := make([]store.DiscoveryPort, 0, len(device.Endpoints))
 	for _, endpoint := range device.Endpoints {
 		ports = append(ports, store.DiscoveryPort{Name: endpoint.Name, Protocol: endpoint.Protocol, Port: endpoint.TargetPort})
@@ -1971,6 +1967,7 @@ func (s *server) deletePortForward(w http.ResponseWriter, r *http.Request) {
 }
 
 type createDiscoveryJobRequest struct {
+	ClientID int                   `json:"clientId"`
 	Networks []string              `json:"networks"`
 	Ports    []store.DiscoveryPort `json:"ports"`
 }
@@ -2032,6 +2029,19 @@ func (s *server) createDiscoveryJob(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	p, err := s.store.ProjectByID(r.Context(), projectID)
+	if err != nil {
+		writeError(w, r, 404, "project_not_found", "项目不存在", nil)
+		return
+	}
+	if input.ClientID == 0 && len(p.ClientIDs) == 1 {
+		input.ClientID = p.ClientIDs[0]
+	}
+	if !slices.Contains(p.ClientIDs, input.ClientID) {
+		writeError(w, r, 422, "client_unbound", "请选择已绑定的 Client", nil)
+		return
+	}
+	route.ClientID = input.ClientID
 	if len(input.Networks) == 0 {
 		input.Networks = append([]string(nil), route.Networks...)
 	}
@@ -2048,7 +2058,7 @@ func (s *server) createDiscoveryJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnprocessableEntity, "validation_failed", "自动发现配置校验失败", fields)
 		return
 	}
-	job, err := s.store.CreateDiscoveryJob(r.Context(), projectID, input.Networks, input.Ports, auditFromRequest(r, "discovery.create", "discovery_job"))
+	job, err := s.store.CreateDiscoveryJob(r.Context(), projectID, input.Networks, input.Ports, auditFromRequest(r, "discovery.create", "discovery_job"), route.ClientID)
 	if err != nil {
 		writeError(w, r, http.StatusConflict, "discovery_create_failed", "无法创建自动发现任务", nil)
 		return
@@ -3841,4 +3851,46 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string, fields map[string]string) {
 	writeJSON(w, status, errorBody{Error: apiError{Code: code, Message: message, Fields: fields, RequestID: requestID(r)}})
+}
+
+func (s *server) validateClientBindings(w http.ResponseWriter, r *http.Request, node string, ids []int) bool {
+	if s.nodes == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "node_adapter_unavailable", "节点适配器尚未启用", nil)
+		return false
+	}
+	clients, err := s.nodes.ListClients(r.Context(), node)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "client_lookup_failed", "无法校验所选 Client", nil)
+		return false
+	}
+	tunnels, err := s.nodes.ListManagedTunnels(r.Context(), node)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "tunnel_lookup_failed", "无法校验所选 Client 对应的 SOCKS 代理", nil)
+		return false
+	}
+	for _, id := range ids {
+		clientFound := false
+		for _, client := range clients {
+			if client.ID == id {
+				clientFound = true
+				break
+			}
+		}
+		if !clientFound {
+			writeError(w, r, http.StatusUnprocessableEntity, "client_not_found", "所选 Client 不存在于当前节点", map[string]string{"clientId": "Client 不存在"})
+			return false
+		}
+		tunnelFound := false
+		for _, tunnel := range tunnels {
+			if tunnel.ID == id && tunnel.ClientID == id {
+				tunnelFound = true
+				break
+			}
+		}
+		if !tunnelFound {
+			writeError(w, r, http.StatusUnprocessableEntity, "tunnel_not_found", "所选 Client 没有同 ID 的 SOCKS 代理", map[string]string{"clientId": "Client ID 与 SOCKS 代理 ID 不一致或代理不存在"})
+			return false
+		}
+	}
+	return true
 }
