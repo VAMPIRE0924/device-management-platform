@@ -487,3 +487,55 @@ func TestRestoreDatabaseRetainsSafetyBackup(t *testing.T) {
 		t.Fatalf("restored nodes = %#v, err=%v", nodes, err)
 	}
 }
+
+func TestRemoveClientPreservesOverlappingDeviceAddresses(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "endpoint-edit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	node, err := db.CreateNode(ctx, CreateNodeInput{Name: "节点", APIURL: "https://node.test", TLSServerName: "node.test", CredentialRef: "env://NODE_TOKEN", PortStart: 24000, PortEnd: 24999}, AuditInput{Actor: "test", Action: "node.create", ResourceType: "node", Result: "success"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	audit := AuditInput{Actor: "test", Action: "test", ResourceType: "project", Result: "success"}
+	project, err := db.CreateProject(ctx, "MULTI", CreateProjectInput{Name: "双内网", NodeID: node.ID, OwnerName: "test", ClientIDs: []int{3, 19}}, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var endpoints []string
+	for _, client := range []int{3, 19} {
+		d, err := db.CreateDevice(ctx, project.ID, CreateDeviceInput{ClientID: client, Name: "路由器", Host: "10.0.0.1", Source: "manual", Endpoints: []CreateEndpointInput{{Name: "web", Protocol: "http", TargetPort: 80}}}, audit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		endpoints = append(endpoints, d.Endpoints[0].ID)
+	}
+	for _, ids := range [][]int{{19}, {}, {3, 19}} {
+		_, err = db.UpdateProject(ctx, project.ID, UpdateProjectInput{Name: "双内网", OwnerName: "test", ClientIDs: ids}, audit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		devices, err := db.ListDevices(ctx, project.ID)
+		if err != nil || len(devices) != 2 {
+			t.Fatalf("devices after edit: %v, %v", devices, err)
+		}
+		for i, id := range []int{3, 19} {
+			r, err := db.EndpointRoute(ctx, endpoints[i])
+			want := 0
+			for _, bound := range ids {
+				if bound == id {
+					want = id
+				}
+			}
+			if err != nil || r.ClientID != want {
+				t.Fatalf("client %d after binding %v: got %d, %v", id, ids, r.ClientID, err)
+			}
+		}
+	}
+}

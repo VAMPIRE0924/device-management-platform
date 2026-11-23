@@ -989,6 +989,9 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Networks = canonicalCIDRs(input.Networks)
+	if input.ClientIDs != nil && len(input.ClientIDs) == 0 {
+		input.ClientID = nil
+	}
 	if len(input.ClientIDs) > 0 {
 		input.ClientID = &input.ClientIDs[0]
 	} else if input.ClientIDs == nil && input.ClientID != nil {
@@ -1160,6 +1163,7 @@ func (s *server) listDevices(w http.ResponseWriter, r *http.Request) {
 			if len(endpoints) == 0 {
 				continue
 			}
+			device.ClientID = 0
 			device.Host = ""
 			device.Endpoints = endpoints
 			filtered = append(filtered, device)
@@ -1648,7 +1652,7 @@ func (s *server) createAccessSessionForRequest(w http.ResponseWriter, r *http.Re
 		return createdAccessSession{}, false
 	}
 	if route.ClientID < 1 {
-		writeError(w, r, http.StatusConflict, "gateway_not_bound", "项目尚未绑定可用 Client", nil)
+		writeError(w, r, http.StatusConflict, "gateway_not_bound", "设备所属 Client 已解绑，请在项目设置中重新绑定", nil)
 		return createdAccessSession{}, false
 	}
 	if err := s.nodes.SetManagedTunnel(r.Context(), route.NodeID, route.ClientID, true); err != nil {

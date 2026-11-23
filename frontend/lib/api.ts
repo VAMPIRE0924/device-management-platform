@@ -373,6 +373,7 @@ export type APIEndpoint = {
 };
 
 export type APIDevice = {
+  clientId: number;
   id: string;
   projectId: string;
   host: string;

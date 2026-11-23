@@ -153,6 +153,7 @@ function roleViews(role: APIUser["role"]): Set<View> {
 }
 
 type Device = {
+  clientId?: number;
   id: number | string;
   projectCode: string;
   name: string;
@@ -483,6 +484,7 @@ const mapDevice = (device: APIDevice, project: ProjectView): Device => {
   }));
   return {
     id: device.id,
+    clientId: device.clientId,
     projectCode: project.code,
     name: device.name,
     host: device.host,
@@ -5367,7 +5369,7 @@ function Workspace({
                         </div>
                       </td>
                       <td>
-                        <code>{device.host}</code>
+                        <code>{device.host}</code><small>Client #{device.clientId}</small>
                       </td>
                       <td>
                         <Tag>{device.type}</Tag>
@@ -7630,7 +7632,7 @@ function ProjectSettingsModal({
         <div className="form-head">
           <div>
             <h2>项目设置</h2>
-            <p>{project.code} · 修改项目名称与负责人</p>
+            <p>{project.code} · 修改项目名称、负责人和 Client</p>
           </div>
           <button type="button" aria-label="关闭" onClick={onClose}>
             ×
@@ -8060,7 +8062,7 @@ function CreateProjectModal({
             return;
           }
           if (!ids.length) {
-            setError("请选择 Client 或手动输入合法 Client ID");
+            setError("请至少选择一个 Client");
             return;
           }
           if (!networks.every(isValidIPv4Network)) {
@@ -9352,6 +9354,15 @@ function DeviceModalNav({
   );
 }
 
+function DeviceClientField({ clientIds }: { clientIds: number[] }) {
+  return <label>所属 Client
+    <select required name="deviceClientId" defaultValue={clientIds.length === 1 ? clientIds[0] : ""}>
+      <option value="" disabled>请选择 Client</option>
+      {clientIds.map(id => <option key={id} value={id}>#{id}</option>)}
+    </select>
+  </label>;
+}
+
 function AddDeviceModal({
   clientIds,  onClose,
   onSubmit,
@@ -9424,7 +9435,7 @@ function AddDeviceModal({
         />
         <div className={`device-panel ${section === "basic" ? "active" : ""}`}>
           <div className="form-grid">
-            <label>所属 Client<select required name="deviceClientId" defaultValue={clientIds.length===1?clientIds[0]:""}><option value="" disabled>请选择 Client</option>{clientIds.map(id=><option key={id} value={id}>#{id}</option>)}</select></label>
+            <DeviceClientField clientIds={clientIds} />
             <label className="full">
               设备名称
               <input
@@ -10267,7 +10278,9 @@ function ImportDevicesModal({
           setSubmitting(true);
           setError("");
           try {
-            const file = new FormData(event.currentTarget).get("file");
+            const form = new FormData(event.currentTarget);
+            const clientId = Number(form.get("deviceClientId"));
+            const file = form.get("file");
             if (!(file instanceof File)) throw new Error("请选择 CSV 文件");
             const lines = (await file.text())
               .replace(/^\uFEFF/, "")
@@ -10349,7 +10362,7 @@ function ImportDevicesModal({
               });
               grouped.set(row.host, device);
             }
-            await onImport([...grouped.values()]);
+            await onImport([...grouped.values()].map(device => ({ ...device, clientId })));
           } catch (importError) {
             setError(
               importError instanceof Error
@@ -10372,6 +10385,7 @@ function ImportDevicesModal({
         <div className="route-note">
           <span>⇧</span>
           <div>
+            <DeviceClientField clientIds={project.clientIds} />
             <strong>CSV 字段</strong>
             <small>
               name, host, type, vendor, service_name, protocol, port；同一 host
