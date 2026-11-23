@@ -7566,15 +7566,22 @@ function ChangePasswordModal({
   );
 }
 
-function ProjectClientPicker({ nodeId, ids, onChange }: {
+const clientIdSeparator = /[\s,，、;；]+/;
+
+function parseClientIds(value: string): number[] | null {
+  const tokens = value.split(clientIdSeparator).filter(Boolean);
+  if (tokens.some(token => !/^[1-9]\d*$/.test(token) || !Number.isSafeInteger(Number(token)))) return null;
+  return [...new Set(tokens.map(Number))];
+}
+
+function ProjectClientPicker({ nodeId, value, onChange }: {
   nodeId: string;
-  ids: number[];
-  onChange: (ids: number[]) => void;
+  value: string;
+  onChange: (value: string) => void;
 }) {
   const [clients, setClients] = useState<APINodeClient[]>([]);
   const [loadError, setLoadError] = useState("");
-  const [draft, setDraft] = useState("");
-
+  const [filtering, setFiltering] = useState(false);
   useEffect(() => {
     let current = true;
     if (nodeId) {
@@ -7585,24 +7592,17 @@ function ProjectClientPicker({ nodeId, ids, onChange }: {
     return () => { current = false; };
   }, [nodeId]);
 
-  function title(id: number) {
-    const client = clients.find(item => item.id === id);
-    return "#" + id + (client?.remark ? " · " + client.remark : "");
-  }
-
   const listID = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
-  const query = draft.trim().toLowerCase();
-  const visibleClients = clients.filter((client) => {
-    if (!query) return true;
-    return (
-      String(client.id).includes(query) ||
-      (client.remark || "").toLowerCase().includes(query)
-    );
-  });
+  const parts = value.split(clientIdSeparator);
+  const query = filtering ? (parts.at(-1) || "").toLowerCase() : "";
+  const selected = parseClientIds(value) || [];
+  const visibleClients = clients.filter(client =>
+    String(client.id).includes(query) || (client.remark || "").toLowerCase().includes(query)
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -7617,10 +7617,15 @@ function ProjectClientPicker({ nodeId, ids, onChange }: {
     return () => document.removeEventListener("pointerdown", close);
   }, [open]);
 
-  function addId(id: number) {
-    if (!ids.includes(id)) onChange([...ids, id]);
-    setDraft("");
-    setOpen(false);
+  function selectClient(id: number) {
+    const previous = query ? parseClientIds(parts.slice(0, -1).join(",")) : selected;
+    if (!previous) return;
+    const next = !query && previous.includes(id)
+      ? previous.filter(item => item !== id)
+      : [...new Set([...previous, id])];
+    onChange(next.join(", "));
+    setFiltering(false);
+    inputRef.current?.focus();
   }
 
   return (
@@ -7629,34 +7634,39 @@ function ProjectClientPicker({ nodeId, ids, onChange }: {
       <div className="client-combobox" ref={rootRef}>
       <input
         ref={inputRef}
-        name="pendingClientId"
+        name="clientIds"
         type="text"
-        inputMode="numeric"
-        pattern="[1-9][0-9]*"
+        inputMode="text"
         role="combobox"
         aria-label="选择或输入 Client ID"
         aria-autocomplete="list"
         aria-controls={listID}
         aria-expanded={open}
-        value={draft}
+        value={value}
         disabled={!nodeId}
         placeholder={nodeId ? "选择 Client 或手动输入 ID" : "请先选择接入节点"}
         onClick={() => setOpen(true)}
-        onFocus={() => setOpen(true)}
+        onFocus={() => { setFiltering(false); setOpen(true); }}
         onKeyDown={(event) => {
           if (event.key === "Enter" && !event.nativeEvent.isComposing) {
             event.preventDefault();
-            if (/^[1-9][0-9]*$/.test(query) && Number.isSafeInteger(Number(query))) {
-              addId(Number(query));
+            if (parseClientIds(value)?.length) {
+              onChange(value.trimEnd().replace(/[,，、;；]+$/, "") + ", ");
+              setFiltering(false);
+              setOpen(true);
             } else if (visibleClients.length === 1) {
-              addId(visibleClients[0].id);
+              selectClient(visibleClients[0].id);
             }
           }
-          if (event.key === "Escape") setOpen(false);
+          if (event.key === "Escape" && open) {
+            event.stopPropagation();
+            setOpen(false);
+          }
           if (event.key === "ArrowDown") setOpen(true);
         }}
         onChange={(event) => {
-          setDraft(event.currentTarget.value);
+          onChange(event.currentTarget.value);
+          setFiltering(true);
           setOpen(true);
         }}
       />
@@ -7672,11 +7682,11 @@ function ProjectClientPicker({ nodeId, ids, onChange }: {
               <button
                 type="button"
                 role="option"
-                aria-selected={ids.includes(client.id)}
+                aria-selected={selected.includes(client.id)}
                 key={client.id}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => {
-                  addId(client.id);
+                  selectClient(client.id);
                 }}
               >
                 <strong>#{client.id}</strong>
@@ -7692,16 +7702,7 @@ function ProjectClientPicker({ nodeId, ids, onChange }: {
         </FloatingMenu>
       )}
       </div>
-      {ids.length > 0 && (
-        <div className="multi-choice-tags" aria-label="已选 Client">
-          {ids.map(id => (
-            <span key={id}>
-              {title(id)}
-              <button type="button" aria-label={`移除 Client ${id}`} onClick={() => onChange(ids.filter(item => item !== id))}>×</button>
-            </span>
-          ))}
-        </div>
-      )}
+      <small className="field-hint">可手动输入 Client ID，多个 ID 用逗号分隔。</small>
       {loadError && <small>{loadError}</small>}
     </div>
   );
@@ -7720,7 +7721,7 @@ function ProjectSettingsModal({
   onSave: (project: ProjectView) => Promise<void>;
   onDelete?: () => Promise<void>;
 }) {
-  const [ids,setIds]=useState(project.clientIds);
+  const [ids,setIds]=useState(project.clientIds.join(", "));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   return (
@@ -7730,12 +7731,11 @@ function ProjectSettingsModal({
         onSubmit={async (event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
-          const pending = String(form.get("pendingClientId") || "").trim();
-          if (pending && (!/^[1-9][0-9]*$/.test(pending) || !Number.isSafeInteger(Number(pending)))) {
-            setError("请输入有效的 Client ID");
+          const selectedIds = parseClientIds(ids);
+          if (!selectedIds) {
+            setError("Client ID 必须为正整数，多个 ID 用逗号分隔");
             return;
           }
-          const selectedIds = pending ? [...new Set([...ids, Number(pending)])] : ids;
 
           setSubmitting(true);
           setError("");
@@ -7805,7 +7805,7 @@ function ProjectSettingsModal({
             接入节点
             <input className="generated-field" readOnly value={project.node} />
           </label>
-          <ProjectClientPicker nodeId={project.nodeId || ""} ids={ids} onChange={setIds}/>
+          <ProjectClientPicker nodeId={project.nodeId || ""} value={ids} onChange={setIds}/>
           <label className="full">
             <span className="field-label-help">
               扫描内网 IP 段（可选）{" "}
@@ -8179,10 +8179,10 @@ function CreateProjectModal({
   }) => Promise<void>;
 }) {
   const [nodeId, setNodeId] = useState("");
-  const [ids,setIds]=useState<number[]>([]);
+  const [ids,setIds]=useState("");
   const [submitting,setSubmitting]=useState(false);
   const [error,setError]=useState("");
-  const selectNode=(value:string)=>{setNodeId(value);setIds([])};
+  const selectNode=(value:string)=>{setNodeId(value);setIds("")};
   return (
     <ModalFrame onClose={onClose}>
       <form
@@ -8190,12 +8190,11 @@ function CreateProjectModal({
         onSubmit={async (event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
-          const pending = String(form.get("pendingClientId") || "").trim();
-          if (pending && (!/^[1-9][0-9]*$/.test(pending) || !Number.isSafeInteger(Number(pending)))) {
-            setError("请输入有效的 Client ID");
+          const selectedIds = parseClientIds(ids);
+          if (!selectedIds) {
+            setError("Client ID 必须为正整数，多个 ID 用逗号分隔");
             return;
           }
-          const selectedIds = pending ? [...new Set([...ids, Number(pending)])] : ids;
 
 
           const networks = parseIPv4Networks(
@@ -8290,7 +8289,7 @@ function CreateProjectModal({
                 ))}
             </UnifiedSelect>
           </label>
-          <ProjectClientPicker key={nodeId} nodeId={nodeId} ids={ids} onChange={setIds}/>
+          <ProjectClientPicker key={nodeId} nodeId={nodeId} value={ids} onChange={setIds}/>
           <label className="full">
             <span className="field-label-help">
               扫描内网 IP 段（可选）{" "}
