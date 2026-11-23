@@ -6744,7 +6744,7 @@ function DiscoveryView({
             <b>/</b>设备发现
           </div>
           <h1>内网设备发现</h1>
-<label>所属 Client<select value={clientId} disabled={active} onChange={e=>setChosenClient(Number(e.target.value))}><option value={0} disabled>请选择 Client</option>{project.clientIds.map(id=><option key={id} value={id}>#{id}</option>)}</select></label>
+<label>所属 Client<UnifiedSelect value={clientId} disabled={active} onChange={e=>setChosenClient(Number(e.target.value))}><option value={0} disabled>请选择 Client</option>{project.clientIds.map(id=><option key={id} value={id}>#{id}</option>)}</UnifiedSelect></label>
           <p>通过项目 SOCKS隧道对项目设置中的内网 IP 段执行协议探测</p>
         </div>
         <button
@@ -9356,10 +9356,10 @@ function DeviceModalNav({
 
 function DeviceClientField({ clientIds }: { clientIds: number[] }) {
   return <label>所属 Client
-    <select required name="deviceClientId" defaultValue={clientIds.length === 1 ? clientIds[0] : ""}>
+    <UnifiedSelect required name="deviceClientId" defaultValue={clientIds.length === 1 ? clientIds[0] : ""}>
       <option value="" disabled>请选择 Client</option>
       {clientIds.map(id => <option key={id} value={id}>#{id}</option>)}
-    </select>
+    </UnifiedSelect>
   </label>;
 }
 
