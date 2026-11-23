@@ -7566,17 +7566,75 @@ function ChangePasswordModal({
   );
 }
 
-function ProjectClientPicker({nodeId, ids, onChange}: {nodeId: string; ids: number[]; onChange: (ids:number[])=>void}) {
- const [clients,setClients]=useState<APINodeClient[]>([]);
- const [error,setError]=useState("");
- useEffect(()=>{
- let current=true;
- if(nodeId) api.nodeClients(nodeId).then(items=>{if(current)setClients(items)}).catch(()=>{if(current)setError("读取节点 Client 失败")});
- return ()=>{current=false};
- },[nodeId]);
- const title=(id:number)=>{const client=clients.find(item=>item.id===id);return "#"+id+(client?.remark?" · "+client.remark:"")};
- return <div className="form-field full"><span>Client</span><MultiChoiceField label="Client" options={clients.map(item=>title(item.id))} selected={ids.map(title)} onChange={items=>onChange(items.map(item=>Number(item.slice(1).split(" ")[0])))}/>{error && <small>{error}</small>}</div>
+function ProjectClientPicker({ nodeId, ids, onChange }: {
+  nodeId: string;
+  ids: number[];
+  onChange: (ids: number[]) => void;
+}) {
+  const [clients, setClients] = useState<APINodeClient[]>([]);
+  const [loadError, setLoadError] = useState("");
+  const [draft, setDraft] = useState("");
+  const [inputError, setInputError] = useState("");
+
+  useEffect(() => {
+    let current = true;
+    if (nodeId) {
+      api.nodeClients(nodeId)
+        .then(items => { if (current) setClients(items); })
+        .catch(() => { if (current) setLoadError("读取节点 Client 失败"); });
+    }
+    return () => { current = false; };
+  }, [nodeId]);
+
+  function title(id: number) {
+    const client = clients.find(item => item.id === id);
+    return "#" + id + (client?.remark ? " · " + client.remark : "");
+  }
+
+  function addId() {
+    const value = draft.trim();
+    const id = Number(value);
+    if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(id)) {
+      setInputError("请输入正整数 Client ID");
+      return;
+    }
+    if (!ids.includes(id)) onChange([...ids, id]);
+    setDraft("");
+    setInputError("");
+  }
+
+  return (
+    <div className="form-field full">
+      <span>Client</span>
+      <MultiChoiceField
+        label="Client"
+        options={clients.map(item => title(item.id))}
+        selected={ids.map(title)}
+        onChange={items => onChange(items.map(item => Number(item.slice(1).split(" ")[0])))}
+      />
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          aria-label="手动输入 Client ID"
+          placeholder="手动输入 Client ID，回车添加"
+          disabled={!nodeId}
+          inputMode="numeric"
+          value={draft}
+          onChange={event => { setDraft(event.target.value); setInputError(""); }}
+          onKeyDown={event => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              addId();
+            }
+          }}
+        />
+        <button type="button" className="btn secondary" disabled={!nodeId || !draft.trim()} onClick={addId}>添加</button>
+      </div>
+      {inputError && <small role="alert">{inputError}</small>}
+      {loadError && <small>{loadError}</small>}
+    </div>
+  );
 }
+
 function ProjectSettingsModal({
   project,
   userNames,
